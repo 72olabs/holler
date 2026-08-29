@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "build/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: scripts/build.sh
+      - run: HOLLER_VERSION=0.0.0-ci scripts/package-release.sh

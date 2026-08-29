@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "holler": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/holler",
+      "args": ["mcp", "--harness", "claude"]
+    }
+  }
+}

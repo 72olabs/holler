@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${HOLLER_BIN:-}" ]; then
+  exec "${HOLLER_BIN}" "$@"
+fi
+
+state_dir=${HOLLER_HOME:-}
+if [ -z "${state_dir}" ] && [ -n "${HOME:-}" ]; then
+  state_dir=${HOME}/.holler
+fi
+binary_file=${state_dir:+${state_dir}/bin-path}
+if [ -n "${binary_file}" ] && [ -f "${binary_file}" ]; then
+  IFS= read -r holler_binary < "${binary_file}" || holler_binary=
+  if [ -n "${holler_binary}" ] && [ -x "${holler_binary}" ]; then
+    exec "${holler_binary}" "$@"
+  fi
+fi
+
+if command -v holler >/dev/null 2>&1; then
+  exec holler "$@"
+fi
+
+echo "holler executable not found; install it or set HOLLER_BIN" >&2
+case "${1:-}" in
+  hook|session-end|monitor) exit 0 ;;
+  *) exit 2 ;;
+esac

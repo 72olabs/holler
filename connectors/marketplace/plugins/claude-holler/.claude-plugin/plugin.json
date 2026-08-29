@@ -1,0 +1,52 @@
+{
+  "name": "holler",
+  "version": "0.1.0",
+  "description": "Durable local communication between Claude Code and Codex agents.",
+  "author": {"name": "72o Labs"},
+  "userConfig": {
+    "actor": {
+      "type": "string",
+      "title": "Holler actor",
+      "description": "Stable actor name used to address this Claude participant.",
+      "required": true
+    },
+    "role": {
+      "type": "string",
+      "title": "Agent role",
+      "description": "Optional role label included on outbound messages."
+    },
+    "peer": {
+      "type": "string",
+      "title": "Default peer",
+      "description": "Optional actor used when a send does not name a recipient."
+    },
+    "project": {
+      "type": "string",
+      "title": "Holler project",
+      "description": "Durable message partition used by this participant.",
+      "default": "default"
+    },
+    "channel": {
+      "type": "string",
+      "title": "Holler channel",
+      "description": "Default Holler channel within the project.",
+      "default": "direct"
+    },
+    "socket": {
+      "type": "string",
+      "title": "Holler socket",
+      "description": "Optional hollerd Unix socket path; the standard user socket is used when empty."
+    },
+    "attention_mode": {
+      "type": "string",
+      "title": "Attention adapter",
+      "description": "Choose hook-long-poll or startup-only.",
+      "default": "hook-long-poll"
+    },
+    "binary": {
+      "type": "string",
+      "title": "Holler executable",
+      "description": "Absolute holler executable recorded by setup for service-safe plugin startup."
+    }
+  }
+}

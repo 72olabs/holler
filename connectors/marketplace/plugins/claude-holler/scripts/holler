@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+if [ -z "${HOLLER_ACTOR:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_ACTOR:-}" ]; then
+  export HOLLER_ACTOR="${CLAUDE_PLUGIN_OPTION_ACTOR}"
+fi
+if [ -z "${HOLLER_ROLE:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_ROLE:-}" ]; then
+  export HOLLER_ROLE="${CLAUDE_PLUGIN_OPTION_ROLE}"
+fi
+if [ -z "${HOLLER_PEER:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_PEER:-}" ]; then
+  export HOLLER_PEER="${CLAUDE_PLUGIN_OPTION_PEER}"
+fi
+if [ -z "${HOLLER_PROJECT:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_PROJECT:-}" ]; then
+  export HOLLER_PROJECT="${CLAUDE_PLUGIN_OPTION_PROJECT}"
+fi
+if [ -z "${HOLLER_CHANNEL:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_CHANNEL:-}" ]; then
+  export HOLLER_CHANNEL="${CLAUDE_PLUGIN_OPTION_CHANNEL}"
+fi
+if [ -z "${HOLLER_SOCKET:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_SOCKET:-}" ]; then
+  export HOLLER_SOCKET="${CLAUDE_PLUGIN_OPTION_SOCKET}"
+fi
+if [ -z "${HOLLER_CLAUDE_ATTENTION:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_ATTENTION_MODE:-}" ]; then
+  export HOLLER_CLAUDE_ATTENTION="${CLAUDE_PLUGIN_OPTION_ATTENTION_MODE}"
+fi
+if [ -z "${HOLLER_BIN:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_BINARY:-}" ]; then
+  export HOLLER_BIN="${CLAUDE_PLUGIN_OPTION_BINARY}"
+fi
+
+if [ -n "${HOLLER_BIN:-}" ]; then
+  exec "${HOLLER_BIN}" "$@"
+fi
+
+state_dir=${HOLLER_HOME:-}
+if [ -z "${state_dir}" ] && [ -n "${HOME:-}" ]; then
+  state_dir=${HOME}/.holler
+fi
+binary_file=${state_dir:+${state_dir}/bin-path}
+if [ -n "${binary_file}" ] && [ -f "${binary_file}" ]; then
+  IFS= read -r holler_binary < "${binary_file}" || holler_binary=
+  if [ -n "${holler_binary}" ] && [ -x "${holler_binary}" ]; then
+    exec "${holler_binary}" "$@"
+  fi
+fi
+
+if command -v holler >/dev/null 2>&1; then
+  exec holler "$@"
+fi
+
+echo "holler executable not found; install it or set HOLLER_BIN" >&2
+# Hooks must never block Claude merely because Holler is not installed or
+# available in this process environment. Setup/doctor report the degradation.
+exit 0

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "mcp__plugin_holler_holler__bus_send",
+      "mcp__plugin_holler_holler__bus_check_inbox",
+      "mcp__plugin_holler_holler__bus_claim",
+      "mcp__plugin_holler_holler__bus_inbox",
+      "mcp__plugin_holler_holler__bus_ack",
+      "mcp__plugin_holler_holler__bus_extend",
+      "mcp__plugin_holler_holler__bus_nack",
+      "mcp__plugin_holler_holler__bus_status"
+    ]
+  }
+}

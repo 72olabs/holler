@@ -1,0 +1,77 @@
+# Internal product work and local experiments. Shipping connector packages
+# belong in connectors/marketplace, never under these paths.
+/.internal/
+/experiments/
+/plans/
+/notes/
+/.runs/
+
+# Holler runtime state and diagnostics.
+/.holler/
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+*.db-shm
+*.db-wal
+*.sock
+*.pid
+*.log
+*.jsonl
+
+# Credentials and machine-local configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.bak
+*.orig
+*.rej
+*.local
+.netrc
+.npmrc
+.pypirc
+.claude/settings.local.json
+
+# Build, test, and package output.
+/.build/
+/dist/
+/holler
+coverage.out
+coverage.*
+*.coverprofile
+*.prof
+*.test
+*.tmp
+*.dSYM/
+*.tar.gz
+*.zip
+/tmp/
+/.cache/
+
+# Language and tool caches.
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+node_modules/
+.coverage
+htmlcov/
+
+# Editor and operating-system files.
+.idea/
+.vscode/
+.fleet/
+.DS_Store
+*.swp
+*.swo
+*~

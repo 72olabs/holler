@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "holler": {
+      "command": "./scripts/holler",
+      "args": ["mcp", "--harness", "codex"],
+      "cwd": ".",
+      "enabled": true,
+      "env_vars": [
+        "HOLLER_BIN",
+        "HOLLER_SOCKET",
+        "HOLLER_ACTOR",
+        "HOLLER_RUN",
+        "HOLLER_ROLE",
+        "HOLLER_PEER",
+        "HOLLER_PROJECT",
+        "HOLLER_CHANNEL",
+        "HOLLER_CODEX_BIN",
+        "PATH"
+      ],
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 10
+    }
+  }
+}

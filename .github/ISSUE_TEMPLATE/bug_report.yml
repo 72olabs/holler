@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a reproducible Holler daemon, API, CLI, or delivery problem.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing the alpha. Remove message bodies, credentials, absolute private paths, and other sensitive data before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Holler version
+      description: Include the tag and clean build identity reported by the binary or daemon.
+      placeholder: v0.1.0-alpha.1
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation method
+      options:
+        - Homebrew
+        - GitHub release archive
+        - Source tree
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15.6 arm64
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Use the smallest sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include relevant doctor/status output. Do not include message bodies, credentials, home-directory paths, or private prompts.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed secrets, message bodies, private prompts, and identifying local paths.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

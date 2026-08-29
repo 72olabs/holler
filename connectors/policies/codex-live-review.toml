@@ -1,0 +1,36 @@
+# Operator-owned policy example for the Holler Codex plugin. Merge this into
+# a user or managed Codex config layer; repository files must not self-authorize.
+[plugins."holler@holler".mcp_servers.holler]
+enabled = true
+required = true
+default_tools_approval_mode = "approve"
+enabled_tools = [
+  "bus_send",
+  "bus_check_inbox",
+  "bus_claim",
+  "bus_inbox",
+  "bus_ack",
+  "bus_extend",
+  "bus_nack",
+  "bus_status",
+]
+
+# Codex 0.149.1 did not apply the server default to leased/write calls in the
+# non-interactive canary. Keep explicit per-tool modes as part of the frozen
+# authority contract instead of relying on that default merge behavior.
+[plugins."holler@holler".mcp_servers.holler.tools.bus_send]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.bus_check_inbox]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.bus_claim]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.bus_inbox]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.bus_ack]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.bus_extend]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.bus_nack]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.bus_status]
+approval_mode = "approve"

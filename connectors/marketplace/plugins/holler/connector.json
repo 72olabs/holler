@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "connector": "holler",
+  "connector_version": "0.1.0",
+  "protocol_version": 1,
+  "harness": "codex",
+  "plugin_name": "holler",
+  "plugin_id": "holler@holler",
+  "client_command": "codex",
+  "minimum_client_version": "0.149.1",
+  "tested_client_version": "0.150.1",
+  "lifecycle_events": ["startup", "resume", "clear", "compact", "end"],
+  "notification_mode": "native-queue",
+  "notification_fallback": "polling",
+  "attention_modes": ["native-queue", "startup-only"],
+  "required_assets": [
+    ".codex-plugin/plugin.json",
+    ".mcp.json",
+    "hooks/hooks.json",
+    "scripts/holler",
+    "skills/holler/SKILL.md",
+    "skills/holler-setup/SKILL.md"
+  ],
+  "package_hash": "sha256:7bbfa5d17859c1bd50a4157d871b0bc6bba4d3e1e13388a28479140dc6ed3c7c",
+  "tool_surface_hash": "sha256:c48e757d1d1ef53b4448b98ec435927465faebb3a2171609c22b140ae70defe4",
+  "mcp_server_name": "holler",
+  "tools": [
+    {"name": "bus_send", "class": "idempotent-write"},
+    {"name": "bus_check_inbox", "class": "read-only"},
+    {"name": "bus_claim", "class": "leased-write"},
+    {"name": "bus_inbox", "class": "leased-write"},
+    {"name": "bus_ack", "class": "idempotent-write"},
+    {"name": "bus_extend", "class": "idempotent-write"},
+    {"name": "bus_nack", "class": "leased-write"},
+    {"name": "bus_status", "class": "read-only"}
+  ],
+  "profiles": [
+    {"name": "async-peer", "requires_wake": false, "description": "Durable messaging with visible polling fallback."},
+    {"name": "live-review", "requires_wake": true, "description": "Durable messaging plus a certified live attention path."}
+  ]
+}

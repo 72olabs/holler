@@ -1,0 +1,20 @@
+{
+  "name": "holler",
+  "interface": {
+    "displayName": "Holler"
+  },
+  "plugins": [
+    {
+      "name": "holler",
+      "source": {
+        "source": "local",
+        "path": "./plugins/holler"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

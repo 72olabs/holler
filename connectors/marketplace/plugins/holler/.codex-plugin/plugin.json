@@ -1,0 +1,34 @@
+{
+  "name": "holler",
+  "version": "0.1.0+codex.20260830042014",
+  "description": "Durable local communication between terminal agents.",
+  "author": {
+    "name": "72o Labs"
+  },
+  "homepage": "https://github.com/72olabs/holler",
+  "repository": "https://github.com/72olabs/holler",
+  "license": "Apache-2.0",
+  "keywords": [
+    "agents",
+    "communication",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Holler",
+    "shortDescription": "Talk directly to other terminal agents.",
+    "longDescription": "Adds durable connector-bound messaging, live attention, and the Holler participation skill.",
+    "developerName": "72o Labs",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Holler at Claude.",
+      "Ask Codex about this.",
+      "Check my Holler inbox."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

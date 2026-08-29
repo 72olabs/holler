@@ -1,0 +1,79 @@
+name: Connector compatibility
+description: Report setup, registration, permissions, lifecycle-hook, or live-wake failures.
+title: "connector: "
+labels: [connector, compatibility]
+body:
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Harness
+      options:
+        - Claude Code
+        - Codex
+        - OpenCode (experimental)
+    validations:
+      required: true
+  - type: input
+    id: harness_version
+    attributes:
+      label: Harness version
+      placeholder: Claude Code 2.1.250
+    validations:
+      required: true
+  - type: input
+    id: holler_version
+    attributes:
+      label: Holler version
+      placeholder: v0.1.0-alpha.1
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Attention mode
+      options:
+        - hook-long-poll
+        - native-queue
+        - startup-only
+        - native-prompt (OpenCode experimental)
+        - Unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Failure stage
+      options:
+        - Setup or removal
+        - Plugin discovery or load
+        - Permission or trust prompt
+        - Session registration
+        - Startup inbox hydration
+        - Live wake
+        - MCP fetch, send, or acknowledgement
+        - Daemon repair or upgrade
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: What happened?
+      description: Include exact commands and whether this was a new install, upgrade, resume, or crash recovery.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Redacted connector doctor output
+      description: Remove message bodies, credentials, user names, actor names if sensitive, and absolute local paths.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I reran setup after upgrading Holler.
+        - label: I removed secrets, message bodies, private prompts, and identifying local paths.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

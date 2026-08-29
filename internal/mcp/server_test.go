@@ -1,0 +1,235 @@
+package mcp_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/72olabs/holler/internal/mcp"
+	store "github.com/72olabs/holler/internal/store/sqlite"
+)
+
+func TestMCPQuestionClaimAckRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	alice, err := mcp.New(db, mcp.Config{
+		Actor: "alice", RunID: "alice-run-1", Role: "implementer", Peer: "bob",
+		ProjectID: "experiment", ChannelID: "direct",
+	})
+	if err != nil {
+		t.Fatalf("new alice server: %v", err)
+	}
+	responses := exchange(t, alice,
+		request(1, "initialize", map[string]interface{}{"protocolVersion": "2024-11-05"}),
+		request(2, "tools/list", map[string]interface{}{}),
+		toolCall(3, "bus_send", map[string]interface{}{
+			"to": "bob", "body": "Which retry policy applies?", "idempotency_key": "question-1",
+		}),
+		toolCall(4, "bus_send", map[string]interface{}{
+			"to": "bob", "body": "Which retry policy applies?", "idempotency_key": "question-1",
+		}),
+		toolCallWithMeta(5, "bus_status", map[string]interface{}{}),
+	)
+	if got := nestedString(t, responses[0], "result", "serverInfo", "name"); got != "holler" {
+		t.Fatalf("server name = %q", got)
+	}
+	tools := nestedSlice(t, responses[1], "result", "tools")
+	if len(tools) != 8 {
+		t.Fatalf("tool count = %d, want 8", len(tools))
+	}
+	firstID := nestedString(t, responses[2], "result", "structuredContent", "message_id")
+	secondID := nestedString(t, responses[3], "result", "structuredContent", "message_id")
+	if firstID == "" || firstID != secondID {
+		t.Fatalf("idempotent send ids = %q, %q", firstID, secondID)
+	}
+
+	bob, err := mcp.New(db, mcp.Config{
+		Actor: "bob", RunID: "bob-run-1", Role: "owner", Peer: "alice",
+		ProjectID: "experiment", ChannelID: "direct",
+	})
+	if err != nil {
+		t.Fatalf("new bob server: %v", err)
+	}
+	responses = exchange(t, bob,
+		toolCall(1, "bus_check_inbox", map[string]interface{}{"_meta": map[string]interface{}{"progressToken": 1}}),
+		toolCall(2, "bus_inbox", map[string]interface{}{}),
+	)
+	metadata := nestedSlice(t, responses[0], "result", "structuredContent", "messages")
+	if len(metadata) != 1 {
+		t.Fatalf("inbox metadata = %+v", metadata)
+	}
+	claimed := nestedSlice(t, responses[1], "result", "structuredContent", "messages")
+	if len(claimed) != 1 {
+		t.Fatalf("claimed messages = %+v", claimed)
+	}
+	message := claimed[0].(map[string]interface{})
+	if message["body"] != "Which retry policy applies?" || message["from"] != "alice" {
+		t.Fatalf("claimed message = %+v", message)
+	}
+	leaseToken := message["lease_token"].(string)
+	responses = exchange(t, bob,
+		toolCall(3, "bus_ack", map[string]interface{}{"message_id": firstID, "lease_token": leaseToken}),
+		toolCall(4, "bus_status", map[string]interface{}{}),
+	)
+	if got := nestedNumber(t, responses[1], "result", "structuredContent", "unread"); got != 0 {
+		t.Fatalf("unread after ack = %v", got)
+	}
+}
+
+func TestMCPRejectsModelSuppliedSenderIdentity(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	server, err := mcp.New(db, mcp.Config{Actor: "alice", RunID: "run-1"})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	responses := exchange(t, server, toolCall(1, "bus_send", map[string]interface{}{
+		"from": "mallory", "to": "bob", "body": "spoofed",
+	}))
+	errorValue := responses[0]["error"].(map[string]interface{})
+	if !strings.Contains(errorValue["message"].(string), "unknown field") {
+		t.Fatalf("spoof error = %+v", errorValue)
+	}
+}
+
+func TestMCPSendNotifiesAfterCommitButNotOnIdempotentReplay(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	server, err := mcp.New(db, mcp.Config{
+		Actor: "alice", RunID: "run-1", ProjectID: "experiment",
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	responses := exchange(t, server,
+		toolCall(1, "bus_send", map[string]interface{}{
+			"to": "bob", "body": "hello", "idempotency_key": "stable-send",
+		}),
+		toolCall(2, "bus_send", map[string]interface{}{
+			"to": "bob", "body": "hello", "idempotency_key": "stable-send",
+		}),
+	)
+	job, err := db.ClaimNotification(ctx)
+	if err != nil || job.RecipientActor != "bob" {
+		t.Fatalf("notification job = %+v, err = %v", job, err)
+	}
+	if duplicate := nestedValue(t, responses[0], "result", "structuredContent", "duplicate"); duplicate != false {
+		t.Fatalf("first duplicate = %v", duplicate)
+	}
+	if duplicate := nestedValue(t, responses[1], "result", "structuredContent", "duplicate"); duplicate != true {
+		t.Fatalf("replay duplicate = %v", duplicate)
+	}
+}
+
+func TestToolSurfaceIdentityIsStable(t *testing.T) {
+	wantNames := []string{
+		"bus_send", "bus_check_inbox", "bus_claim", "bus_inbox", "bus_ack", "bus_extend", "bus_nack", "bus_status",
+	}
+	if got := strings.Join(mcp.ToolNames(), ","); got != strings.Join(wantNames, ",") {
+		t.Fatalf("tool names = %q", got)
+	}
+	const wantHash = "sha256:c48e757d1d1ef53b4448b98ec435927465faebb3a2171609c22b140ae70defe4"
+	if got := mcp.ToolSurfaceHash(); got != wantHash {
+		t.Fatalf("tool surface hash = %q, want %q; connector reauthorization is required for an intentional schema change", got, wantHash)
+	}
+}
+
+func exchange(t *testing.T, server *mcp.Server, requests ...map[string]interface{}) []map[string]interface{} {
+	t.Helper()
+	var input, output bytes.Buffer
+	encoder := json.NewEncoder(&input)
+	for _, req := range requests {
+		if err := encoder.Encode(req); err != nil {
+			t.Fatalf("encode request: %v", err)
+		}
+	}
+	if err := server.Run(context.Background(), &input, &output); err != nil {
+		t.Fatalf("run server: %v", err)
+	}
+	var responses []map[string]interface{}
+	decoder := json.NewDecoder(&output)
+	for decoder.More() {
+		var response map[string]interface{}
+		if err := decoder.Decode(&response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		responses = append(responses, response)
+	}
+	if len(responses) != len(requests) {
+		t.Fatalf("responses=%d requests=%d output=%s", len(responses), len(requests), output.String())
+	}
+	return responses
+}
+
+func request(id int, method string, params interface{}) map[string]interface{} {
+	return map[string]interface{}{"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+}
+
+func toolCall(id int, name string, arguments interface{}) map[string]interface{} {
+	return request(id, "tools/call", map[string]interface{}{"name": name, "arguments": arguments})
+}
+
+func toolCallWithMeta(id int, name string, arguments interface{}) map[string]interface{} {
+	return request(id, "tools/call", map[string]interface{}{
+		"name": name, "arguments": arguments, "_meta": map[string]interface{}{"progressToken": id},
+	})
+}
+
+func nestedValue(t *testing.T, root interface{}, path ...string) interface{} {
+	t.Helper()
+	current := root
+	for _, name := range path {
+		object, ok := current.(map[string]interface{})
+		if !ok {
+			t.Fatalf("%v is not an object while reading %v", current, path)
+		}
+		current, ok = object[name]
+		if !ok {
+			t.Fatalf("missing %q while reading %v in %+v", name, path, root)
+		}
+	}
+	return current
+}
+
+func nestedString(t *testing.T, root interface{}, path ...string) string {
+	t.Helper()
+	value, ok := nestedValue(t, root, path...).(string)
+	if !ok {
+		t.Fatalf("value at %v is not string", path)
+	}
+	return value
+}
+
+func nestedSlice(t *testing.T, root interface{}, path ...string) []interface{} {
+	t.Helper()
+	value, ok := nestedValue(t, root, path...).([]interface{})
+	if !ok {
+		t.Fatalf("value at %v is not slice", path)
+	}
+	return value
+}
+
+func nestedNumber(t *testing.T, root interface{}, path ...string) float64 {
+	t.Helper()
+	value, ok := nestedValue(t, root, path...).(float64)
+	if !ok {
+		t.Fatalf("value at %v is not number", path)
+	}
+	return value
+}
