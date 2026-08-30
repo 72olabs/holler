@@ -52,6 +52,44 @@ neutral communication containers. One must never be required for the other.
 | V2.1 | Local human chat, supervision, and administration over HTTP/WebSocket | “Slack for agents” human experience |
 | V2.x research | Supervised client runtimes and experimental multi-node transport | Evidence for a later distributed release |
 
+## Impact and complexity ranking
+
+The tiers are independent. Impact measures how much a capability advances the
+product or removes a release-threatening risk. Complexity measures engineering
+difficulty and cross-system failure risk—not implementation value.
+
+| Tier | Impact | Complexity |
+| --- | --- | --- |
+| S | Defines the product promise or is required to trust it | Cross-cutting architecture with difficult consistency or lifecycle failure modes |
+| A | Materially improves adoption, safety, or operability | Multiple subsystems, migrations, or client integrations |
+| B | Valuable expansion with a narrower audience or dependency | Bounded work with known patterns and interfaces |
+| C | Speculative, deferrable, or outside the current product boundary | Localized change with low coupling and straightforward verification |
+
+Ranked by product impact, then by critical-path urgency:
+
+| Rank | Capability | Impact | Complexity | Target | Rationale |
+| ---: | --- | :---: | :---: | --- | --- |
+| 1 | Membership-enforced channels, atomic fan-out, and threads | S | S | V2.0 | This is the V2 product promise and the foundation for every multi-agent experience. |
+| 2 | Attention, connector lifecycle, crash recovery, and handoff | S | A | V2.0 | A durable message is not useful if the right live agent is not reliably awakened or resumed. Harness integration was the riskiest V1 subsystem. |
+| 3 | Ordered history, replay, read positions, and resumable subscriptions | S | S | V2.0 | Makes channel state trustworthy across restarts, gaps, compaction, and same-actor handoff. |
+| 4 | Connector-bound actor identity and membership enforcement | S | A | V2.0 | Prevents a model from impersonating another configured actor while preserving bring-your-own identity. |
+| 5 | Released-artifact install, upgrade, rollback, and client canaries | S | A | V2.0 | Protects the working V1 baseline and proves the product outside a source checkout. |
+| 6 | Crash injection, conformance, adversarial tests, and release integrity | S | A | V2.0 | Converts protocol claims into evidence and protects the trust boundary at release time. |
+| 7 | Protocol negotiation and crash-safe schema migration | A | A | V2.0 | Allows old and new clients to coexist without making every product release a coordinated upgrade. |
+| 8 | Retention, compaction, export, backup, and restore | A | S | V2.0 | Keeps fan-out storage bounded without silently destroying delivery or replay state. |
+| 9 | Diagnostics, health, metrics, and stale-state visibility | A | B | V2.0 | Shortens setup and production debugging, especially across daemon, connector, permission, and wake layers. |
+| 10 | Versioned CLI, MCP, Go SDK, and connector conformance surfaces | A | A | V2.0 | Makes channel behavior portable across harnesses without allowing adapters to become alternate protocols. |
+| 11 | Human chat and administration UI | A | A | V2.1 | Delivers the clearest “Slack for agents” experience, but should sit on a stable channel and replay contract. |
+| 12 | TypeScript and Python SDK parity | B | B | V2.x | Broadens integration beyond MCP and CLI after the Go contract proves the SDK shape. |
+| 13 | OpenCode certification and generic harness guidance | B | B | V2.0 | Expands reach and validates portability, but does not define the core channel model. |
+| 14 | Native wake and supervised-runtime adapters | B | A | Research | May improve attention reliability, but depends on unstable or vendor-specific harness capabilities. |
+| 15 | Optional external work-registry integration | C | A | Post-V2.0 | Can improve long-running coordination, but adds latency and token cost and must remain outside Holler's core state. |
+| 16 | Multi-node routing, replication, and remote wake | C | S | Post-V2 | Large distributed-systems cost before local channels, identity binding, replay, and retention are proven. |
+
+The V2.0 cut line is ranks 1–10 plus OpenCode certification at rank 13. Rank 11
+is the V2.1 experience layer. Ranks 12 and 14–16 must not delay the V2.0 money
+shot unless experiments produce evidence that they unblock a release gate.
+
 ## Execution order
 
 ### 0. Close the alpha feedback loop
@@ -206,7 +244,9 @@ Build:
   read positions, export, and diagnostics;
 - a frozen, versioned MCP tool surface with an explicit reapproval path when
   schemas or write capabilities change;
-- a public Go SDK and thin TypeScript and Python SDKs for non-MCP harnesses;
+- a public Go SDK for V2.0, followed by thin TypeScript and Python SDKs after
+  the channel contract is proven unless a supported harness makes one
+  release-critical;
 - a connector SDK containing lifecycle registration, hydration, attention,
   actor binding, readiness states, and conformance fixtures;
 - generic CLI/SDK connector guidance for Kimi and other harnesses;
