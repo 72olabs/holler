@@ -20,7 +20,7 @@ follow-on, not part of the V2.0 release contract.
 
 Holler V2 owns:
 
-- authenticated actor identity and session presence;
+- connector-bound actor identity and session presence;
 - channels, membership, threads, broadcast, history, and replay;
 - per-recipient delivery, read positions, attention, and recovery;
 - a provider-neutral protocol plus CLI, MCP, SDK, and connector surfaces;
@@ -41,16 +41,16 @@ short conversations materially slower and more token-expensive. It should be
 an optional integration, not a tax on every message.
 
 Claude Channels and Holler channels are different concepts. Claude Channels is
-a harness-specific wake transport. Holler channels are durable, provider-
+a client-specific wake transport. Holler channels are durable, provider-
 neutral communication containers. One must never be required for the other.
 
 ## Release slices
 
 | Slice | Promise | Required for |
 | --- | --- | --- |
-| V2.0 | Authenticated, membership-enforced multi-party channels on one node | The core V2 release |
+| V2.0 | Membership-enforced multi-party channels on one trusted local node | The core V2 release |
 | V2.1 | Local human chat, supervision, and administration over HTTP/WebSocket | “Slack for agents” human experience |
-| V2.x research | Supervised harness runtimes and experimental multi-node transport | Evidence for a later distributed release |
+| V2.x research | Supervised client runtimes and experimental multi-node transport | Evidence for a later distributed release |
 
 ## Execution order
 
@@ -72,40 +72,47 @@ Build:
 Exit gate:
 
 - no known P0 data-loss, identity, setup, or orphan-process bug;
-- every supported harness passes send, wake, claim, reply, and acknowledge from
+- every supported client passes send, wake, claim, reply, and acknowledge from
   a released artifact;
 - a failed setup is retryable and leaves an inspectable, recoverable state.
 
-### 1. Introduce authenticated identity and protocol evolution
+### 1. Add actor binding and protocol evolution
 
-Membership authorization is not meaningful while any same-user client can
-self-assert another actor name. Establish identity before claiming channels are
-private.
+Holler accepts an opaque actor identity supplied by the user, client, or an
+external identity system. It binds that identity to a connector connection and
+run, but does not become the actor registry or credential issuer. The owning OS
+user remains the V2 trust boundary.
 
 Build:
 
-- an actor registry with stable actor, configuration, run, and harness-session
-  identities kept distinct;
-- Ed25519 challenge-response during connection setup;
-- connector-held keys that are never exposed to the model;
-- credential creation, rotation, revocation, backup, and recovery;
+- opaque actor IDs with optional identity-provider and issuer metadata that
+  Holler stores without interpreting;
+- stable actor, configuration, run, and client-session identities kept
+  distinct;
+- connector-bound sender identity that cannot be changed on an individual
+  model-controlled send;
+- explicit diagnostics for cloned bindings and concurrent runs sharing one
+  actor;
 - per-partition and per-channel operation scopes;
-- immutable administrative events for identity and scope changes;
+- immutable administrative events for binding and scope changes;
 - protocol capability negotiation and typed errors for old/new client mixes;
-- forward-only, crash-safe database migrations with preflight and backup.
+- forward-only, crash-safe database migrations with preflight and backup;
+- an external verifier interface reserved for later multi-user or multi-node
+  deployments, without implementing a Holler credential system in V2.0.
 
 Compatibility rule:
 
 - V1 direct-message clients keep working through a documented transition
-  window, but cannot use V2-only channel operations without authenticated
-  credentials.
+  window. V2-only channel operations require negotiated channel capabilities.
 
 Exit gate:
 
-- an actor cannot authenticate, send, claim, or read as another actor;
-- key rotation preserves historical attribution and rejects the old key for new
-  operations;
-- revocation terminates new activity and releases bounded storage holds;
+- a model cannot override the actor bound by its connector on send, claim,
+  acknowledgement, membership, or history operations;
+- actor continuity survives restart and handoff while concurrent same-actor
+  runs remain visible;
+- channel membership is enforced for configured actors within the documented
+  single-user trust boundary;
 - mixed V1/V2 daemon-client upgrade tests pass in both upgrade orders.
 
 ### 2. Build the real channel vertical slice
@@ -140,7 +147,7 @@ Money-shot acceptance test:
 
 Exit gate:
 
-- the scenario passes in every supported three-harness combination and after a
+- the scenario passes in every supported three-client combination and after a
   daemon restart at each transaction boundary.
 
 ### 3. Make history, replay, and continuity trustworthy
@@ -201,13 +208,13 @@ Build:
   schemas or write capabilities change;
 - a public Go SDK and thin TypeScript and Python SDKs for non-MCP harnesses;
 - a connector SDK containing lifecycle registration, hydration, attention,
-  identity custody, readiness states, and conformance fixtures;
+  actor binding, readiness states, and conformance fixtures;
 - generic CLI/SDK connector guidance for Kimi and other harnesses;
 - OpenCode live certification, then inclusion in normal setup and release
   claims;
 - attention coalescing, `requires_reply`, and terminal/no-reply semantics to
   prevent acknowledgement loops and channel notification storms;
-- adapter-specific capability reporting without pretending every harness has
+- adapter-specific capability reporting without pretending every client has
   native wake.
 
 Research separately:
@@ -238,15 +245,15 @@ Build:
 - delivery failures, dead letters, connector readiness, storage, retention,
   and security events in an admin view;
 - explicit confirmation and immutable events for destructive administration;
-- a documented human-key-custody decision before humans can act as durable
-  signed actors.
+- a documented human actor-binding decision before humans can participate with
+  durable identity.
 
 Security defaults:
 
 - bind to loopback only;
 - enforce Host validation, session authentication, and actor scopes server-side;
 - never expose the UI remotely through a flag alone;
-- keep message bodies out of harness wake channels.
+- keep message bodies out of client wake channels.
 
 Exit gate:
 
@@ -293,7 +300,7 @@ artifact, not merely from a source checkout.
 1. **Channel money shot:** the three-member/non-member/crash scenario above.
 2. **Chatter calibration:** useful broadcast versus unnecessary wakes across
    three and five agents; compare `requires_reply`, mentions, and coalescing.
-3. **Identity recovery:** lost key, rotation, revocation, cloned config, and
+3. **Actor continuity:** renamed or rebound actors, cloned config, handoff, and
    same-actor concurrent sessions.
 4. **Human participation:** measure whether a small chat surface reduces routing
    friction before building a full dashboard.
@@ -315,12 +322,12 @@ permission, lifecycle, and state-changing connector canaries pass.
 - voice/video, file storage, and general-purpose team-chat features;
 - quotas until measured actor-level resource contention justifies them.
 
-Multi-node research may begin after signed identity, partitioned replay,
-export/restore, and bounded retention are proven locally. Its entry experiment
-must test one partition moving between two nodes, authenticated remote wake,
-network partition recovery, and preserved per-partition ordering. It must not
-be implemented by sharing SQLite or exposing the local Unix-socket protocol
-over TCP.
+Multi-node research may begin after an external authenticated identity provider,
+partitioned replay, export/restore, and bounded retention are proven locally.
+Its entry experiment must test one partition moving between two nodes,
+authenticated remote wake, network partition recovery, and preserved per-
+partition ordering. It must not be implemented by sharing SQLite or exposing
+the local Unix-socket protocol over TCP.
 
 ## Recommended issue structure
 
@@ -334,7 +341,7 @@ The critical path is:
 
 ```text
 alpha hardening
-  -> authenticated identity and protocol negotiation
+  -> actor binding and protocol negotiation
   -> channel membership and atomic fan-out
   -> replay and read positions
   -> retention and observability
