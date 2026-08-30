@@ -175,7 +175,7 @@ func SetupDaemonService(ctx context.Context, config DaemonServiceConfig, options
 			if err != nil {
 				return plan, err
 			}
-			if err := runSetupCommand(ctx, serviceRuntime.run, "launchctl", "bootstrap", "gui/"+uid, plan.Path); err != nil {
+			if err := bootstrapLaunchAgent(ctx, serviceRuntime.run, "gui/"+uid, target, plan.Path); err != nil {
 				return plan, err
 			}
 		} else if !managedHealthy {
@@ -215,6 +215,36 @@ func SetupDaemonService(ctx context.Context, config DaemonServiceConfig, options
 		return plan, err
 	}
 	return plan, nil
+}
+
+func bootstrapLaunchAgent(ctx context.Context, runner CommandRunner, domain, target, path string) error {
+	const attempts = 5
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		lastErr = runSetupCommand(ctx, runner, "launchctl", "bootstrap", domain, path)
+		if lastErr == nil {
+			return nil
+		}
+		// launchd can briefly reject bootstrap immediately after bootout even
+		// though the replacement service is valid. If it accepted the request
+		// despite the command error, do not submit a duplicate bootstrap.
+		_, loaded, _, stateErr := launchdServiceState(ctx, runner, target)
+		if stateErr == nil && loaded {
+			return nil
+		}
+		if attempt+1 == attempts {
+			break
+		}
+		delay := time.Duration(1<<attempt) * 100 * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return lastErr
 }
 
 // RemoveDaemonService stops and removes the setup-owned per-user service. It

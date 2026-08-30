@@ -2,7 +2,7 @@
 
 ## Alpha security boundary
 
-Holler 0.1.0-alpha.1 is designed for one trusted operating-system user on one
+Holler 0.1.0-alpha.2 is designed for one trusted operating-system user on one
 machine. `hollerd` listens on a mode-`0600` Unix socket and is the only process
 that opens the SQLite database. CLI commands, MCP servers, and harness hooks
 connect through that socket.

@@ -569,6 +569,66 @@ func TestDaemonServiceSetupIsIdempotentForLaunchd(t *testing.T) {
 	}
 }
 
+func TestDaemonServiceSetupRetriesTransientLaunchdBootstrapFailure(t *testing.T) {
+	directory := t.TempDir()
+	servicePath := filepath.Join(directory, "Library", "LaunchAgents", "com.72olabs.hollerd.plist")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(servicePath, []byte("old service"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := true
+	bootstrapAttempts := 0
+	runner := func(_ context.Context, command string, args ...string) (string, string, int, error) {
+		if command != "launchctl" || len(args) == 0 {
+			return "", "", 0, nil
+		}
+		switch args[0] {
+		case "print":
+			if loaded {
+				return "state = running\npid = 123", "", 0, nil
+			}
+			return "", "not found", 1, nil
+		case "bootout":
+			loaded = false
+			return "", "", 0, nil
+		case "bootstrap":
+			bootstrapAttempts++
+			if bootstrapAttempts == 1 {
+				return "", "Bootstrap failed: 5: Input/output error", 5, nil
+			}
+			loaded = true
+		}
+		return "", "", 0, nil
+	}
+	probe := connector.WithServiceDaemonProbe(func(context.Context, string) (connector.DaemonProcessInfo, bool, error) {
+		if !loaded {
+			return connector.DaemonProcessInfo{}, false, nil
+		}
+		buildID := "old-build"
+		if bootstrapAttempts > 1 {
+			buildID = buildinfo.Current().ID()
+		}
+		return connector.DaemonProcessInfo{PID: 123, BuildID: buildID}, true, nil
+	})
+
+	plan, err := connector.SetupDaemonService(context.Background(), connector.DaemonServiceConfig{
+		DaemonBinary: "/usr/bin/true", HollerBinary: "/usr/bin/true", Home: directory,
+		Socket: filepath.Join(directory, ".holler", "holler.sock"), GOOS: "darwin", Apply: true,
+	}, connector.WithServiceCommandRunner(runner), probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrapAttempts != 2 {
+		t.Fatalf("bootstrap attempts=%d, want 2", bootstrapAttempts)
+	}
+	if len(plan.Backups) != 1 {
+		t.Fatalf("backups=%v, want one replaced service backup", plan.Backups)
+	}
+}
+
 func TestDaemonServiceSetupKickstartsLoadedStoppedLaunchdService(t *testing.T) {
 	directory := t.TempDir()
 	loaded, running := false, false

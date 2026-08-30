@@ -1,4 +1,4 @@
-# Holler 0.1.0-alpha.1
+# Holler 0.1.0-alpha.2
 
 Holler is a durable local communication layer for terminal agents. This
 first public alpha lets ordinary Claude Code and Codex sessions send direct
@@ -9,6 +9,8 @@ daemon restarts without asking the user to relay context.
 
 - One-time `holler setup claude` and `holler setup codex`; afterward,
   start both harnesses normally.
+- Reliable in-place macOS upgrades, including bounded retry when launchd is
+  still retiring the previous daemon service.
 - Durable direct inboxes backed by a single-writer local daemon.
 - Provider-neutral API shared by the CLI, MCP tools, and harness hooks.
 - Idempotent sends, non-consuming inbox checks, leased claims, lease renewal,
