@@ -1,37 +1,31 @@
 # Holler
 
+[![CI](https://github.com/72olabs/holler/actions/workflows/ci.yml/badge.svg)](https://github.com/72olabs/holler/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/72olabs/holler?include_prereleases)](https://github.com/72olabs/holler/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Durable local messaging for terminal agents.
 
-Holler lets a Claude Code session ask a Codex session a question, lets Codex
-reply on the same thread, and keeps the exchange recoverable if either agent or
-the daemon restarts. It is a provider-independent message bus, not another
-agent framework: agents keep running in their normal terminals and communicate
-through a shared local service.
+Your Claude and Codex sessions live in separate terminals. Holler lets them ask
+questions, reply in a thread, and recover the conversation after a session or
+daemon restart. You stop carrying messages between agents by hand.
 
-> **Public alpha:** the current release is for one user on one machine. It is
-> not a remote service, a multi-user security boundary, or a production task
-> orchestrator.
+Ask Codex to “holler at Claude.” Holler stores the message, wakes Claude when
+the client supports it, and keeps the delivery available until Claude processes
+it. Both agents continue running in their normal terminals.
 
-## What works today
+```text
+You     → Codex:  Holler at Claude and ask for a second opinion on this retry policy.
+Codex   → Claude: QUESTION  Which failures should be retried?
+Claude  → Codex:  ANSWER    Retry transport failures; surface policy denials.
+Codex   → You:     Claude agrees on transport retries and says policy failures should stop.
+```
 
-- direct actor-to-actor messaging with durable inboxes;
-- threaded replies, idempotent sends, leased claims, acknowledgement, retry,
-  and dead-letter handling;
-- ordinary Claude Code and Codex launches after one-time connector setup;
-- live attention through Claude hook-long-poll and the Codex native queue;
-- startup hydration when an agent was offline;
-- daemon restart, abrupt Claude exit, and same-actor session handoff recovery;
-- a universal framed API used by the CLI, MCP tools, and harness connectors;
-- two concurrent threads and a three-agent review workflow, tested end to end.
+Holler is a public alpha for one user on one machine.
 
-Real channel membership, broadcast, channel history, and replay are not in the
-alpha. A `channel_id` is currently a label on a direct message. Those features
-remain future work.
+## Install
 
-## Quick start
-
-On macOS, install from the 72o Labs tap, then configure each installed harness
-once:
+On macOS:
 
 ```sh
 brew install 72olabs/tap/holler
@@ -39,132 +33,189 @@ holler setup claude
 holler setup codex
 ```
 
-The same formula works with an explicit tap first if your Homebrew policy
-requires it:
+Setup shows every plugin, config, permission, and service change before asking
+for confirmation. Run the same command after an upgrade to refresh the daemon
+and version-matched connector package.
 
-```sh
-brew tap 72olabs/tap
-brew install holler
-```
-
-Release archives are the package-manager-independent option. Each archive
-contains `holler`, `hollerd`, and the version-matched Claude and Codex
-connector marketplace. Unpack it without separating `bin/` from `share/`,
-change into the extracted directory, and run:
-
-```sh
-./bin/holler setup claude
-./bin/holler setup codex
-```
-
-Setup previews its changes and asks for confirmation. It installs or refreshes
-the harness plugin, records a stable actor identity, admits only the frozen
-Holler MCP tools, starts the per-user daemon service, and verifies its socket.
-Run `holler status` after setup to inspect the client, daemon, protocol, and
-socket identities.
-
-Then start both harnesses normally:
+Start the agents normally:
 
 ```sh
 claude
 codex
 ```
 
-The default actors are `claude` and `codex`, configured as peers. Natural
-requests such as “holler at Claude,” “ask Codex,” or “tell the reviewer” invoke
-the Holler participation skill and its MCP workflow. Codex intentionally asks
-the user to review and trust the packaged lifecycle hooks on the first turn
-after installation or update.
+No Holler launcher is required. The default actors are `claude` and `codex`,
+configured as peers.
 
-For a source-tree development install:
+## Try it
+
+Give Claude one turn, then leave it idle:
+
+```text
+You → Claude: You are the reviewer. Stay available for questions from Codex.
+```
+
+In Codex:
+
+```text
+You → Codex: Holler at Claude. Ask it to review our current approach, discuss
+             any disagreement with it, then bring the conclusion back to me.
+```
+
+The packaged participation skill recognizes “holler at,” “ask,” “tell,” and
+similar requests. Agents can also call the frozen Holler MCP tools directly.
+
+Check the installation at any time:
+
+```sh
+holler status
+```
+
+The result identifies the client, daemon, protocol, and socket. Connector
+diagnostics can then distinguish a daemon problem from plugin discovery, MCP
+permission, project discovery, or attention failure.
+
+## What works today
+
+- Claude Code and Codex talk in either direction after one-time setup.
+- Messages sent while the recipient is offline remain in its durable inbox.
+- Replies retain their thread and `in_reply_to` relationship.
+- Claims use leases, so a crash before acknowledgement can be redelivered.
+- Idempotency keys prevent a retry from creating a second durable message.
+- Claude uses supervised hook-long-poll attention; Codex uses its native queue.
+- Startup hydration recovers unread messages when live attention is unavailable.
+- The daemon, CLI, MCP shim, and hooks share one versioned local API.
+- Sender identity is bound to the connector connection rather than accepted on
+  each model-controlled send.
+
+The release suite has exercised both Claude-to-Codex and Codex-to-Claude
+conversations, two concurrent threads, a three-agent review handoff, daemon
+restart, abrupt Claude exit, lease recovery, and zero orphan Holler monitors.
+The current macOS rehearsal used Claude Code 2.1.251 and Codex CLI 0.150.1.
+
+## How it works
+
+```text
+┌──────────────────────┐                    ┌──────────────────────┐
+│ Claude Code          │                    │ Codex CLI            │
+│ skill · MCP · hooks  │                    │ skill · MCP · hooks  │
+└──────────┬───────────┘                    └──────────┬───────────┘
+           │                framed API                 │
+           └──────────────┐  over UDS  ┌──────────────┘
+                          ▼            ▼
+                    ┌──────────────────────┐
+                    │       hollerd        │
+                    │ routing · leases     │
+                    │ attention · events   │
+                    └──────────┬───────────┘
+                               │ only database owner
+                               ▼
+                    ┌──────────────────────┐
+                    │ SQLite              │
+                    │ messages · delivery │
+                    │ outbox · presence   │
+                    └──────────────────────┘
+```
+
+`hollerd` is the only process that opens SQLite. Every CLI command, MCP call,
+and lifecycle hook connects through a mode-`0600` Unix socket.
+
+A wake notification contains only a generated message reference. The recipient
+must fetch and claim the body through its local connection, apply its own
+permission rules, and acknowledge the delivery after processing. Peer messages
+provide context, not authority.
+
+## Delivery path
+
+1. The sender commits a typed message, recipient delivery, and notification
+   outbox entry in one transaction.
+2. `hollerd` attempts live attention through the recipient's connector.
+3. The recipient fetches and claims the message with a fenced lease.
+4. It replies on the same thread and acknowledges the claim.
+5. A crash or expired lease returns the delivery to the inbox for recovery.
+
+An accepted wake is not treated as proof that the model processed the message.
+The claim and acknowledgement are the durable evidence.
+
+## Client support
+
+| Client | Release status | Attention path | Setup |
+| --- | --- | --- | --- |
+| Claude Code | Supported alpha | `hook-long-poll`, with startup hydration fallback | `holler setup claude` |
+| Codex CLI | Supported alpha | `native-queue`, with startup hydration fallback | `holler setup codex` |
+| OpenCode | Package available; live certification pending | `native-prompt` or startup-only | Advanced connector setup only |
+| Other agents | Use the CLI or local protocol; no bundled connector yet | Connector-defined | See the API and connector docs |
+
+Holler exposes the same message semantics through MCP, CLI, and its framed
+local protocol. A client does not need MCP if it can invoke the CLI or use a
+future SDK.
+
+## Current boundaries
+
+- One trusted operating-system user and one machine.
+- The owning OS account and mode-`0600` socket are the trust boundary.
+- Direct actor routing only. A `channel_id` is currently a label, not a real
+  membership-enforced channel.
+- No broadcast, channel history, channel replay, or channel membership yet.
+- No bundled task manager or workflow authority.
+- OpenCode is not called supported until its installed-client canary passes.
+- Peer message bodies are untrusted input and never grant tool, filesystem,
+  credential, spend, or release authority.
+
+Real multi-party channels are the core of the [V2 roadmap](ROADMAP.md).
+Multi-user and multi-node security remain later work.
+
+## Product boundary
+
+Holler answers two questions: who is talking to whom, and did the message
+arrive? It owns identity binding, typed envelopes, routing, inboxes, threads,
+delivery leases, acknowledgement, redelivery, and event cursors.
+
+Task ownership, obligations, reviews, and decisions belong in GitHub, Linear,
+Jira, or a separate work registry. Testing found that shared task state can
+catch false completion, but imposing it on every short conversation consumed
+substantially more time and model context.
+
+## Other installation paths
+
+Release archives contain `holler`, `hollerd`, and the matching Claude and Codex
+connector marketplace. Download one from [GitHub Releases](https://github.com/72olabs/holler/releases),
+keep `bin/` and `share/` under the extracted prefix, then run:
+
+```sh
+./bin/holler setup claude
+./bin/holler setup codex
+```
+
+For source development:
 
 ```sh
 ./scripts/build.sh
 ./.build/holler setup claude
 ./.build/holler setup codex
+go test ./...
 ```
 
-Rerun the same setup commands after upgrading Holler so the harness cache and daemon build move together. To remove a connector safely before uninstalling the package:
+Before uninstalling, remove each configured connector:
 
 ```sh
 holler setup claude --remove
 holler setup codex --remove
 ```
 
-Removing the last configured harness stops and removes the setup-owned daemon service while preserving the durable database and logs.
-
-The release workflow produces host-native macOS and Linux archives. Homebrew
-builds from the tagged source archive and is the intended macOS package path;
-additional prebuilt OS/architecture pairs are not claimed until they are added
-to the release matrix and clean-machine certification.
-
-## Alpha boundaries
-
-Holler trusts the local operating-system account that owns its mode-`0600`
-Unix socket. It does not yet use signed actor challenge-response, and it must
-not be exposed across users or machines. Peer message bodies are untrusted
-input: attention notifications reveal only a server-generated message ID, and
-agents fetch the body explicitly before deciding what to do.
-
-The release rehearsal passed against Claude Code 2.1.251 and Codex CLI 0.150.1;
-the packaged connector manifests retain the lower compatibility baselines used
-by deterministic certification. OpenCode has a built connector package but has
-not passed the installed-client canary, so it is not claimed as supported in
-this alpha. See
-[SECURITY.md](SECURITY.md) and [RELEASE-NOTES.md](RELEASE-NOTES.md) before
-deploying or contributing.
-
-## Product boundary
-
-Holler owns identity binding, typed envelopes, direct routing, inboxes,
-threads, delivery leases, acknowledgement, retry/redelivery, and event
-cursors. It answers *who is talking to whom, and did the message arrive?*
-
-Task ownership, obligations, reviews, and decisions belong in a separate work
-registry such as Linear, Jira, or GitHub. Organizational policy—when to ask,
-whom to ask, escalation, and termination—also sits above the bus. Testing found
-that richer task state can help some workflows, but coupling
-it to transport made simple agent conversations slower and more expensive.
+Removing the final connector stops the Holler-managed daemon service. The
+durable database and logs are preserved.
 
 ## Documentation
 
-- [API.md](API.md) documents the implemented framed Unix-socket API.
-- [connectors/README.md](connectors/README.md) covers connector setup,
-  manifests, diagnostics, certification, and supported attention modes.
-- [SECURITY.md](SECURITY.md) defines the alpha trust boundary and reporting
-  process.
-- [CONTRIBUTING.md](CONTRIBUTING.md) describes development and validation.
-- [RELEASE-NOTES.md](RELEASE-NOTES.md) lists tested functionality and current
-  limitations.
-- [ROADMAP.md](ROADMAP.md) defines the sequenced V2 scope, acceptance gates,
-  and explicit non-goals.
+- [Local API](API.md): framing, handshake, operations, and client surfaces.
+- [Connector integration](connectors/README.md): packages, permissions,
+  diagnostics, certification, and attention modes.
+- [Security](SECURITY.md): current trust boundary and vulnerability reporting.
+- [V2 roadmap](ROADMAP.md): sequenced scope, acceptance gates, and non-goals.
+- [Release notes](RELEASE-NOTES.md): tested functionality and known limits.
+- [Contributing](CONTRIBUTING.md): development and validation workflow.
 
-The current Go implementation provides the
-SQLite message and per-recipient delivery lifecycle plus the single-writer `hollerd` boundary:
-idempotent send, non-consuming inbox checks, leased claims, acknowledgement, retry/dead-letter nack,
-lease renewal, crash recovery, renewable registrations, durable asynchronous notification delivery,
-and per-partition durable and operational event positions.
+## License
 
-Only the separate `hollerd` executable opens SQLite. CLI commands, the MCP shim, and lifecycle hooks all use
-the same versioned framed-JSON API over a mode-`0600` Unix socket. The connection handshake binds an
-actor and immutable run, and the daemon stamps that identity onto sends instead of accepting a
-model-controlled sender. The client self-reports its build identity and the daemon stamps its own into
-operational evidence; within the current same-user trust boundary, certification rejects unknown or dirty
-identities. This slice does not yet implement the protocol's Ed25519 challenge-response;
-until credentials land, the local socket and its owning OS user are the trust boundary.
-
-```sh
-go test ./...
-./scripts/build.sh
-./.build/hollerd --db /tmp/holler.sqlite3 --socket /tmp/holler.sock
-
-# In another terminal:
-./.build/holler send --socket /tmp/holler.sock \
-  --actor implementer --run run-1 --to reviewer --idempotency-key demo-1 \
-  --type QUESTION --body '{"text":"Which retry policy applies?"}'
-./.build/holler inbox --socket /tmp/holler.sock --actor reviewer --run run-2
-
-# Diagnose static integration, then certify evidence from a bounded real-client run.
-go run ./cmd/holler connector doctor --harness codex --project "$PWD" --policy /path/to/policy.toml
-go run ./cmd/holler connector certify --harness codex --project demo --actor codex --run run-1
-```
+Apache-2.0. See [LICENSE](LICENSE).
