@@ -136,6 +136,8 @@ it to transport made simple agent conversations slower and more expensive.
 - [CONTRIBUTING.md](CONTRIBUTING.md) describes development and validation.
 - [RELEASE-NOTES.md](RELEASE-NOTES.md) lists tested functionality and current
   limitations.
+- [ROADMAP.md](ROADMAP.md) defines the sequenced V2 scope, acceptance gates,
+  and explicit non-goals.
 
 The current Go implementation provides the
 SQLite message and per-recipient delivery lifecycle plus the single-writer `hollerd` boundary:
