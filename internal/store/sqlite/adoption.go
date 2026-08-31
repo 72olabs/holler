@@ -73,6 +73,13 @@ func (s *Store) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.A
 	if !liveTarget {
 		return bus.AdoptResult{}, bus.ErrActorNotLive
 	}
+	liveTargetRun, err := actorRunHasLivePresenceTx(ctx, tx, req.AdoptingActor, req.AdoptingRun, now)
+	if err != nil {
+		return bus.AdoptResult{}, err
+	}
+	if !liveTargetRun {
+		return bus.AdoptResult{}, bus.ErrRunNotLive
+	}
 
 	var activeClaims int
 	if err := tx.QueryRowContext(ctx, `
@@ -208,6 +215,17 @@ func actorHasLivePresenceTx(ctx context.Context, tx *sql.Tx, actor string, now t
 	return live != 0, nil
 }
 
+func actorRunHasLivePresenceTx(ctx context.Context, tx *sql.Tx, actor, runID string, now time.Time) (bool, error) {
+	var live int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM registrations
+		WHERE actor = ? AND run_id = ? AND ended_at_ns IS NULL AND attention_superseded_at_ns IS NULL
+		  AND lease_expires_at_ns > ?)`, actor, runID, now.UnixNano()).Scan(&live); err != nil {
+		return false, fmt.Errorf("inspect actor run liveness: %w", err)
+	}
+	return live != 0, nil
+}
+
 func actorAdoptionTx(ctx context.Context, tx *sql.Tx, source string) (bus.AdoptResult, bool, error) {
 	var result bus.AdoptResult
 	var adoptedNS int64
@@ -225,4 +243,16 @@ func actorAdoptionTx(ctx context.Context, tx *sql.Tx, source string) (bus.AdoptR
 	}
 	result.AdoptedAt = time.Unix(0, adoptedNS).UTC()
 	return result, true, nil
+}
+
+func assertActorNotAdoptedTx(ctx context.Context, tx *sql.Tx, actor string) error {
+	var adopted int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM actor_adoptions WHERE source_actor = ?)`, actor).Scan(&adopted); err != nil {
+		return fmt.Errorf("inspect actor adoption: %w", err)
+	}
+	if adopted != 0 {
+		return bus.ErrActorAdopted
+	}
+	return nil
 }

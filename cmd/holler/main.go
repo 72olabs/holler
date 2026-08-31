@@ -196,8 +196,8 @@ func runMonitor(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		if client == nil {
 			client, err = dialAPIBinding(monitorCtx, *socketPath, binding, *harness, sessionID, "claude-monitor/"+connector.ConnectorVersion)
 			if err != nil {
-				if errors.Is(err, bus.ErrBindingStale) {
-					fmt.Fprintf(stderr, "holler monitor stopped: this session lost actor %q to a takeover; relaunch the session to get a new identity\n", *actor)
+				if errors.Is(err, bus.ErrBindingStale) || errors.Is(err, bus.ErrActorAdopted) {
+					fmt.Fprintf(stderr, "holler monitor stopped: this session lost actor %q because it was superseded or adopted; relaunch with allocated naming to get a fresh identity\n", *actor)
 					return 0
 				}
 				if !waitForRetry(monitorCtx, 250*time.Millisecond) {
@@ -244,6 +244,10 @@ func runMonitor(ctx context.Context, args []string, stdin io.Reader, stdout, std
 				if registrationErr == nil {
 					contentionDelay = 100 * time.Millisecond
 					continue
+				}
+				if errors.Is(registrationErr, bus.ErrActorAdopted) || errors.Is(registrationErr, bus.ErrBindingStale) {
+					fmt.Fprintf(stderr, "holler monitor stopped: this session lost actor %q because it was superseded or adopted; relaunch with allocated naming to get a fresh identity\n", *actor)
+					return 0
 				}
 			case strings.Contains(attachErr.Error(), "attention waiting is unavailable"):
 				fmt.Fprintf(stderr, "holler monitor degraded: %v\n", attachErr)
@@ -391,8 +395,8 @@ func acquireMonitorLock(socketPath, actor, runID, sessionID string) (*os.File, b
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := commandFlags("status", stderr)
 	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
-	actor := flags.String("actor", environmentOr("HOLLER_ACTOR", "operator"), "session actor")
-	runID := flags.String("run", environmentOr("HOLLER_RUN", "operator-cli"), "session run")
+	actor := flags.String("actor", "operator", "diagnostic session actor")
+	runID := flags.String("run", "operator-status", "diagnostic session run")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -413,8 +417,8 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 func runWho(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := commandFlags("who", stderr)
 	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
-	actor := flags.String("actor", environmentOr("HOLLER_ACTOR", "operator"), "session actor")
-	runID := flags.String("run", environmentOr("HOLLER_RUN", "operator-who"), "session run")
+	actor := flags.String("actor", "operator", "diagnostic session actor")
+	runID := flags.String("run", "operator-who", "diagnostic session run")
 	limit := flags.Int("limit", 100, "maximum actors")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -466,7 +470,7 @@ func runAdopt(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	flags := commandFlags("adopt", stderr)
 	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
 	actor := flags.String("actor", os.Getenv("HOLLER_ACTOR"), "live actor adopting the inbox")
-	runID := flags.String("run", environmentOr("HOLLER_RUN", "operator-adopt"), "adopting run")
+	runID := flags.String("run", os.Getenv("HOLLER_RUN"), "live adopting run")
 	source := flags.String("from", "", "inactive source actor")
 	project := flags.String("project", environmentOr("HOLLER_PROJECT", "default"), "project/partition")
 	idempotencyKey := flags.String("idempotency-key", "", "stable key for this adoption")
@@ -773,15 +777,21 @@ func runHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	if err != nil {
 		return writeDegradedHook(stdout, stderr, err)
 	}
+	if predecessor := client.Identity().AdoptedPredecessor; predecessor != "" {
+		output.HookSpecificOutput.AdditionalContext += fmt.Sprintf(
+			" Holler assigned the fresh actor identity %q because the previous identity %q was permanently adopted. The previous inbox remains with its adopter; use the fresh identity for this session.",
+			*actor, predecessor,
+		)
+	}
 	return writeJSON(stdout, output)
 }
 
 func writeDegradedHook(stdout, stderr io.Writer, cause error) error {
-	if errors.Is(cause, bus.ErrBindingStale) {
+	if errors.Is(cause, bus.ErrBindingStale) || errors.Is(cause, bus.ErrActorAdopted) {
 		fmt.Fprintf(stderr, "holler SessionStart stopped: %v; relaunch the session to get a new identity\n", cause)
 		return writeJSON(stdout, connector.HookOutput{HookSpecificOutput: connector.HookSpecificOutput{
 			HookEventName:     "SessionStart",
-			AdditionalContext: "Holler connector state is STALE because this session lost its actor identity to a takeover. Relaunch this harness session to get a new identity; this stale session must not reconnect or receive wakes.",
+			AdditionalContext: "Holler connector state is STALE because this session's actor identity was superseded or permanently adopted. Relaunch this harness session with allocated naming to get a fresh identity; this stale session must not reconnect or receive wakes.",
 		}})
 	}
 	fmt.Fprintf(stderr, "holler SessionStart degraded: %v\n", cause)

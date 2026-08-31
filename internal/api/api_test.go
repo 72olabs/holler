@@ -96,6 +96,146 @@ func TestUnixAPIAdoptsInactiveInboxWithConnectionBoundIdentity(t *testing.T) {
 	}
 }
 
+func TestUnixAPIAdoptionFencesSourceAndReportsFreshContinuityIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	db, socket := startServer(t, ctx, cancel, api.WithAttentionBroker(attention.NewBroker()))
+	handles := []string{"process:claude:source-run", "session:claude:source-session"}
+	source, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "source-run", Client: "test", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: handles, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if _, err := source.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "reviewer", RunID: "source-run", Harness: "claude", AttentionMode: "hook-long-poll",
+		SessionID: "source-session", ProjectID: "coupon", Lease: 10 * time.Millisecond,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "api-fence-seed", ProjectID: "coupon", ChannelID: "direct",
+		ToActors: []string{"reviewer"}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"handoff"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	target := dial(t, socket, "replacement", "target-run")
+	defer target.Close()
+	if _, err := target.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "replacement", RunID: "target-run", Harness: "test", SessionID: "target-session",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.AdoptActor(ctx, bus.AdoptRequest{
+		SourceActor: "reviewer", ProjectID: "coupon", IdempotencyKey: "api-terminal-handoff",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := source.CheckInbox(ctx, "reviewer", 10); err != nil || len(items) != 0 {
+		t.Fatalf("stale source inbox = %+v, err = %v", items, err)
+	}
+	if _, err := source.Claim(ctx, "reviewer", "", time.Minute); !errors.Is(err, bus.ErrNoMessage) {
+		t.Fatalf("stale source claim error = %v", err)
+	}
+	if _, err := source.HeartbeatRegistrations(ctx, "reviewer", "source-run", time.Hour); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("stale source heartbeat error = %v", err)
+	}
+	if _, err := source.MonitorAttach(ctx, "reviewer", "source-run", "source-session", "hook-long-poll", time.Hour); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("stale source monitor attach error = %v", err)
+	}
+	if _, err := source.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "retired-authorship", ProjectID: "coupon", ChannelID: "direct",
+		ToActors: []string{"peer"}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"must fail"}`),
+	}); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("stale source send error = %v", err)
+	}
+	if _, err := source.SetActorProfile(ctx, "reviewer", "source-run", "coupon", bus.ActorProfileRequest{
+		RoleText: "retired actor",
+	}); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("stale source profile error = %v", err)
+	}
+	if err := source.RecordHydration(ctx, "coupon", "reviewer", "source-run", "claude", "source-session", 0); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("stale source hydration error = %v", err)
+	}
+	legacy, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "source-run", Client: "legacy-test",
+	})
+	if err != nil {
+		t.Fatalf("legacy diagnostic connection: %v", err)
+	}
+	defer legacy.Close()
+	if _, err := legacy.Who(ctx, 10); err != nil {
+		t.Fatalf("legacy retired-source diagnostic: %v", err)
+	}
+	if err := legacy.ExpireRegistration(ctx, "reviewer", "source-run", "source-session", "post-adoption-session-end"); err != nil {
+		t.Fatalf("legacy retired-source cleanup: %v", err)
+	}
+	events, err := db.ListEvents(ctx, "coupon", "operational", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundCleanup := false
+	for _, event := range events {
+		if event.Kind == "session.stale" && event.ActorID == "reviewer" {
+			foundCleanup = true
+		}
+	}
+	if !foundCleanup {
+		t.Fatalf("retired source cleanup event missing: %+v", events)
+	}
+	if exact, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "exact-reuse", Client: "test", NameMode: bus.NameModeExact,
+		ProjectID: "coupon",
+	}); !errors.Is(err, bus.ErrActorAdopted) {
+		if exact != nil {
+			_ = exact.Close()
+		}
+		t.Fatalf("exact adopted-source API error = %v", err)
+	}
+	fresh, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "fresh-run", Client: "test", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:fresh-run", "session:claude:source-session"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	if identity := fresh.Identity(); identity.Actor != "reviewer-2" || identity.AdoptedPredecessor != "reviewer" || identity.Provisional {
+		t.Fatalf("fresh API identity = %+v", identity)
+	}
+}
+
+func TestUnixAPIAdoptionRejectsDifferentRunUnderLiveActor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	live := dial(t, socket, "replacement", "live-run")
+	defer live.Close()
+	if _, err := live.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "replacement", RunID: "live-run", Harness: "test", SessionID: "live-session",
+		Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sender := dial(t, socket, "sender", "sender-run")
+	defer sender.Close()
+	if _, err := sender.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "api-run-liveness", ProjectID: "test", ChannelID: "direct",
+		ToActors: []string{"orphan"}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"work"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stale := dial(t, socket, "replacement", "stale-run")
+	defer stale.Close()
+	if _, err := stale.AdoptActor(ctx, bus.AdoptRequest{
+		SourceActor: "orphan", ProjectID: "test", IdempotencyKey: "wrong-run",
+	}); !errors.Is(err, bus.ErrRunNotLive) {
+		t.Fatalf("wrong adopting run API error = %v", err)
+	}
+}
+
 func TestUnixAPIConnectorRegistrationAndEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	_, socket := startServer(t, ctx, cancel)

@@ -72,6 +72,9 @@ func (s *Store) SetActorProfile(ctx context.Context, actor, runID, projectID str
 		return bus.ActorProfileResult{}, fmt.Errorf("begin actor profile update: %w", err)
 	}
 	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, actor); err != nil {
+		return bus.ActorProfileResult{}, err
+	}
 
 	current, err := currentActorProfileTx(ctx, tx, actor)
 	if err == nil && current.RoleText == request.RoleText && reflect.DeepEqual(current.Accepts, accepts) {

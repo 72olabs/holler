@@ -96,10 +96,17 @@ holler adopt --actor codex-reviewer-3 --run replacement-run \
   --idempotency-key recover-reviewer-2
 ```
 
-Holler refuses a live source, an inactive replacement, or an active source
-claim. The decision is durable and one-winner; old and future mail addressed to
-the source reaches the replacement while still reporting the original
-recipient. Adoption is never automatic and does not support chains.
+Holler refuses a live source, a replacement run without its own live presence,
+or an active source claim. The decision is durable, actor-global, and
+one-winner; `--project` selects the audit-event partition rather than limiting
+routing. Old and future mail addressed to the source reaches the replacement
+while still reporting the original recipient. The source actor name is
+permanently retired: an old session continuity handle receives a fresh suffixed
+identity instead of silently reclaiming the transferred inbox, and a stale
+connection cannot renew presence or author new messages or profile metadata
+under the retired name. Plain protocol connections retain only read-only
+diagnostics and session cleanup. Reusing the adopter's own name inherits its
+adopted inboxes. Adoption is never automatic and does not support chains.
 
 ## What works today
 

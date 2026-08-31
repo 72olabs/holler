@@ -36,6 +36,9 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 	}
 	switch req.NameMode {
 	case bus.NameModeExact:
+		if err := assertActorNotAdoptedTx(ctx, tx, req.RequestedActor); err != nil {
+			return bus.ActorBindResult{}, err
+		}
 		presences, err := liveOtherPresencesTx(ctx, tx, req.RequestedActor, req.RunID, now)
 		if err != nil {
 			return bus.ActorBindResult{}, err
@@ -54,20 +57,38 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			}
 		}
 	case bus.NameModeAllocate:
+		bindingBase := req.RequestedActor
 		boundActor, found, err := resolveBoundActorTx(ctx, tx, req.ContinuityHandles)
 		if err != nil {
 			return bus.ActorBindResult{}, err
 		}
 		if found {
-			superseded, err := runSupersededForActorTx(ctx, tx, boundActor, req.RunID)
-			if err != nil {
+			if _, adopted, err := actorAdoptionTx(ctx, tx, boundActor); err != nil {
 				return bus.ActorBindResult{}, err
+			} else if adopted {
+				bindingBase, err = actorBaseTx(ctx, tx, boundActor, req.RequestedActor)
+				if err != nil {
+					return bus.ActorBindResult{}, err
+				}
+				provisional := !hasAuthoritativeContinuity(req.ContinuityHandles)
+				actor, _, err := allocateActorTx(ctx, tx, bindingBase, true, now)
+				if err != nil {
+					return bus.ActorBindResult{}, err
+				}
+				result.Actor = actor
+				result.Provisional = provisional
+				result.AdoptedPredecessor = boundActor
+			} else {
+				superseded, err := runSupersededForActorTx(ctx, tx, boundActor, req.RunID)
+				if err != nil {
+					return bus.ActorBindResult{}, err
+				}
+				if superseded {
+					return bus.ActorBindResult{}, bus.ErrBindingStale
+				}
+				result.Actor = boundActor
+				result.ContinuityReclaimed = true
 			}
-			if superseded {
-				return bus.ActorBindResult{}, bus.ErrBindingStale
-			}
-			result.Actor = boundActor
-			result.ContinuityReclaimed = true
 		} else {
 			provisional := !hasAuthoritativeContinuity(req.ContinuityHandles)
 			actor, _, err := allocateActorTx(ctx, tx, req.RequestedActor, true, now)
@@ -77,7 +98,6 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			result.Actor = actor
 			result.Provisional = provisional
 		}
-		bindingBase := req.RequestedActor
 		if result.ContinuityReclaimed {
 			bindingBase, err = actorBaseTx(ctx, tx, result.Actor, req.RequestedActor)
 			if err != nil {
@@ -85,12 +105,25 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			}
 		}
 		for _, handle := range req.ContinuityHandles {
-			if _, err := tx.ExecContext(ctx, `
+			query := `
 				INSERT INTO continuity_bindings(handle, actor, base_actor, created_at_ns, updated_at_ns)
 				VALUES (?, ?, ?, ?, ?)
 				ON CONFLICT(handle) DO UPDATE SET updated_at_ns = excluded.updated_at_ns
-				WHERE continuity_bindings.actor = excluded.actor`, handle, result.Actor,
-				bindingBase, now.UnixNano(), now.UnixNano()); err != nil {
+				WHERE continuity_bindings.actor = excluded.actor`
+			if result.AdoptedPredecessor != "" {
+				// resolveBoundActorTx already proved that every presented handle
+				// either belongs to this adopted predecessor, is unbound, or is
+				// an idle provisional binding that it removed. Repointing cannot
+				// steal a third actor's continuity handle.
+				query = `
+					INSERT INTO continuity_bindings(handle, actor, base_actor, created_at_ns, updated_at_ns)
+					VALUES (?, ?, ?, ?, ?)
+					ON CONFLICT(handle) DO UPDATE SET
+						actor = excluded.actor,
+						base_actor = excluded.base_actor,
+						updated_at_ns = excluded.updated_at_ns`
+			}
+			if _, err := tx.ExecContext(ctx, query, handle, result.Actor, bindingBase, now.UnixNano(), now.UnixNano()); err != nil {
 				return bus.ActorBindResult{}, fmt.Errorf("bind continuity handle: %w", err)
 			}
 		}

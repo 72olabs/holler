@@ -29,15 +29,16 @@ const (
 )
 
 type Identity struct {
-	Actor             string
-	RunID             string
-	Client            string
-	Build             buildinfo.Info
-	NameMode          bus.NameMode
-	ContinuityHandles []string
-	ProjectID         string
-	Takeover          bool
-	Provisional       bool
+	Actor              string
+	RunID              string
+	Client             string
+	Build              buildinfo.Info
+	NameMode           bus.NameMode
+	ContinuityHandles  []string
+	ProjectID          string
+	Takeover           bool
+	Provisional        bool
+	AdoptedPredecessor string
 }
 
 type Request struct {
@@ -228,7 +229,8 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	}
 	assignedActor := hello.Actor
 	var binding bus.ActorBindResult
-	if hello.NameMode != "" || len(hello.ContinuityHandles) > 0 || hello.Takeover {
+	featureIdentity := hello.NameMode != "" || len(hello.ContinuityHandles) > 0 || hello.Takeover
+	if featureIdentity {
 		if hello.ProjectID == "" {
 			hello.ProjectID = "default"
 		}
@@ -260,6 +262,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		"requested_actor": hello.Actor, "run_id": hello.RunID, "server_time": time.Now().UTC(), "build": s.build,
 		"capabilities": []string{ActorAllocationCapability}, "minted": binding.Minted,
 		"continuity_reclaimed": binding.ContinuityReclaimed, "provisional": binding.Provisional,
+		"adopted_predecessor": binding.AdoptedPredecessor,
 	})
 	if err := writeResponse(connection, Response{ID: request.ID, OK: true, Result: ready}); err != nil {
 		return
@@ -267,7 +270,8 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	identity := Identity{
 		Actor: assignedActor, RunID: hello.RunID, Client: hello.Client, Build: hello.Build,
 		NameMode: hello.NameMode, ContinuityHandles: hello.ContinuityHandles, ProjectID: hello.ProjectID,
-		Provisional: binding.Provisional,
+		Provisional:        binding.Provisional,
+		AdoptedPredecessor: binding.AdoptedPredecessor,
 	}
 	defer func() {
 		if identity.Provisional {
@@ -673,11 +677,12 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild bool) er
 		return errors.New("hollerd returned invalid hello response")
 	}
 	var ready struct {
-		Protocol     int            `json:"protocol"`
-		Actor        string         `json:"actor"`
-		Build        buildinfo.Info `json:"build"`
-		Capabilities []string       `json:"capabilities"`
-		Provisional  bool           `json:"provisional"`
+		Protocol           int            `json:"protocol"`
+		Actor              string         `json:"actor"`
+		Build              buildinfo.Info `json:"build"`
+		Capabilities       []string       `json:"capabilities"`
+		Provisional        bool           `json:"provisional"`
+		AdoptedPredecessor string         `json:"adopted_predecessor"`
 	}
 	if err := json.Unmarshal(response.Result, &ready); err != nil {
 		c.closeLocked()
@@ -693,6 +698,7 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild bool) er
 	}
 	c.identity.Actor = ready.Actor
 	c.identity.Provisional = ready.Provisional
+	c.identity.AdoptedPredecessor = ready.AdoptedPredecessor
 	c.serverBuild = ready.Build
 	return nil
 }
@@ -1158,6 +1164,10 @@ func rpcError(err error) *RPCError {
 		code = "adoption_busy"
 	case errors.Is(err, bus.ErrActorNotLive):
 		code = "actor_not_live"
+	case errors.Is(err, bus.ErrRunNotLive):
+		code = "run_not_live"
+	case errors.Is(err, bus.ErrActorAdopted):
+		code = "actor_adopted"
 	}
 	return &RPCError{Code: code, Message: err.Error(), Retryable: false}
 }
@@ -1204,6 +1214,10 @@ func errorFromRPC(rpc *RPCError) error {
 		sentinel = bus.ErrAdoptionBusy
 	case "actor_not_live":
 		sentinel = bus.ErrActorNotLive
+	case "run_not_live":
+		sentinel = bus.ErrRunNotLive
+	case "actor_adopted":
+		sentinel = bus.ErrActorAdopted
 	}
 	if sentinel != nil {
 		return fmt.Errorf("%s: %w", rpc.Message, sentinel)

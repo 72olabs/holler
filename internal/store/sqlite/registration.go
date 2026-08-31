@@ -76,6 +76,9 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 		return bus.Registration{}, fmt.Errorf("begin registration: %w", err)
 	}
 	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, req.Actor); err != nil {
+		return bus.Registration{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO registrations(
 			actor, run_id, harness, attention_mode, session_id, delivery_handle, project_id, working_directory,
@@ -159,7 +162,15 @@ func (s *Store) HeartbeatRegistrations(ctx context.Context, actor, runID string,
 		return 0, &bus.ValidationError{Field: "registration.lease", Problem: "must be between 0 and 24h"}
 	}
 	now := s.now().UTC()
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin registration heartbeat: %w", err)
+	}
+	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, actor); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `
 		UPDATE registrations SET updated_at_ns = ?, lease_expires_at_ns = ?
 		WHERE rowid = (
 			SELECT rowid FROM registrations
@@ -171,7 +182,13 @@ func (s *Store) HeartbeatRegistrations(ctx context.Context, actor, runID string,
 		return 0, err
 	}
 	changed, err := result.RowsAffected()
-	return int(changed), err
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit registration heartbeat: %w", err)
+	}
+	return int(changed), nil
 }
 
 // AttachMonitor renews the exact passive registration used by a live Claude
@@ -198,6 +215,9 @@ func (s *Store) AttachMonitor(ctx context.Context, actor, runID, sessionID, harn
 		return bus.Registration{}, fmt.Errorf("begin monitor attach: %w", err)
 	}
 	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, actor); err != nil {
+		return bus.Registration{}, err
+	}
 	var storedHarness, storedMode string
 	var rowID, registeredNS int64
 	var endedNS, supersededNS sql.NullInt64
@@ -347,6 +367,9 @@ func (s *Store) RecordHydration(ctx context.Context, projectID, actor, runID, ha
 		return fmt.Errorf("begin hydration event: %w", err)
 	}
 	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, actor); err != nil {
+		return err
+	}
 	payload := bus.EventProvenance(ctx, runID)
 	payload["harness"] = harness
 	payload["session_id"] = sessionID

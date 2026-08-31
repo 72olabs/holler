@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/72olabs/holler/internal/bus"
+	store "github.com/72olabs/holler/internal/store/sqlite"
 )
 
 func TestActorAdoptionPreservesOriginalRecipientAcrossDeliveryLifecycle(t *testing.T) {
@@ -171,15 +172,15 @@ func TestActorAdoptionEnforcesLivenessClaimsAndOneWinner(t *testing.T) {
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	var wait sync.WaitGroup
-	for _, target := range []string{"replacement-a", "replacement-b"} {
+	for _, target := range []struct{ actor, run string }{{"replacement-a", "run-a"}, {"replacement-b", "run-b"}} {
 		target := target
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
 			<-start
 			_, adoptErr := db.AdoptActor(ctx, bus.AdoptRequest{
-				SourceActor: "source-race", AdoptingActor: target, AdoptingRun: "run-" + target,
-				ProjectID: "test", IdempotencyKey: "race-" + target,
+				SourceActor: "source-race", AdoptingActor: target.actor, AdoptingRun: target.run,
+				ProjectID: "test", IdempotencyKey: "race-" + target.actor,
 			})
 			results <- adoptErr
 		}()
@@ -200,6 +201,173 @@ func TestActorAdoptionEnforcesLivenessClaimsAndOneWinner(t *testing.T) {
 	}
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("race outcomes: successes=%d conflicts=%d", successes, conflicts)
+	}
+}
+
+func TestActorAdoptionRequiresTheExactAdoptingRunToBeLive(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTestStore(t)
+	registerLiveActor(t, db, "replacement", "live-run")
+	if _, err := db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "exact-run-seed", ProjectID: "test", ChannelID: "direct",
+		FromActor: "sender", FromRun: "sender-run", ToActors: []string{"orphan"},
+		Type: "MESSAGE", Body: json.RawMessage(`{"text":"work"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdoptActor(ctx, bus.AdoptRequest{
+		SourceActor: "orphan", AdoptingActor: "replacement", AdoptingRun: "stale-run",
+		ProjectID: "test", IdempotencyKey: "wrong-run",
+	}); !errors.Is(err, bus.ErrRunNotLive) {
+		t.Fatalf("wrong adopting run error = %v", err)
+	}
+	if inbox, err := db.CheckInbox(ctx, "orphan", 10); err != nil || len(inbox) != 1 {
+		t.Fatalf("source inbox changed after rejected adoption: %+v, err = %v", inbox, err)
+	}
+}
+
+func TestAdoptedSourceCannotReviveExpiredPresenceOrAuthorData(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Date(2026, 8, 31, 18, 0, 0, 0, time.UTC)}
+	db, _ := openTestStore(t, store.WithClock(clock.Now))
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "reviewer-old", RunID: "old-run", Harness: "claude", AttentionMode: "hook-long-poll",
+		SessionID: "old-session", ProjectID: "coupon", Lease: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "expired-presence-seed", ProjectID: "coupon", ChannelID: "direct",
+		FromActor: "sender", FromRun: "sender-run", ToActors: []string{"reviewer-old"},
+		Type: "MESSAGE", Body: json.RawMessage(`{"text":"handoff"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Minute)
+	registerLiveActor(t, db, "replacement", "replacement-run")
+	if _, err := db.AdoptActor(ctx, bus.AdoptRequest{
+		SourceActor: "reviewer-old", AdoptingActor: "replacement", AdoptingRun: "replacement-run",
+		ProjectID: "coupon", IdempotencyKey: "expired-presence-adoption",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.HeartbeatRegistrations(ctx, "reviewer-old", "old-run", time.Hour); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("adopted source heartbeat error = %v", err)
+	}
+	if _, err := db.AttachMonitor(ctx, "reviewer-old", "old-run", "old-session", "claude", "hook-long-poll", time.Hour); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("adopted source monitor attach error = %v", err)
+	}
+	if live, err := db.LiveRegistrations(ctx, "reviewer-old"); err != nil || len(live) != 0 {
+		t.Fatalf("retired source presence revived: %+v, err = %v", live, err)
+	}
+	if _, err := db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "retired-send", ProjectID: "coupon", ChannelID: "direct",
+		FromActor: "reviewer-old", FromRun: "old-run", ToActors: []string{"peer"},
+		Type: "MESSAGE", Body: json.RawMessage(`{"text":"must fail"}`),
+	}); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("adopted source send error = %v", err)
+	}
+	if _, err := db.SetActorProfile(ctx, "reviewer-old", "old-run", "coupon", bus.ActorProfileRequest{
+		RoleText: "retired actor",
+	}); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("adopted source profile error = %v", err)
+	}
+	if err := db.RecordHydration(ctx, "coupon", "reviewer-old", "old-run", "claude", "old-session", 0); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("adopted source hydration error = %v", err)
+	}
+}
+
+func TestAdoptedSourceIdentityIsFencedAndContinuityMovesToFreshActor(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTestStore(t)
+	handles := []string{"process:codex:old-run", "session:codex:old-session"}
+	source, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "reviewer-old", RunID: "old-run", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: handles, ProjectID: "coupon",
+	})
+	if err != nil || source.Actor != "reviewer-old" {
+		t.Fatalf("source binding = %+v, err = %v", source, err)
+	}
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: source.Actor, RunID: "old-run", Harness: "codex", SessionID: "old-session",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "fenced-source-seed", ProjectID: "coupon", ChannelID: "direct",
+		FromActor: "sender", FromRun: "sender-run", ToActors: []string{source.Actor},
+		Type: "MESSAGE", Body: json.RawMessage(`{"text":"handoff"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ExpireRegistration(ctx, source.Actor, "old-run", "old-session", "crashed"); err != nil {
+		t.Fatal(err)
+	}
+	registerLiveActor(t, db, "replacement", "replacement-run")
+	if _, err := db.AdoptActor(ctx, bus.AdoptRequest{
+		SourceActor: source.Actor, AdoptingActor: "replacement", AdoptingRun: "replacement-run",
+		ProjectID: "coupon", IdempotencyKey: "terminal-handoff",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: source.Actor, RunID: "exact-reuse", NameMode: bus.NameModeExact,
+	}); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("exact adopted-source bind error = %v", err)
+	}
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: source.Actor, RunID: "legacy-reuse", Harness: "test", SessionID: "legacy-reuse",
+		Lease: time.Hour,
+	}); !errors.Is(err, bus.ErrActorAdopted) {
+		t.Fatalf("adopted-source registration error = %v", err)
+	}
+
+	freshHandles := []string{"process:codex:fresh-run", "session:codex:old-session"}
+	fresh, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: source.Actor, RunID: "fresh-run", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: freshHandles, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Actor != "reviewer-old-2" || fresh.AdoptedPredecessor != source.Actor ||
+		fresh.ContinuityReclaimed || !fresh.Minted || fresh.Provisional {
+		t.Fatalf("fresh binding after adoption = %+v", fresh)
+	}
+	if current, err := db.CurrentActorForContinuity(ctx, freshHandles); err != nil || current != fresh.Actor {
+		t.Fatalf("repointed continuity actor = %q, err = %v", current, err)
+	}
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: fresh.Actor, RunID: "fresh-run", Harness: "codex", SessionID: "old-session",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if inbox, err := db.CheckInbox(ctx, fresh.Actor, 10); err != nil || len(inbox) != 0 {
+		t.Fatalf("fresh actor inherited adopted inbox: %+v, err = %v", inbox, err)
+	}
+	if inbox, err := db.CheckInbox(ctx, "replacement", 10); err != nil || len(inbox) != 1 {
+		t.Fatalf("adopter lost source inbox: %+v, err = %v", inbox, err)
+	}
+
+	if err := db.ExpireRegistration(ctx, "replacement", "replacement-run", "replacement-session", "restart"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "replacement", RunID: "replacement-resume", NameMode: bus.NameModeExact,
+	}); err != nil {
+		t.Fatalf("adopter name reuse bind: %v", err)
+	}
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "replacement", RunID: "replacement-resume", Harness: "test", SessionID: "replacement-resume",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatalf("adopter name reuse registration: %v", err)
+	}
+	if inbox, err := db.CheckInbox(ctx, "replacement", 10); err != nil || len(inbox) != 1 || inbox[0].OriginalRecipientActor != source.Actor {
+		t.Fatalf("resumed adopter inbox = %+v, err = %v", inbox, err)
 	}
 }
 
@@ -232,7 +400,6 @@ func TestActorAdoptionRejectsChainsThatWouldOrphanForwardedMessages(t *testing.T
 	}); !errors.Is(err, bus.ErrInvalid) {
 		t.Fatalf("source adoption chain error = %v", err)
 	}
-	registerLiveActor(t, db, "old", "old-new-run")
 	if _, err := db.AdoptActor(ctx, bus.AdoptRequest{
 		SourceActor: "other", AdoptingActor: "old", AdoptingRun: "old-new-run",
 		ProjectID: "test", IdempotencyKey: "other-to-old",

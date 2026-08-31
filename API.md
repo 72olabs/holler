@@ -119,6 +119,18 @@ run from reclaiming the superseded actor through continuity, returning the
 non-retryable `binding_stale` error. Ended or lapsed runs may still be resumed
 by a successor run.
 
+Adoption is a terminal transfer of the source actor name. An `exact` hello for
+an adopted source returns `actor_adopted`. A plain protocol connection may
+still open for read-only diagnostics and `expire_registration` cleanup, but it
+cannot renew presence, access deliveries, or author messages, profile metadata,
+or hydration events. Delivery reads from that retired identity return an empty
+inbox rather than a special retirement error. If a lifecycle continuity handle
+still points at that source, `allocate` mints a fresh suffix and atomically
+repoints the presented handles, and returns `adopted_predecessor` in the ready
+response so the connector can explain the rename. The adopted inbox remains
+with the adopter. Reusing the adopter's own actor name later intentionally
+inherits both its ordinary inbox and every source inbox it adopted.
+
 When an MCP process connects before its lifecycle hook, the daemon may hold an
 invisible process-only reservation. The hook either finalizes it or reconciles
 it to the actor already bound to the resumed session. A provisional connection
@@ -168,13 +180,19 @@ are never included in directory results.
 
 `adopt_actor` records an explicit recovery decision from an inactive source
 actor to the live connection-bound actor. The daemon ignores any caller-supplied
-target identity, requires at least one claimable source delivery, refuses a
+target identity, requires the connection's exact actor/run registration to be
+live and at least one claimable source delivery, refuses a
 live source or an active source claim, and commits exactly one winner. A stable
 idempotency key makes an exact retry safe. Existing and future source deliveries
 become visible to the adopter without changing the message's `to_actors` or the
 stored delivery recipient; inbox and claim results expose
 `original_recipient_actor`. One target may adopt multiple independent sources,
 but adoption chains are rejected because they would make routing ambiguous.
+Adoption routing is actor-global: `project_id` selects the durable audit-event
+partition, not the scope of the forwarding decision. If one message directly
+targets both the adopter and an adopted source, the adopter's direct delivery
+wins. The source delivery remains an immutable audit row but is not separately
+claimable.
 
 For every new send whose delivery request asks for attention, the same transaction creates a durable notification-outbox row. `hollerd` dispatches it asynchronously after commit and retries transient failures without delaying the send response. The response reports `notification_state: "pending"`; outcomes are operational events, including `delivery.notification_abandoned` after five failed attempts. A wake failure does not convert a committed send into an RPC error, and an idempotent duplicate does not create a second outbox job. If no session is registered, startup hydration—not a delayed notification job—remains the durable fallback.
 

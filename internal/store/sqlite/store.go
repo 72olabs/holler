@@ -190,6 +190,9 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 		return bus.SendResult{}, fmt.Errorf("begin send: %w", err)
 	}
 	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, req.FromActor); err != nil {
+		return bus.SendResult{}, err
+	}
 
 	if req.InReplyTo != "" {
 		parent, err := getMessageByIDTx(ctx, tx, req.InReplyTo)

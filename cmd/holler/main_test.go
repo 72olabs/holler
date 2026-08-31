@@ -125,6 +125,20 @@ func TestCLIAdoptInactiveInbox(t *testing.T) {
 	if len(items) != 1 || items[0].MessageID != sent.Message.ID || items[0].OriginalRecipientActor != "reviewer-old" {
 		t.Fatalf("adopted inbox = %+v", items)
 	}
+	t.Setenv("HOLLER_ACTOR", "reviewer-old")
+	t.Setenv("HOLLER_RUN", "retired-run")
+	statusRaw := invoke(t, ctx, "status", "--socket", socket)
+	var status map[string]interface{}
+	decode(t, statusRaw, &status)
+	if status["ok"] != true {
+		t.Fatalf("status under retired actor environment = %+v", status)
+	}
+	whoRaw := invoke(t, ctx, "who", "--socket", socket)
+	var directory bus.ActorDirectory
+	decode(t, whoRaw, &directory)
+	if len(directory.Actors) == 0 {
+		t.Fatal("who returned no actors under retired actor environment")
+	}
 }
 
 func TestCLIMCPUsesConnectorBoundEnvironment(t *testing.T) {

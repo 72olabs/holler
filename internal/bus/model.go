@@ -33,6 +33,8 @@ var (
 	ErrAdoptionConflict    = errors.New("actor inbox was already adopted by another actor")
 	ErrAdoptionBusy        = errors.New("actor inbox has an active claim")
 	ErrActorNotLive        = errors.New("adopting actor has no live presence")
+	ErrRunNotLive          = errors.New("adopting run has no live presence")
+	ErrActorAdopted        = errors.New("actor identity was permanently adopted")
 )
 
 type NameMode string
@@ -259,6 +261,7 @@ type ActorBindResult struct {
 	Minted              bool           `json:"minted"`
 	Provisional         bool           `json:"provisional"`
 	ContinuityReclaimed bool           `json:"continuity_reclaimed"`
+	AdoptedPredecessor  string         `json:"adopted_predecessor,omitempty"`
 	SupersededPresences []Registration `json:"-"`
 }
 
