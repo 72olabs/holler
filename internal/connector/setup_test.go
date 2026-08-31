@@ -55,6 +55,7 @@ func TestClaudeSetupApplyPreservesSettingsAndWritesSelection(t *testing.T) {
 	}
 	plan, err := connector.SetupClaude(context.Background(), connector.ClaudeSetupConfig{
 		AttentionMode: connector.AttentionHookLongPoll,
+		NameMode:      "allocate",
 		Actor:         "claude-review", Peer: "codex", Project: "holler", Channel: "direct",
 		Marketplace: directory, ClaudeSettings: settings, ConnectorConfig: configPath, Apply: true,
 		HollerBinary: "/usr/bin/true", RuntimeBinaryPath: filepath.Join(directory, "bin-path"),
@@ -77,7 +78,7 @@ func TestClaudeSetupApplyPreservesSettingsAndWritesSelection(t *testing.T) {
 		t.Fatalf("settings = %s", raw)
 	}
 	loaded, err := connector.LoadClaudeConnectorConfig(configPath)
-	if err != nil || loaded.AttentionMode != connector.AttentionHookLongPoll || loaded.Actor != "claude-review" {
+	if err != nil || loaded.AttentionMode != connector.AttentionHookLongPoll || loaded.NameMode != "allocate" || loaded.Actor != "claude-review" {
 		t.Fatalf("config=%+v err=%v", loaded, err)
 	}
 }

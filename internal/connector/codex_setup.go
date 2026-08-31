@@ -16,6 +16,7 @@ import (
 
 type CodexSetupConfig struct {
 	AttentionMode     string
+	NameMode          string
 	Actor             string
 	Role              string
 	Peer              string
@@ -62,7 +63,7 @@ func SetupCodex(ctx context.Context, config CodexSetupConfig, options ...SetupOp
 	}
 	plan := SetupPlan{
 		SchemaVersion: 1, Harness: "codex", Applied: config.Apply,
-		AttentionMode: config.AttentionMode, PluginID: config.PluginID,
+		AttentionMode: config.AttentionMode, NameMode: config.NameMode, PluginID: config.PluginID,
 		ConnectorConfigPath: config.ConnectorConfig, PolicyPath: config.PolicyPath, Profile: config.Profile,
 		RuntimeBinaryPath: config.RuntimeBinaryPath,
 		Actions: []string{
@@ -135,7 +136,7 @@ func SetupCodex(ctx context.Context, config CodexSetupConfig, options ...SetupOp
 		}
 	}
 	connectorBackup, err := writeJSONConfig(config.ConnectorConfig, CodexConnectorConfig{
-		SchemaVersion: 1, AttentionMode: config.AttentionMode, PluginID: config.PluginID,
+		SchemaVersion: 1, AttentionMode: config.AttentionMode, NameMode: config.NameMode, PluginID: config.PluginID,
 		Profile: config.Profile, Actor: config.Actor, Role: config.Role, Peer: config.Peer,
 		Project: config.Project, ProjectRoot: config.ProjectRoot, Channel: config.Channel, Socket: config.Socket,
 		HollerBinary: config.HollerBinary, ClientBinary: config.CodexBinary,
@@ -188,6 +189,7 @@ func codexMarketplaceRegistration(ctx context.Context, runner CommandRunner, bin
 }
 
 func codexSetupDefaults(config CodexSetupConfig) CodexSetupConfig {
+	config.NameMode = strings.TrimSpace(config.NameMode)
 	if strings.TrimSpace(config.HollerBinary) == "" {
 		config.HollerBinary, _ = os.Executable()
 	}
@@ -237,6 +239,9 @@ func codexSetupDefaults(config CodexSetupConfig) CodexSetupConfig {
 
 func validateCodexSetup(config CodexSetupConfig) error {
 	if err := ValidateCodexAttentionMode(config.AttentionMode); err != nil {
+		return err
+	}
+	if err := ValidateNameMode(config.NameMode); err != nil {
 		return err
 	}
 	if strings.TrimSpace(config.Actor) == "" {

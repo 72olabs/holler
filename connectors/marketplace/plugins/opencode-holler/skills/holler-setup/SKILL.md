@@ -14,7 +14,7 @@ holler connector setup --harness opencode --attention <native-prompt|startup-onl
   --actor <actor> --peer <peer> --project <project> --package-source <source-package> --apply
 ```
 
-Setup installs a connector-owned OpenCode config directory rather than rewriting the user's general config. It adds only the Holler MCP server, its eight explicit tool permissions, lifecycle plugin, and two skills. Existing connector-owned files receive backups.
+Setup installs a connector-owned OpenCode config directory rather than rewriting the user's general config. It adds only the Holler MCP server, its ten explicit tool permissions, lifecycle plugin, and two skills. Existing connector-owned files receive backups.
 
 Launch configured sessions through:
 
@@ -24,6 +24,8 @@ holler connector launch --harness opencode --actor <actor> -- [additional openco
 
 The launcher supplies a fresh run identity, loopback server binding, per-run HTTP credentials, project root, MCP profile, plugin directory, and selected attention adapter. Starting plain `opencode` does not guarantee those bindings.
 
+Naming is opt-in. Use `--name-mode exact` to refuse another live run unless the operator also supplies `--takeover`. Use `--name-mode allocate` for independently addressable parallel actors and `--launch-tag <stable-tag>` when a supervisor should reclaim an allocation after restart.
+
 Run the doctor command reported by setup. `CONFIGURED` proves static setup only. `live-review` is `READY` only after an installed OpenCode client registers and processes a real native-prompt wake through claim and acknowledgement. `startup-only` can satisfy only `async-peer`.
 
-Treat actor identity as an inbox identity. Concurrent sessions using one actor are competing consumers; use distinct actors when each session must be independently addressable.
+Treat actor identity as an inbox identity. In legacy mode concurrent sessions using one actor are competing consumers; prefer allocate mode when each session must be independently addressable.

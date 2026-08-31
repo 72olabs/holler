@@ -10,19 +10,24 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/72olabs/holler/internal/bus"
 )
 
 // RuntimeBinding is the identity and routing state shared by a harness's MCP
 // server and lifecycle hooks. Explicit launcher values win; a normally started
 // harness falls back to the connector selection written by setup.
 type RuntimeBinding struct {
-	Actor   string
-	RunID   string
-	Role    string
-	Peer    string
-	Project string
-	Channel string
-	Socket  string
+	Actor     string
+	RunID     string
+	Role      string
+	Peer      string
+	Project   string
+	Channel   string
+	Socket    string
+	NameMode  bus.NameMode
+	LaunchTag string
+	Takeover  bool
 }
 
 func ResolveRuntimeBinding(harness string, binding RuntimeBinding) (RuntimeBinding, error) {
@@ -38,21 +43,21 @@ func ResolveRuntimeBinding(harness string, binding RuntimeBinding) (RuntimeBindi
 		config, err = LoadClaudeConnectorConfig("")
 		configured = RuntimeBinding{
 			Actor: config.Actor, Role: config.Role, Peer: config.Peer, Project: config.Project,
-			Channel: config.Channel, Socket: config.Socket,
+			Channel: config.Channel, Socket: config.Socket, NameMode: bus.NameMode(strings.TrimSpace(config.NameMode)),
 		}
 	case "codex":
 		var config CodexConnectorConfig
 		config, err = LoadCodexConnectorConfig("")
 		configured = RuntimeBinding{
 			Actor: config.Actor, Role: config.Role, Peer: config.Peer, Project: config.Project,
-			Channel: config.Channel, Socket: config.Socket,
+			Channel: config.Channel, Socket: config.Socket, NameMode: bus.NameMode(strings.TrimSpace(config.NameMode)),
 		}
 	case "opencode":
 		var config OpenCodeConnectorConfig
 		config, err = LoadOpenCodeConnectorConfig("")
 		configured = RuntimeBinding{
 			Actor: config.Actor, Role: config.Role, Peer: config.Peer, Project: config.Project,
-			Channel: config.Channel, Socket: config.Socket,
+			Channel: config.Channel, Socket: config.Socket, NameMode: bus.NameMode(strings.TrimSpace(config.NameMode)),
 		}
 	default:
 		return RuntimeBinding{}, fmt.Errorf("unsupported runtime binding harness %q", harness)
@@ -66,13 +71,54 @@ func ResolveRuntimeBinding(harness string, binding RuntimeBinding) (RuntimeBindi
 	binding.Project = firstNonEmpty(binding.Project, configured.Project, "default")
 	binding.Channel = firstNonEmpty(binding.Channel, configured.Channel, "direct")
 	binding.Socket = firstNonEmpty(binding.Socket, configured.Socket)
+	if binding.NameMode == "" {
+		binding.NameMode = configured.NameMode
+	}
+	binding.NameMode = bus.NameMode(strings.TrimSpace(string(binding.NameMode)))
+	binding.LaunchTag = strings.TrimSpace(binding.LaunchTag)
 	if strings.TrimSpace(binding.Actor) == "" {
 		return RuntimeBinding{}, fmt.Errorf("%s connector actor is not configured; run holler connector setup", harness)
 	}
 	if strings.TrimSpace(binding.RunID) == "" {
 		binding.RunID = processRunID(binding.Actor, harness)
 	}
+	if err := ValidateNameMode(string(binding.NameMode)); err != nil {
+		return RuntimeBinding{}, err
+	}
+	if binding.Takeover && binding.NameMode != bus.NameModeExact {
+		return RuntimeBinding{}, fmt.Errorf("takeover requires exact name mode")
+	}
+	if binding.LaunchTag != "" && binding.NameMode != bus.NameModeAllocate {
+		return RuntimeBinding{}, fmt.Errorf("launch tag requires allocate name mode")
+	}
+	if err := bus.ValidateTextIdentifier("launch_tag", binding.LaunchTag, 256); err != nil {
+		return RuntimeBinding{}, err
+	}
 	return binding, nil
+}
+
+func ValidateNameMode(mode string) error {
+	switch bus.NameMode(strings.TrimSpace(mode)) {
+	case "", bus.NameModeExact, bus.NameModeAllocate:
+		return nil
+	default:
+		return fmt.Errorf("unsupported Holler name mode %q (expected exact or allocate)", mode)
+	}
+}
+
+func (binding RuntimeBinding) ContinuityHandles(harness, sessionID string) []string {
+	if binding.NameMode != bus.NameModeAllocate {
+		return nil
+	}
+	harness = strings.ToLower(strings.TrimSpace(harness))
+	handles := []string{"process:" + harness + ":" + binding.RunID}
+	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+		handles = append(handles, "session:"+harness+":"+sessionID)
+	}
+	if tag := strings.TrimSpace(binding.LaunchTag); tag != "" {
+		handles = append(handles, "launch:"+harness+":"+tag)
+	}
+	return handles
 }
 
 // processRunID gives plugin processes launched by the same harness process the

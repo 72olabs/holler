@@ -101,6 +101,9 @@ Profiles are untrusted descriptive hints, never permissions.
   each model-controlled send.
 - Agents can publish advisory role profiles and discover live, ended, or lapsed
   peers, their recent sessions, and orphaned inbox counts.
+- Optional `exact` naming refuses accidental duplicate live actors; optional
+  `allocate` naming creates parallel `actor`, `actor-2`, ... identities and
+  reclaims them after restart from a session or supervisor launch tag.
 
 The release suite has exercised both Claude-to-Codex and Codex-to-Claude
 conversations, two concurrent threads, a three-agent review handoff, daemon
@@ -163,6 +166,18 @@ The claim and acknowledgement are the durable evidence.
 Holler exposes the same message semantics through MCP, CLI, and its framed
 local protocol. A client does not need MCP if it can invoke the CLI or use a
 future SDK.
+
+Existing installations retain legacy actor behavior. For independently
+addressable parallel sessions, opt in during setup:
+
+```sh
+holler setup codex --name-mode allocate
+holler setup claude --name-mode allocate
+```
+
+Supervisors can launch with `--launch-tag <stable-tag>` so a replacement
+process reclaims its allocation. Use `--name-mode exact` when duplicates must
+be rejected and add launcher-only `--takeover` only for a deliberate handoff.
 
 ## Current boundaries
 

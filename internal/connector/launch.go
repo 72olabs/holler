@@ -14,6 +14,8 @@ type ClaudeLaunchConfig struct {
 	ClaudeBinary    string
 	ConnectorPath   string
 	RunID           string
+	LaunchTag       string
+	Takeover        bool
 	ExtraArgs       []string
 }
 
@@ -23,6 +25,8 @@ type CodexLaunchConfig struct {
 	CodexBinary     string
 	ConnectorPath   string
 	RunID           string
+	LaunchTag       string
+	Takeover        bool
 	ExtraArgs       []string
 }
 
@@ -32,6 +36,8 @@ type OpenCodeLaunchConfig struct {
 	OpenCodeBinary  string
 	ConnectorPath   string
 	RunID           string
+	LaunchTag       string
+	Takeover        bool
 	ServerPassword  string
 	ExtraArgs       []string
 }
@@ -45,7 +51,12 @@ type LaunchSpec struct {
 
 func BuildClaudeLaunch(config ClaudeLaunchConfig) (LaunchSpec, error) {
 	connectorConfig := config.ConnectorConfig
+	connectorConfig.NameMode = strings.TrimSpace(connectorConfig.NameMode)
+	config.LaunchTag = strings.TrimSpace(config.LaunchTag)
 	if err := ValidateClaudeAttentionMode(connectorConfig.AttentionMode); err != nil {
+		return LaunchSpec{}, err
+	}
+	if err := validateLaunchNaming(connectorConfig.NameMode, config.LaunchTag, config.Takeover); err != nil {
 		return LaunchSpec{}, err
 	}
 	if strings.TrimSpace(connectorConfig.Actor) == "" {
@@ -90,12 +101,18 @@ func BuildClaudeLaunch(config ClaudeLaunchConfig) (LaunchSpec, error) {
 	if config.ConnectorPath != "" {
 		environment["HOLLER_CONNECTOR_CONFIG"] = config.ConnectorPath
 	}
+	addLaunchNamingEnvironment(environment, connectorConfig.NameMode, config.LaunchTag, config.Takeover)
 	return LaunchSpec{Command: config.ClaudeBinary, Args: args, Env: environment, RunID: config.RunID}, nil
 }
 
 func BuildCodexLaunch(config CodexLaunchConfig) (LaunchSpec, error) {
 	connectorConfig := config.ConnectorConfig
+	connectorConfig.NameMode = strings.TrimSpace(connectorConfig.NameMode)
+	config.LaunchTag = strings.TrimSpace(config.LaunchTag)
 	if err := ValidateCodexAttentionMode(connectorConfig.AttentionMode); err != nil {
+		return LaunchSpec{}, err
+	}
+	if err := validateLaunchNaming(connectorConfig.NameMode, config.LaunchTag, config.Takeover); err != nil {
 		return LaunchSpec{}, err
 	}
 	if strings.TrimSpace(connectorConfig.Actor) == "" {
@@ -159,12 +176,18 @@ func BuildCodexLaunch(config CodexLaunchConfig) (LaunchSpec, error) {
 	if config.ConnectorPath != "" {
 		environment["HOLLER_CODEX_CONNECTOR_CONFIG"] = config.ConnectorPath
 	}
+	addLaunchNamingEnvironment(environment, connectorConfig.NameMode, config.LaunchTag, config.Takeover)
 	return LaunchSpec{Command: config.CodexBinary, Args: args, Env: environment, RunID: config.RunID}, nil
 }
 
 func BuildOpenCodeLaunch(config OpenCodeLaunchConfig) (LaunchSpec, error) {
 	connectorConfig := config.ConnectorConfig
+	connectorConfig.NameMode = strings.TrimSpace(connectorConfig.NameMode)
+	config.LaunchTag = strings.TrimSpace(config.LaunchTag)
 	if err := validateOpenCodeConnectorConfig(connectorConfig); err != nil {
+		return LaunchSpec{}, err
+	}
+	if err := validateLaunchNaming(connectorConfig.NameMode, config.LaunchTag, config.Takeover); err != nil {
 		return LaunchSpec{}, err
 	}
 	if strings.TrimSpace(connectorConfig.Actor) == "" {
@@ -238,7 +261,36 @@ func BuildOpenCodeLaunch(config OpenCodeLaunchConfig) (LaunchSpec, error) {
 	if connectorConfig.Socket != "" {
 		environment["HOLLER_SOCKET"] = connectorConfig.Socket
 	}
+	addLaunchNamingEnvironment(environment, connectorConfig.NameMode, config.LaunchTag, config.Takeover)
 	return LaunchSpec{Command: config.OpenCodeBinary, Args: args, Env: environment, RunID: config.RunID}, nil
+}
+
+func validateLaunchNaming(nameMode, launchTag string, takeover bool) error {
+	if err := ValidateNameMode(nameMode); err != nil {
+		return err
+	}
+	if len(launchTag) > 256 || strings.ContainsAny(launchTag, "\x00\r\n") {
+		return fmt.Errorf("launch tag must be at most 256 bytes and contain no NUL or newlines")
+	}
+	if takeover && nameMode != "exact" {
+		return fmt.Errorf("takeover requires exact name mode")
+	}
+	if launchTag != "" && nameMode != "allocate" {
+		return fmt.Errorf("launch tag requires allocate name mode")
+	}
+	return nil
+}
+
+func addLaunchNamingEnvironment(environment map[string]string, nameMode, launchTag string, takeover bool) {
+	if nameMode != "" {
+		environment["HOLLER_NAME_MODE"] = nameMode
+	}
+	if launchTag != "" {
+		environment["HOLLER_LAUNCH_TAG"] = launchTag
+	}
+	if takeover {
+		environment["HOLLER_TAKEOVER"] = "true"
+	}
 }
 
 func controlledLongOption(argument, name string) bool {

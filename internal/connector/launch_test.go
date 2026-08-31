@@ -32,6 +32,41 @@ func TestBuildClaudeLaunchBindsConfiguredAdapter(t *testing.T) {
 	}
 }
 
+func TestBuildLaunchExportsExplicitNamingLifecycle(t *testing.T) {
+	spec, err := connector.BuildClaudeLaunch(connector.ClaudeLaunchConfig{
+		ConnectorConfig: connector.ClaudeConnectorConfig{
+			AttentionMode: connector.AttentionHookLongPoll, Actor: "reviewer", NameMode: "allocate",
+		},
+		HollerBinary: "/bin/holler", RunID: "run-1", LaunchTag: "tab-7",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Env["HOLLER_NAME_MODE"] != "allocate" || spec.Env["HOLLER_LAUNCH_TAG"] != "tab-7" || spec.Env["HOLLER_TAKEOVER"] != "" {
+		t.Fatalf("allocation environment = %+v", spec.Env)
+	}
+	exact, err := connector.BuildClaudeLaunch(connector.ClaudeLaunchConfig{
+		ConnectorConfig: connector.ClaudeConnectorConfig{
+			AttentionMode: connector.AttentionHookLongPoll, Actor: "reviewer", NameMode: "exact",
+		},
+		HollerBinary: "/bin/holler", RunID: "run-2", Takeover: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exact.Env["HOLLER_TAKEOVER"] != "true" {
+		t.Fatalf("takeover environment = %+v", exact.Env)
+	}
+	for _, config := range []connector.ClaudeLaunchConfig{
+		{ConnectorConfig: connector.ClaudeConnectorConfig{AttentionMode: connector.AttentionHookLongPoll, Actor: "reviewer", NameMode: "allocate"}, HollerBinary: "/bin/holler", Takeover: true},
+		{ConnectorConfig: connector.ClaudeConnectorConfig{AttentionMode: connector.AttentionHookLongPoll, Actor: "reviewer", NameMode: ""}, HollerBinary: "/bin/holler", Takeover: true},
+	} {
+		if _, err := connector.BuildClaudeLaunch(config); err == nil {
+			t.Fatalf("invalid naming lifecycle was accepted: %+v", config)
+		}
+	}
+}
+
 func TestBuildCodexLaunchBindsProfileProjectAndAttention(t *testing.T) {
 	spec, err := connector.BuildCodexLaunch(connector.CodexLaunchConfig{
 		ConnectorConfig: connector.CodexConnectorConfig{

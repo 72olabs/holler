@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -111,8 +113,14 @@ func runMonitor(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	if attentionMode != connector.AttentionHookLongPoll {
 		return 0
 	}
+	takeover, err := environmentBoolean("HOLLER_TAKEOVER")
+	if err != nil {
+		fmt.Fprintf(stderr, "holler monitor configuration is invalid: %v\n", err)
+		return 1
+	}
 	binding, err := connector.ResolveRuntimeBinding(*harness, connector.RuntimeBinding{
 		Actor: *actor, RunID: *runID, Socket: *socketPath,
+		NameMode: bus.NameMode(os.Getenv("HOLLER_NAME_MODE")), LaunchTag: os.Getenv("HOLLER_LAUNCH_TAG"), Takeover: takeover,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "holler monitor configuration is invalid: %v\n", err)
@@ -184,13 +192,14 @@ func runMonitor(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}()
 	for monitorCtx.Err() == nil {
 		if client == nil {
-			client, err = dialAPI(monitorCtx, *socketPath, *actor, *runID, "claude-monitor/"+connector.ConnectorVersion)
+			client, err = dialAPIBinding(monitorCtx, *socketPath, binding, *harness, sessionID, "claude-monitor/"+connector.ConnectorVersion)
 			if err != nil {
 				if !waitForRetry(monitorCtx, 250*time.Millisecond) {
 					return 0
 				}
 				continue
 			}
+			*actor = client.Identity().Actor
 			interruptCtx, stopInterrupt := context.WithCancel(context.Background())
 			stopClientInterrupt = stopInterrupt
 			currentClient := client
@@ -642,9 +651,14 @@ func runMCP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	takeover, err := environmentBoolean("HOLLER_TAKEOVER")
+	if err != nil {
+		return err
+	}
 	binding, err := connector.ResolveRuntimeBinding(*harness, connector.RuntimeBinding{
 		Actor: *actor, RunID: *runID, Role: *role, Peer: *peer, Project: *project,
-		Channel: *channel, Socket: *socketPath,
+		Channel: *channel, Socket: *socketPath, NameMode: bus.NameMode(os.Getenv("HOLLER_NAME_MODE")),
+		LaunchTag: os.Getenv("HOLLER_LAUNCH_TAG"), Takeover: takeover,
 	})
 	if err != nil {
 		return err
@@ -652,11 +666,12 @@ func runMCP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	*actor, *runID, *role, *peer = binding.Actor, binding.RunID, binding.Role, binding.Peer
 	*project, *channel = binding.Project, binding.Channel
 	*socketPath = firstNonEmptyString(binding.Socket, defaultSocketPath())
-	client, err := dialAPI(ctx, *socketPath, *actor, *runID, "bus-mcp/0.1")
+	client, err := dialAPIBinding(ctx, *socketPath, binding, *harness, "", "bus-mcp/0.1")
 	if err != nil {
 		return err
 	}
 	defer client.Close()
+	*actor = client.Identity().Actor
 	server, err := mcp.New(client, mcp.Config{
 		Actor: *actor, RunID: *runID, Role: *role, Peer: *peer,
 		ProjectID: *project, ChannelID: *channel,
@@ -677,6 +692,18 @@ func runHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	if err := flags.Parse(args); err != nil {
 		return writeDegradedHook(stdout, stderr, err)
 	}
+	payload, err := io.ReadAll(io.LimitReader(stdin, 1<<20))
+	if err != nil {
+		return writeDegradedHook(stdout, stderr, fmt.Errorf("read lifecycle input: %w", err))
+	}
+	sessionID, err := connector.LifecycleSessionID(bytes.NewReader(payload))
+	if err != nil {
+		return writeDegradedHook(stdout, stderr, err)
+	}
+	takeover, err := environmentBoolean("HOLLER_TAKEOVER")
+	if err != nil {
+		return writeDegradedHook(stdout, stderr, err)
+	}
 	var attentionMode string
 	var attentionErr error
 	switch *harness {
@@ -694,6 +721,7 @@ func runHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 	binding, bindingErr := connector.ResolveRuntimeBinding(*harness, connector.RuntimeBinding{
 		Actor: *actor, RunID: *runID, Project: *project, Socket: *socketPath,
+		NameMode: bus.NameMode(os.Getenv("HOLLER_NAME_MODE")), LaunchTag: os.Getenv("HOLLER_LAUNCH_TAG"), Takeover: takeover,
 	})
 	if bindingErr != nil {
 		return writeDegradedHook(stdout, stderr, bindingErr)
@@ -702,14 +730,15 @@ func runHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	*socketPath = firstNonEmptyString(binding.Socket, defaultSocketPath())
 	hookCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	client, err := dialAPI(hookCtx, *socketPath, *actor, *runID, "bus-hook/0.1")
+	client, err := dialAPIBinding(hookCtx, *socketPath, binding, *harness, sessionID, "bus-hook/0.1")
 	if err != nil {
 		return writeDegradedHook(stdout, stderr, err)
 	}
 	defer client.Close()
+	*actor = client.Identity().Actor
 	output, err := connector.New(client).SessionStart(hookCtx, connector.SessionConfig{
 		Actor: *actor, RunID: *runID, Harness: *harness, ProjectID: *project, AttentionMode: attentionMode,
-	}, stdin)
+	}, bytes.NewReader(payload))
 	if err != nil {
 		return writeDegradedHook(stdout, stderr, err)
 	}
@@ -734,8 +763,21 @@ func runSessionEnd(ctx context.Context, args []string, stdin io.Reader, stdout, 
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	payload, err := io.ReadAll(io.LimitReader(stdin, 1<<20))
+	if err != nil {
+		return err
+	}
+	sessionID, err := connector.LifecycleSessionID(bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	takeover, err := environmentBoolean("HOLLER_TAKEOVER")
+	if err != nil {
+		return err
+	}
 	binding, err := connector.ResolveRuntimeBinding(*harness, connector.RuntimeBinding{
 		Actor: *actor, RunID: *runID, Project: *project, Socket: *socketPath,
+		NameMode: bus.NameMode(os.Getenv("HOLLER_NAME_MODE")), LaunchTag: os.Getenv("HOLLER_LAUNCH_TAG"), Takeover: takeover,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "holler SessionEnd advisory failed: %v\n", err)
@@ -743,15 +785,16 @@ func runSessionEnd(ctx context.Context, args []string, stdin io.Reader, stdout, 
 	}
 	*actor, *runID, *project = binding.Actor, binding.RunID, binding.Project
 	*socketPath = firstNonEmptyString(binding.Socket, defaultSocketPath())
-	client, err := dialAPI(ctx, *socketPath, *actor, *runID, "bus-session-end/0.1")
+	client, err := dialAPIBinding(ctx, *socketPath, binding, *harness, sessionID, "bus-session-end/0.1")
 	if err != nil {
 		fmt.Fprintf(stderr, "holler SessionEnd advisory failed: %v\n", err)
 		return writeJSON(stdout, map[string]bool{"ok": false})
 	}
 	defer client.Close()
+	*actor = client.Identity().Actor
 	err = connector.New(client).SessionEnd(ctx, connector.SessionConfig{
 		Actor: *actor, RunID: *runID, Harness: *harness, ProjectID: *project,
-	}, stdin)
+	}, bytes.NewReader(payload))
 	if err != nil {
 		fmt.Fprintf(stderr, "holler SessionEnd advisory failed: %v\n", err)
 		return writeJSON(stdout, map[string]bool{"ok": false})
@@ -852,6 +895,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		flags := commandFlags("connector setup", stderr)
 		harness := flags.String("harness", "claude", "connector harness: codex, claude, or opencode")
 		attention := flags.String("attention", "", "native-queue, hook-long-poll, native-prompt, or startup-only")
+		nameMode := flags.String("name-mode", "", "actor naming: exact or allocate")
 		actor := flags.String("actor", os.Getenv("HOLLER_ACTOR"), "connector-bound actor")
 		role := flags.String("role", os.Getenv("HOLLER_ROLE"), "actor role")
 		peer := flags.String("peer", os.Getenv("HOLLER_PEER"), "default peer actor")
@@ -887,7 +931,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		switch *harness {
 		case "claude":
 			plan, err = connector.SetupClaude(ctx, connector.ClaudeSetupConfig{
-				AttentionMode: *attention, Actor: *actor, Role: *role,
+				AttentionMode: *attention, NameMode: *nameMode, Actor: *actor, Role: *role,
 				Peer: *peer, Project: *project, Channel: *channelID, Socket: *socket,
 				PluginID: *pluginID, Marketplace: *marketplace, Scope: *scope,
 				ConnectorConfig: *configPath, ClaudeSettings: *settingsPath,
@@ -895,7 +939,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 			})
 		case "codex":
 			plan, err = connector.SetupCodex(ctx, connector.CodexSetupConfig{
-				AttentionMode: *attention, Actor: *actor, Role: *role, Peer: *peer,
+				AttentionMode: *attention, NameMode: *nameMode, Actor: *actor, Role: *role, Peer: *peer,
 				Project: *project, ProjectRoot: *projectRoot, Channel: *channelID, Socket: *socket,
 				PluginID: *pluginID, Marketplace: *marketplace, Profile: *profile,
 				PolicyPath: *policy, ConnectorConfig: *configPath, CodexHome: *codexHome,
@@ -903,7 +947,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 			})
 		case "opencode":
 			plan, err = connector.SetupOpenCode(ctx, connector.OpenCodeSetupConfig{
-				AttentionMode: *attention, Actor: *actor, Role: *role, Peer: *peer,
+				AttentionMode: *attention, NameMode: *nameMode, Actor: *actor, Role: *role, Peer: *peer,
 				Project: *project, ProjectRoot: *projectRoot, Channel: *channelID, Socket: *socket,
 				PluginID: *pluginID, PackageSource: *packageSource, PackageRoot: *installRoot,
 				ProfilePath: *opencodeProfile, ConnectorConfig: *configPath,
@@ -922,6 +966,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		harness := flags.String("harness", "claude", "connector harness: codex, claude, or opencode")
 		configPath := flags.String("config", "", "Holler connector selection file")
 		attention := flags.String("attention", "", "override the configured attention mode")
+		nameMode := flags.String("name-mode", "", "override actor naming: exact or allocate")
 		actor := flags.String("actor", "", "override the configured actor")
 		role := flags.String("role", "", "override the configured role")
 		peer := flags.String("peer", "", "override the configured peer")
@@ -931,6 +976,8 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		channelID := flags.String("channel", "", "override the configured Holler channel")
 		socket := flags.String("socket", "", "override the configured hollerd socket")
 		runID := flags.String("run", "", "explicit immutable run; generated when omitted")
+		launchTag := flags.String("launch-tag", "", "stable continuity tag for allocate mode")
+		takeover := flags.Bool("takeover", false, "supersede another live run in exact mode")
 		clientBinary := flags.String("client-binary", "", "harness executable")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
@@ -951,6 +998,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 				return loadErr
 			}
 			applyStringOverride(&configured.AttentionMode, *attention)
+			applyStringOverride(&configured.NameMode, *nameMode)
 			applyStringOverride(&configured.Actor, *actor)
 			applyStringOverride(&configured.Role, *role)
 			applyStringOverride(&configured.Peer, *peer)
@@ -959,7 +1007,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 			applyStringOverride(&configured.Socket, *socket)
 			spec, err = connector.BuildClaudeLaunch(connector.ClaudeLaunchConfig{
 				ConnectorConfig: configured, HollerBinary: executable, ClaudeBinary: *clientBinary,
-				ConnectorPath: path, RunID: *runID, ExtraArgs: flags.Args(),
+				ConnectorPath: path, RunID: *runID, LaunchTag: *launchTag, Takeover: *takeover, ExtraArgs: flags.Args(),
 			})
 		case "codex":
 			path := *configPath
@@ -971,6 +1019,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 				return loadErr
 			}
 			applyStringOverride(&configured.AttentionMode, *attention)
+			applyStringOverride(&configured.NameMode, *nameMode)
 			applyStringOverride(&configured.Actor, *actor)
 			applyStringOverride(&configured.Role, *role)
 			applyStringOverride(&configured.Peer, *peer)
@@ -982,7 +1031,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 			codexBinary := firstNonEmptyString(*clientBinary, configured.ClientBinary)
 			spec, err = connector.BuildCodexLaunch(connector.CodexLaunchConfig{
 				ConnectorConfig: configured, HollerBinary: executable, CodexBinary: codexBinary,
-				ConnectorPath: path, RunID: *runID, ExtraArgs: flags.Args(),
+				ConnectorPath: path, RunID: *runID, LaunchTag: *launchTag, Takeover: *takeover, ExtraArgs: flags.Args(),
 			})
 		case "opencode":
 			path := *configPath
@@ -994,6 +1043,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 				return loadErr
 			}
 			applyStringOverride(&configured.AttentionMode, *attention)
+			applyStringOverride(&configured.NameMode, *nameMode)
 			applyStringOverride(&configured.Actor, *actor)
 			applyStringOverride(&configured.Role, *role)
 			applyStringOverride(&configured.Peer, *peer)
@@ -1003,7 +1053,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 			applyStringOverride(&configured.Socket, *socket)
 			spec, err = connector.BuildOpenCodeLaunch(connector.OpenCodeLaunchConfig{
 				ConnectorConfig: configured, HollerBinary: executable, OpenCodeBinary: *clientBinary,
-				ConnectorPath: path, RunID: *runID, ExtraArgs: flags.Args(),
+				ConnectorPath: path, RunID: *runID, LaunchTag: *launchTag, Takeover: *takeover, ExtraArgs: flags.Args(),
 			})
 		default:
 			return fmt.Errorf("unsupported connector harness %q", *harness)
@@ -1056,6 +1106,29 @@ func dialAPI(ctx context.Context, socketPath, actor, runID, clientName string) (
 		return nil, &bus.ValidationError{Field: "socket", Problem: "is required"}
 	}
 	return api.Dial(ctx, socketPath, api.Identity{Actor: actor, RunID: runID, Client: clientName, Build: buildinfo.Current()})
+}
+
+func dialAPIBinding(ctx context.Context, socketPath string, binding connector.RuntimeBinding, harness, sessionID, clientName string) (*api.Client, error) {
+	if strings.TrimSpace(socketPath) == "" {
+		return nil, &bus.ValidationError{Field: "socket", Problem: "is required"}
+	}
+	return api.Dial(ctx, socketPath, api.Identity{
+		Actor: binding.Actor, RunID: binding.RunID, Client: clientName, Build: buildinfo.Current(),
+		NameMode: binding.NameMode, ContinuityHandles: binding.ContinuityHandles(harness, sessionID),
+		ProjectID: binding.Project, Takeover: binding.Takeover,
+	})
+}
+
+func environmentBoolean(name string) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return false, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", name, err)
+	}
+	return parsed, nil
 }
 
 func commandFlags(name string, stderr io.Writer) *flag.FlagSet {

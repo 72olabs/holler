@@ -91,6 +91,38 @@ The daemon binds the connection to that actor and run, and returns its own build
 
 Build metadata is an additive protocol-v1 hello field. A new client first sends it, then falls back once to the legacy hello only when an older strict daemon explicitly rejects the unknown `build` field. This keeps ordinary operations available during a daemon-first rolling upgrade, but the legacy connection has no daemon build identity and cannot produce a `READY` certificate. Restart `hollerd` before expecting certification from updated clients.
 
+V1.5 clients may explicitly negotiate actor allocation by adding capability
+`actor-allocation-v1`, `name_mode`, and continuity metadata to `hello`:
+
+```json
+{
+  "protocol": 1,
+  "client": "codex-connector/1.5",
+  "actor": "codex-reviewer",
+  "run_id": "run-07",
+  "capabilities": ["actor-allocation-v1"],
+  "name_mode": "allocate",
+  "continuity_handles": ["session:codex:thread-07", "launch:codex:tab-07"],
+  "project_id": "coupon"
+}
+```
+
+`allocate` transactionally reclaims an existing continuity binding or mints the
+first unused actor (`codex-reviewer`, `codex-reviewer-2`, ...). `exact` refuses
+another live run unless the launcher sets `takeover: true`. Takeover is an
+operator/launcher capability, never an MCP tool. The ready response returns the
+assigned actor; all later requests are stamped with it. Omitting every naming
+field preserves the original protocol-v1 behavior exactly. A feature client
+must not downgrade to legacy exact naming when the daemon lacks the negotiated
+capability.
+
+When an MCP process connects before its lifecycle hook, the daemon may hold an
+invisible process-only reservation. The hook either finalizes it or reconciles
+it to the actor already bound to the resumed session. A provisional connection
+then reconnects before dispatching its first actor-specific operation; unused
+reservations are released on disconnect and daemon restart, so startup order
+does not leak suffixes or create phantom directory entries.
+
 This implemented slice does not yet perform the Ed25519 challenge-response specified by the full protocol. The `0600` local socket and owning OS account are currently the trust boundary. Do not expose the socket through a network proxy or to another OS user.
 
 ## Implemented operations
@@ -145,6 +177,9 @@ operation deadlines.
 - `holler mcp` translates MCP stdio calls into this API.
 - `holler hook` and `holler session-end` use this API for lifecycle integration.
 - `holler connector manifest|doctor|certify` expose package identity, deterministic diagnostics, and real-client readiness evidence.
+- Connector setup accepts optional `--name-mode exact|allocate`. Launch accepts
+  `--launch-tag` for durable allocation continuity and `--takeover` only with
+  exact naming.
 - `internal/api.Client` is the current typed Go client and the reference for future Python and TypeScript SDKs.
 
 An agent without MCP can use the CLI immediately. A custom harness can implement the small framed protocol directly, but should normally use an SDK or connector so credentials, reconnects, leases, and acknowledgements remain consistent.

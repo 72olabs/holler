@@ -122,6 +122,71 @@ func TestCLIMCPUsesConnectorBoundEnvironment(t *testing.T) {
 	}
 }
 
+func TestMCPFollowsLifecycleReconciliationWhenItConnectsFirstOnResume(t *testing.T) {
+	ctx := context.Background()
+	socket := startAPIServer(t)
+	old, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "old-run", Client: "hook", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:old-run", "session:codex:session-1"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	t.Setenv("HOLLER_SOCKET", socket)
+	t.Setenv("HOLLER_ACTOR", "reviewer")
+	t.Setenv("HOLLER_RUN", "new-run")
+	t.Setenv("HOLLER_PROJECT", "coupon")
+	t.Setenv("HOLLER_NAME_MODE", "allocate")
+	t.Setenv("HOLLER_CODEX_CONNECTOR_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	inputReader, inputWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- runMCP(ctx, []string{"--harness", "codex"}, inputReader, outputWriter, io.Discard)
+		_ = outputWriter.Close()
+	}()
+	encoder := json.NewEncoder(inputWriter)
+	decoder := json.NewDecoder(outputReader)
+	if err := encoder.Encode(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 1, "method": "initialize",
+		"params": map[string]string{"protocolVersion": "2024-11-05"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var initialized map[string]interface{}
+	if err := decoder.Decode(&initialized); err != nil {
+		t.Fatal(err)
+	}
+	hook, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "new-run", Client: "hook", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:new-run", "session:codex:session-1"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hook.Close()
+	if err := encoder.Encode(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+		"params": map[string]interface{}{"name": "bus_status", "arguments": map[string]interface{}{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var status map[string]interface{}
+	if err := decoder.Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	structured := status["result"].(map[string]interface{})["structuredContent"].(map[string]interface{})
+	if structured["actor"] != "reviewer" || structured["run"] != "new-run" {
+		t.Fatalf("reconciled MCP status = %+v", structured)
+	}
+	_ = inputWriter.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	_ = outputReader.Close()
+}
+
 func TestPlainClaudePluginCommandsSharePersistedBindingAndProcessRun(t *testing.T) {
 	socket := startAPIServer(t)
 	configPath := filepath.Join(t.TempDir(), "claude.json")

@@ -674,6 +674,54 @@ func TestMigrationV6AddsDiscoverySchemaWithoutLosingRegistration(t *testing.T) {
 	}
 }
 
+func TestMigrationV7AddsActorBindingsWithoutLosingProfiles(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetActorProfile(ctx, "codex", "run-1", "migration", bus.ActorProfileRequest{RoleText: "Migration reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE continuity_bindings`,
+		`DROP TABLE actor_allocations`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (7, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	binding, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "codex", RunID: "run-2", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"launch:codex:migration"}, ProjectID: "migration",
+	})
+	if err != nil || binding.Actor != "codex-2" {
+		t.Fatalf("binding after migration = %+v, err = %v", binding, err)
+	}
+	directory, err := db.Who(ctx, 10)
+	if err != nil || len(directory.Actors) != 2 {
+		t.Fatalf("directory after migration = %+v, err = %v", directory, err)
+	}
+}
+
 func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 	db, path := openTestStore(t)
 	if _, err := db.RegisterSession(context.Background(), bus.RegistrationRequest{

@@ -22,16 +22,22 @@ import (
 )
 
 const (
-	ProtocolVersion  = 1
-	MaxFrameBytes    = 2 << 20
-	MaxAttentionWait = 25 * time.Second
+	ProtocolVersion           = 1
+	MaxFrameBytes             = 2 << 20
+	MaxAttentionWait          = 25 * time.Second
+	ActorAllocationCapability = "actor-allocation-v1"
 )
 
 type Identity struct {
-	Actor  string
-	RunID  string
-	Client string
-	Build  buildinfo.Info
+	Actor             string
+	RunID             string
+	Client            string
+	Build             buildinfo.Info
+	NameMode          bus.NameMode
+	ContinuityHandles []string
+	ProjectID         string
+	Takeover          bool
+	Provisional       bool
 }
 
 type Request struct {
@@ -54,10 +60,11 @@ type RPCError struct {
 }
 
 type DaemonInfo struct {
-	Protocol int            `json:"protocol"`
-	Actor    string         `json:"actor"`
-	PID      int            `json:"pid"`
-	Build    buildinfo.Info `json:"build"`
+	Protocol     int            `json:"protocol"`
+	Actor        string         `json:"actor"`
+	PID          int            `json:"pid"`
+	Build        buildinfo.Info `json:"build"`
+	Capabilities []string       `json:"capabilities,omitempty"`
 }
 
 type rpcResponseError struct{ err error }
@@ -82,6 +89,10 @@ type Store interface {
 	HeartbeatRegistrations(context.Context, string, string, time.Duration) (int, error)
 	SetActorProfile(context.Context, string, string, string, bus.ActorProfileRequest) (bus.ActorProfileResult, error)
 	Who(context.Context, int) (bus.ActorDirectory, error)
+	BindActor(context.Context, bus.ActorBindRequest) (bus.ActorBindResult, error)
+	FinalizeActorAllocation(context.Context, string, string, string, []string) error
+	CurrentActorForContinuity(context.Context, []string) (string, error)
+	ReleaseProvisionalActor(context.Context, string) error
 }
 
 type AttentionBroker interface {
@@ -177,11 +188,16 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		return
 	}
 	var hello struct {
-		Protocol int            `json:"protocol"`
-		Client   string         `json:"client"`
-		Actor    string         `json:"actor"`
-		RunID    string         `json:"run_id"`
-		Build    buildinfo.Info `json:"build"`
+		Protocol          int            `json:"protocol"`
+		Client            string         `json:"client"`
+		Actor             string         `json:"actor"`
+		RunID             string         `json:"run_id"`
+		Build             buildinfo.Info `json:"build"`
+		Capabilities      []string       `json:"capabilities"`
+		NameMode          bus.NameMode   `json:"name_mode"`
+		ContinuityHandles []string       `json:"continuity_handles"`
+		ProjectID         string         `json:"project_id"`
+		Takeover          bool           `json:"takeover"`
 	}
 	if err := decodeStrict(request.Args, &hello); err != nil {
 		_ = writeResponse(connection, failure(request.ID, "bad_request", err.Error(), false))
@@ -189,6 +205,10 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	}
 	hello.Actor = strings.TrimSpace(hello.Actor)
 	hello.RunID = strings.TrimSpace(hello.RunID)
+	hello.ProjectID = strings.TrimSpace(hello.ProjectID)
+	for index := range hello.ContinuityHandles {
+		hello.ContinuityHandles[index] = strings.TrimSpace(hello.ContinuityHandles[index])
+	}
 	if hello.Protocol != ProtocolVersion {
 		_ = writeResponse(connection, failure(request.ID, "protocol_mismatch", fmt.Sprintf("protocol %d is not supported", hello.Protocol), false))
 		return
@@ -205,18 +225,76 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		_ = writeResponse(connection, failure(request.ID, "bad_request", err.Error(), false))
 		return
 	}
+	assignedActor := hello.Actor
+	var binding bus.ActorBindResult
+	if hello.NameMode != "" || len(hello.ContinuityHandles) > 0 || hello.Takeover {
+		if hello.ProjectID == "" {
+			hello.ProjectID = "default"
+		}
+		if !containsString(hello.Capabilities, ActorAllocationCapability) {
+			_ = writeResponse(connection, failure(request.ID, "capability_required", "actor allocation requires capability "+ActorAllocationCapability, false))
+			return
+		}
+		bindCtx := bus.WithCaller(connectionCtx, bus.Caller{
+			Actor: hello.Actor, RunID: hello.RunID, Client: hello.Client,
+			BuildID: hello.Build.ID(), DaemonBuildID: s.build.ID(),
+		})
+		binding, err = s.store.BindActor(bindCtx, bus.ActorBindRequest{
+			RequestedActor: hello.Actor, RunID: hello.RunID, NameMode: hello.NameMode,
+			ContinuityHandles: hello.ContinuityHandles, ProjectID: hello.ProjectID, Takeover: hello.Takeover,
+		})
+		if err != nil {
+			_ = writeResponse(connection, Response{ID: request.ID, OK: false, Error: rpcError(err)})
+			return
+		}
+		assignedActor = binding.Actor
+		if s.attention != nil {
+			for _, presence := range binding.SupersededPresences {
+				s.attention.Cancel(presence.Actor, presence.RunID, presence.SessionID, bus.ErrPresenceSuperseded)
+			}
+		}
+	}
 	ready, _ := json.Marshal(map[string]interface{}{
-		"protocol": ProtocolVersion, "daemon": "hollerd/0.1", "actor": hello.Actor,
-		"run_id": hello.RunID, "server_time": time.Now().UTC(), "build": s.build,
+		"protocol": ProtocolVersion, "daemon": "hollerd/0.1", "actor": assignedActor,
+		"requested_actor": hello.Actor, "run_id": hello.RunID, "server_time": time.Now().UTC(), "build": s.build,
+		"capabilities": []string{ActorAllocationCapability}, "minted": binding.Minted,
+		"continuity_reclaimed": binding.ContinuityReclaimed, "provisional": binding.Provisional,
 	})
 	if err := writeResponse(connection, Response{ID: request.ID, OK: true, Result: ready}); err != nil {
 		return
 	}
-	identity := Identity{Actor: hello.Actor, RunID: hello.RunID, Client: hello.Client, Build: hello.Build}
+	identity := Identity{
+		Actor: assignedActor, RunID: hello.RunID, Client: hello.Client, Build: hello.Build,
+		NameMode: hello.NameMode, ContinuityHandles: hello.ContinuityHandles, ProjectID: hello.ProjectID,
+		Provisional: binding.Provisional,
+	}
+	defer func() {
+		if identity.Provisional {
+			_ = s.store.ReleaseProvisionalActor(context.Background(), identity.Actor)
+		}
+	}()
 	for {
 		request, err := readRequest(reader)
 		if err != nil {
 			return
+		}
+		if identity.Provisional {
+			currentActor, bindingErr := s.store.CurrentActorForContinuity(connectionCtx, identity.ContinuityHandles)
+			if bindingErr == nil && currentActor != identity.Actor {
+				bindingErr = bus.ErrBindingReassigned
+			}
+			if bindingErr != nil {
+				_ = writeResponse(connection, Response{ID: request.ID, OK: false, Error: rpcError(bindingErr)})
+				continue
+			}
+			if finalizesProvisionalActor(request.Op) {
+				if bindingErr := s.store.FinalizeActorAllocation(connectionCtx, identity.Actor, identity.RunID,
+					identity.ProjectID, identity.ContinuityHandles); bindingErr != nil {
+					_ = writeResponse(connection, Response{ID: request.ID, OK: false, Error: rpcError(bindingErr)})
+					continue
+				}
+				identity.Provisional = false
+			}
 		}
 		result, callErr := s.call(connectionCtx, identity, request.Op, request.Args)
 		response := Response{ID: request.ID, OK: callErr == nil}
@@ -232,6 +310,15 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		if err := writeResponse(connection, response); err != nil {
 			return
 		}
+	}
+}
+
+func finalizesProvisionalActor(operation string) bool {
+	switch operation {
+	case "ping", "list_events", "who", "live_registrations", "heartbeat_registrations":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -254,7 +341,10 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 	})
 	switch op {
 	case "ping":
-		return DaemonInfo{Protocol: ProtocolVersion, Actor: identity.Actor, PID: os.Getpid(), Build: s.build}, nil
+		return DaemonInfo{
+			Protocol: ProtocolVersion, Actor: identity.Actor, PID: os.Getpid(), Build: s.build,
+			Capabilities: []string{ActorAllocationCapability},
+		}, nil
 	case "send":
 		var request bus.SendRequest
 		if err := decodeStrict(raw, &request); err != nil {
@@ -474,24 +564,27 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 }
 
 type Client struct {
-	connection   net.Conn
-	connectionMu sync.Mutex
-	reader       *bufio.Reader
-	socketPath   string
-	identity     Identity
-	serverBuild  buildinfo.Info
-	mu           sync.Mutex
-	nextID       uint64
+	connection    net.Conn
+	connectionMu  sync.Mutex
+	reader        *bufio.Reader
+	socketPath    string
+	identity      Identity
+	helloIdentity Identity
+	serverBuild   buildinfo.Info
+	mu            sync.Mutex
+	nextID        uint64
 }
 
 func Dial(ctx context.Context, socketPath string, identity Identity) (*Client, error) {
 	identity.Actor = strings.TrimSpace(identity.Actor)
 	identity.RunID = strings.TrimSpace(identity.RunID)
 	identity.Client = strings.TrimSpace(identity.Client)
+	identity.ProjectID = strings.TrimSpace(identity.ProjectID)
+	identity.NameMode = bus.NameMode(strings.TrimSpace(string(identity.NameMode)))
 	if identity.Build.Commit == "" {
 		identity.Build = buildinfo.Current()
 	}
-	client := &Client{socketPath: socketPath, identity: identity}
+	client := &Client{socketPath: socketPath, identity: identity, helloIdentity: identity}
 	bounded, cancel := withDefaultTimeout(ctx, 3*time.Second)
 	defer cancel()
 	client.mu.Lock()
@@ -530,11 +623,19 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild bool) er
 	c.reader = bufio.NewReader(connection)
 	c.nextID = 1
 	hello := map[string]interface{}{
-		"protocol": ProtocolVersion, "client": c.identity.Client,
-		"actor": c.identity.Actor, "run_id": c.identity.RunID,
+		"protocol": ProtocolVersion, "client": c.helloIdentity.Client,
+		"actor": c.helloIdentity.Actor, "run_id": c.helloIdentity.RunID,
+	}
+	featureIdentity := c.helloIdentity.NameMode != "" || len(c.helloIdentity.ContinuityHandles) > 0 || c.helloIdentity.Takeover
+	if featureIdentity {
+		hello["capabilities"] = []string{ActorAllocationCapability}
+		hello["name_mode"] = c.helloIdentity.NameMode
+		hello["continuity_handles"] = c.helloIdentity.ContinuityHandles
+		hello["project_id"] = c.helloIdentity.ProjectID
+		hello["takeover"] = c.helloIdentity.Takeover
 	}
 	if includeBuild {
-		hello["build"] = c.identity.Build
+		hello["build"] = c.helloIdentity.Build
 	}
 	request := Request{ID: c.nextID, Op: "hello"}
 	request.Args, err = json.Marshal(hello)
@@ -558,20 +659,39 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild bool) er
 		return errors.New("hollerd returned invalid hello response")
 	}
 	var ready struct {
-		Protocol int            `json:"protocol"`
-		Actor    string         `json:"actor"`
-		Build    buildinfo.Info `json:"build"`
+		Protocol     int            `json:"protocol"`
+		Actor        string         `json:"actor"`
+		Build        buildinfo.Info `json:"build"`
+		Capabilities []string       `json:"capabilities"`
+		Provisional  bool           `json:"provisional"`
 	}
 	if err := json.Unmarshal(response.Result, &ready); err != nil {
 		c.closeLocked()
 		return fmt.Errorf("decode hollerd hello: %w", err)
 	}
-	if ready.Protocol != ProtocolVersion || ready.Actor != c.identity.Actor {
+	if ready.Protocol != ProtocolVersion || ready.Actor == "" || (!featureIdentity && ready.Actor != c.helloIdentity.Actor) {
 		c.closeLocked()
 		return errors.New("hollerd returned mismatched session identity")
 	}
+	if featureIdentity && !containsString(ready.Capabilities, ActorAllocationCapability) {
+		c.closeLocked()
+		return errors.New("hollerd does not support negotiated actor allocation")
+	}
+	c.identity.Actor = ready.Actor
+	c.identity.Provisional = ready.Provisional
 	c.serverBuild = ready.Build
 	return nil
+}
+
+func (c *Client) Identity() Identity {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.identity
+}
+
+func (c *Client) BoundIdentity() (string, string) {
+	identity := c.Identity()
+	return identity.Actor, identity.RunID
 }
 
 func (c *Client) closeLocked() {
@@ -639,7 +759,7 @@ func (c *Client) WaitAttention(ctx context.Context, actor, runID, sessionID, ada
 	if err := c.requireActor(actor); err != nil {
 		return bus.AttentionNotice{}, err
 	}
-	if strings.TrimSpace(runID) != c.identity.RunID {
+	if err := c.requireRun(runID); err != nil {
 		return bus.AttentionNotice{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
 	}
 	waitCtx, cancel := withDefaultTimeout(ctx, wait+2*time.Second)
@@ -655,7 +775,7 @@ func (c *Client) MonitorAttach(ctx context.Context, actor, runID, sessionID, ada
 	if err := c.requireActor(actor); err != nil {
 		return bus.Registration{}, err
 	}
-	if strings.TrimSpace(runID) != c.identity.RunID {
+	if err := c.requireRun(runID); err != nil {
 		return bus.Registration{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
 	}
 	var registration bus.Registration
@@ -713,7 +833,7 @@ func (c *Client) SetActorProfile(ctx context.Context, actor, runID, projectID st
 	if err := c.requireActor(actor); err != nil {
 		return bus.ActorProfileResult{}, err
 	}
-	if strings.TrimSpace(runID) != c.identity.RunID {
+	if err := c.requireRun(runID); err != nil {
 		return bus.ActorProfileResult{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
 	}
 	var result bus.ActorProfileResult
@@ -752,7 +872,7 @@ func (c *Client) RecordHydration(ctx context.Context, projectID, actor, runID, h
 	if err := c.requireActor(actor); err != nil {
 		return err
 	}
-	if strings.TrimSpace(runID) != c.identity.RunID {
+	if err := c.requireRun(runID); err != nil {
 		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
 	}
 	return c.call(ctx, "record_hydration", map[string]interface{}{
@@ -764,7 +884,7 @@ func (c *Client) ExpireRegistration(ctx context.Context, actor, runID, sessionID
 	if err := c.requireActor(actor); err != nil {
 		return err
 	}
-	if strings.TrimSpace(runID) != c.identity.RunID {
+	if err := c.requireRun(runID); err != nil {
 		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
 	}
 	return c.call(ctx, "expire_registration", map[string]interface{}{
@@ -776,7 +896,7 @@ func (c *Client) HeartbeatRegistrations(ctx context.Context, actor, runID string
 	if err := c.requireActor(actor); err != nil {
 		return 0, err
 	}
-	if strings.TrimSpace(runID) != c.identity.RunID {
+	if err := c.requireRun(runID); err != nil {
 		return 0, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
 	}
 	var result struct {
@@ -787,8 +907,17 @@ func (c *Client) HeartbeatRegistrations(ctx context.Context, actor, runID string
 }
 
 func (c *Client) requireActor(actor string) error {
-	if strings.TrimSpace(actor) != c.identity.Actor {
+	identity := c.Identity()
+	if strings.TrimSpace(actor) != identity.Actor {
 		return &bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"}
+	}
+	return nil
+}
+
+func (c *Client) requireRun(runID string) error {
+	identity := c.Identity()
+	if strings.TrimSpace(runID) != identity.RunID {
+		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
 	}
 	return nil
 }
@@ -805,10 +934,24 @@ func (c *Client) call(ctx context.Context, op string, args interface{}, target i
 	}
 	err := c.callOnceLocked(ctx, op, args, target)
 	if err == nil {
+		if c.identity.Provisional && finalizesProvisionalActor(op) {
+			c.identity.Provisional = false
+		}
 		return nil
 	}
 	var responseErr *rpcResponseError
 	if errors.As(err, &responseErr) {
+		if errors.Is(err, bus.ErrBindingReassigned) && ctx.Err() == nil {
+			c.closeLocked()
+			if reconnectErr := c.connectLocked(ctx); reconnectErr != nil {
+				return reconnectErr
+			}
+			retryErr := c.callOnceLocked(ctx, op, args, target)
+			if retryErr == nil && c.identity.Provisional && finalizesProvisionalActor(op) {
+				c.identity.Provisional = false
+			}
+			return retryErr
+		}
 		return err
 	}
 	c.closeLocked()
@@ -818,7 +961,11 @@ func (c *Client) call(ctx context.Context, op string, args interface{}, target i
 	if err := c.connectLocked(ctx); err != nil {
 		return err
 	}
-	return c.callOnceLocked(ctx, op, args, target)
+	retryErr := c.callOnceLocked(ctx, op, args, target)
+	if retryErr == nil && c.identity.Provisional && finalizesProvisionalActor(op) {
+		c.identity.Provisional = false
+	}
+	return retryErr
 }
 
 func (c *Client) callOnceLocked(ctx context.Context, op string, args interface{}, target interface{}) error {
@@ -975,6 +1122,12 @@ func rpcError(err error) *RPCError {
 		code = "lease_expired"
 	case errors.Is(err, bus.ErrDeliveryTerminal):
 		code = "delivery_terminal"
+	case errors.Is(err, bus.ErrActorLive):
+		code = "actor_live"
+	case errors.Is(err, bus.ErrContinuityConflict):
+		code = "continuity_conflict"
+	case errors.Is(err, bus.ErrBindingReassigned):
+		return &RPCError{Code: "binding_reassigned", Message: err.Error(), Retryable: true}
 	}
 	return &RPCError{Code: code, Message: err.Error(), Retryable: false}
 }
@@ -1007,9 +1160,24 @@ func errorFromRPC(rpc *RPCError) error {
 		sentinel = bus.ErrLeaseExpired
 	case "delivery_terminal":
 		sentinel = bus.ErrDeliveryTerminal
+	case "actor_live":
+		sentinel = bus.ErrActorLive
+	case "continuity_conflict":
+		sentinel = bus.ErrContinuityConflict
+	case "binding_reassigned":
+		sentinel = bus.ErrBindingReassigned
 	}
 	if sentinel != nil {
 		return fmt.Errorf("%s: %w", rpc.Message, sentinel)
 	}
 	return errors.New(rpc.Message)
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }

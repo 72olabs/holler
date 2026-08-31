@@ -184,6 +184,23 @@ func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) 
 		}
 		return entry
 	}
+	allocationRows, err := tx.QueryContext(ctx, `SELECT actor, allocated_at_ns FROM actor_allocations WHERE provisional = 0`)
+	if err != nil {
+		return bus.ActorDirectory{}, fmt.Errorf("query actor allocations: %w", err)
+	}
+	for allocationRows.Next() {
+		var actor string
+		var allocatedNS int64
+		if err := allocationRows.Scan(&actor, &allocatedNS); err != nil {
+			allocationRows.Close()
+			return bus.ActorDirectory{}, fmt.Errorf("scan actor allocation: %w", err)
+		}
+		entry := entryFor(actor)
+		entry.LastSeenAt = laterTime(entry.LastSeenAt, time.Unix(0, allocatedNS).UTC())
+	}
+	if err := allocationRows.Close(); err != nil {
+		return bus.ActorDirectory{}, fmt.Errorf("close actor allocation rows: %w", err)
+	}
 
 	profileRows, err := tx.QueryContext(ctx, `
 		SELECT p.actor, p.role_text, p.accepts_json, p.revision, p.updated_by_run, p.updated_at_ns

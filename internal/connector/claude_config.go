@@ -22,6 +22,7 @@ type ClaudeConnectorConfig struct {
 	LegacyChannelActivation string `json:"channel_activation,omitempty"`
 	PluginID                string `json:"plugin_id,omitempty"`
 	Actor                   string `json:"actor,omitempty"`
+	NameMode                string `json:"name_mode,omitempty"`
 	Role                    string `json:"role,omitempty"`
 	Peer                    string `json:"peer,omitempty"`
 	Project                 string `json:"project,omitempty"`
@@ -70,6 +71,10 @@ func LoadClaudeConnectorConfig(path string) (ClaudeConnectorConfig, error) {
 	if err := ValidateClaudeAttentionMode(config.AttentionMode); err != nil {
 		return ClaudeConnectorConfig{}, err
 	}
+	if err := ValidateNameMode(config.NameMode); err != nil {
+		return ClaudeConnectorConfig{}, err
+	}
+	config.NameMode = strings.TrimSpace(config.NameMode)
 	return config, nil
 }
 

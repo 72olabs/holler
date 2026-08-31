@@ -22,7 +22,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const migrationVersion = 7
+const migrationVersion = 8
 
 type Store struct {
 	db    *sql.DB
@@ -110,6 +110,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"registrations", "attention_mode", "attention_mode TEXT NOT NULL DEFAULT ''"},
 		{"registrations", "attention_superseded_at_ns", "attention_superseded_at_ns INTEGER"},
 		{"registrations", "working_directory", "working_directory TEXT NOT NULL DEFAULT ''"},
+		{"actor_allocations", "provisional", "provisional INTEGER NOT NULL DEFAULT 0"},
 	} {
 		hasColumn, err := columnExists(ctx, tx, addition.table, addition.column)
 		if err != nil {
@@ -124,6 +125,23 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE registrations SET registered_at_ns = updated_at_ns WHERE registered_at_ns IS NULL`); err != nil {
 		return fmt.Errorf("backfill registration timestamps: %w", err)
+	}
+	// Process-only actor reservations belong to live API connections. No such
+	// connection survives a daemon restart, so carrying them forward would leak
+	// invisible suffix reservations.
+	staleProvisional := `
+		SELECT a.actor FROM actor_allocations a
+		WHERE a.provisional = 1
+		  AND NOT EXISTS (SELECT 1 FROM continuity_bindings c WHERE c.actor = a.actor AND c.handle NOT LIKE 'process:%')
+		  AND NOT EXISTS (SELECT 1 FROM actor_profiles p WHERE p.actor = a.actor)
+		  AND NOT EXISTS (SELECT 1 FROM registrations r WHERE r.actor = a.actor)
+		  AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.from_actor = a.actor)
+		  AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.recipient_actor = a.actor)`
+	if _, err := tx.ExecContext(ctx, `DELETE FROM continuity_bindings WHERE actor IN (`+staleProvisional+`)`); err != nil {
+		return fmt.Errorf("clear stale provisional continuity bindings: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM actor_allocations WHERE actor IN (`+staleProvisional+`)`); err != nil {
+		return fmt.Errorf("clear stale provisional actor allocations: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)`,

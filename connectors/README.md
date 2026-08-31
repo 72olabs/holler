@@ -62,6 +62,23 @@ For Claude, pass the reviewed settings file using `--settings` or install equiva
 
 For OpenCode, setup previews and, only after the operator chooses `--apply`, generates a connector-owned `opencode.json` with one local MCP server and exact `allow` entries for the frozen ten-tool surface. It does not modify the user's general OpenCode config. The launcher points `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` at that isolated package for the launched process only. This is an operator-authorized installation action, not authority a plugin grants itself at runtime.
 
+## Actor naming lifecycle
+
+Actor naming is explicit and backward compatible. Omit `--name-mode` to keep
+the original behavior. `--name-mode exact` refuses another live run for the
+same actor; launcher-only `--takeover` records and supersedes the old presence.
+`--name-mode allocate` treats the configured actor as a base and atomically
+mints a suffix when necessary. A harness session ID automatically reclaims the
+same allocation on resume, while `--launch-tag <stable-tag>` provides the same
+continuity to an external supervisor. Separately launched workers in one
+working directory remain isolated because continuity never depends on cwd.
+
+Allocation, continuity binding, and the mint event commit in one daemon
+transaction. The ready handshake returns the assigned actor before hooks or MCP
+operations are accepted, and every later operation uses that immutable bound
+identity. Naming flags are setup/launcher controls and are not exposed as agent
+tools.
+
 ## Codex setup and launch
 
 The normal product setup is:
@@ -94,7 +111,7 @@ The normal product setup is:
 holler setup claude
 ```
 
-It registers the marketplace, installs or updates the plugin, merges only the frozen eight-tool allowlist and Holler plugin options into Claude user settings, writes `~/.holler/connectors/claude.json`, and installs and verifies the per-user daemon; changed existing files receive `.bak` backups.
+It registers the marketplace, installs or updates the plugin, merges only the frozen ten-tool allowlist and Holler plugin options into Claude user settings, writes `~/.holler/connectors/claude.json`, and installs and verifies the per-user daemon; changed existing files receive `.bak` backups.
 
 Plain `claude` sessions load the persisted connector binding and setup-recorded Holler executable, so hook-long-poll does not depend on shell-only environment variables. Use the connector launcher when the session needs an explicit identity override or a separately addressable actor:
 
@@ -106,7 +123,7 @@ Choose `hook-long-poll` for live attention or `startup-only` for durable hydrati
 
 For custom identity, attention, scope, or policy destinations, `scripts/setup-claude.sh` and `holler connector setup --harness claude` retain the advanced preview/`--apply` workflow.
 
-An actor is a durable inbox identity, not a session name. Concurrent sessions using the same actor are intentional competing consumers: every live session may receive a wake reference, but the first successful `bus_inbox` claim owns the lease and the others will see no claimable message. Give independently talkable sessions distinct actors; reuse an actor only when worker-pool semantics are desired.
+An actor is a durable inbox identity, not a session name. Legacy concurrent sessions using the same actor are intentional competing consumers: the first successful `bus_inbox` claim owns the lease. Prefer allocate mode when parallel sessions must each be independently talkable.
 
 ## OpenCode setup and launch
 

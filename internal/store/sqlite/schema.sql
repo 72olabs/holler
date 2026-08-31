@@ -93,6 +93,26 @@ CREATE TABLE IF NOT EXISTS actor_profiles (
 CREATE INDEX IF NOT EXISTS actor_profiles_current
     ON actor_profiles(actor, revision DESC);
 
+CREATE TABLE IF NOT EXISTS actor_allocations (
+    actor TEXT PRIMARY KEY,
+    base_actor TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    allocated_at_ns INTEGER NOT NULL,
+    provisional INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (base_actor, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS continuity_bindings (
+    handle TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    base_actor TEXT NOT NULL,
+    created_at_ns INTEGER NOT NULL,
+    updated_at_ns INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS continuity_bindings_actor
+    ON continuity_bindings(actor);
+
 CREATE TABLE IF NOT EXISTS partition_counters (
     partition_id TEXT NOT NULL,
     stream TEXT NOT NULL,

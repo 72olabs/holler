@@ -12,6 +12,7 @@ import (
 
 type OpenCodeSetupConfig struct {
 	AttentionMode   string
+	NameMode        string
 	Actor           string
 	Role            string
 	Peer            string
@@ -39,7 +40,7 @@ func SetupOpenCode(_ context.Context, config OpenCodeSetupConfig, _ ...SetupOpti
 	manifest, _ := Manifest("opencode")
 	plan := SetupPlan{
 		SchemaVersion: 1, Harness: "opencode", Applied: config.Apply,
-		AttentionMode: config.AttentionMode, PluginID: config.PluginID,
+		AttentionMode: config.AttentionMode, NameMode: config.NameMode, PluginID: config.PluginID,
 		ConnectorConfigPath: config.ConnectorConfig, PolicyPath: config.ProfilePath,
 		PackageRoot: config.PackageRoot, OpenCodeConfigPath: config.ProfilePath,
 		Actions: []string{
@@ -81,7 +82,7 @@ func SetupOpenCode(_ context.Context, config OpenCodeSetupConfig, _ ...SetupOpti
 		plan.Backups = append(plan.Backups, profileBackup)
 	}
 	connectorBackup, err := writeJSONConfig(config.ConnectorConfig, OpenCodeConnectorConfig{
-		SchemaVersion: 1, AttentionMode: config.AttentionMode, PluginID: config.PluginID,
+		SchemaVersion: 1, AttentionMode: config.AttentionMode, NameMode: config.NameMode, PluginID: config.PluginID,
 		Actor: config.Actor, Role: config.Role, Peer: config.Peer, Project: config.Project,
 		ProjectRoot: config.ProjectRoot, Channel: config.Channel, Socket: config.Socket,
 		PackageRoot: config.PackageRoot, ProfilePath: config.ProfilePath,
@@ -97,6 +98,7 @@ func SetupOpenCode(_ context.Context, config OpenCodeSetupConfig, _ ...SetupOpti
 }
 
 func openCodeSetupDefaults(config OpenCodeSetupConfig) OpenCodeSetupConfig {
+	config.NameMode = strings.TrimSpace(config.NameMode)
 	if strings.TrimSpace(config.AttentionMode) == "" {
 		config.AttentionMode = AttentionNativePrompt
 	}
@@ -140,6 +142,9 @@ func openCodeSetupDefaults(config OpenCodeSetupConfig) OpenCodeSetupConfig {
 
 func validateOpenCodeSetup(config OpenCodeSetupConfig) error {
 	if err := ValidateOpenCodeAttentionMode(config.AttentionMode); err != nil {
+		return err
+	}
+	if err := ValidateNameMode(config.NameMode); err != nil {
 		return err
 	}
 	if strings.TrimSpace(config.Actor) == "" {
@@ -233,7 +238,7 @@ func openCodeProfile(config OpenCodeSetupConfig, manifest CapabilityManifest) ma
 		permissions[manifest.MCPServerName+"_"+tool.Name] = "allow"
 	}
 	environment := map[string]interface{}{}
-	for _, name := range []string{"HOLLER_BIN", "HOLLER_SOCKET", "HOLLER_ACTOR", "HOLLER_RUN", "HOLLER_ROLE", "HOLLER_PEER", "HOLLER_PROJECT", "HOLLER_CHANNEL"} {
+	for _, name := range []string{"HOLLER_BIN", "HOLLER_SOCKET", "HOLLER_ACTOR", "HOLLER_RUN", "HOLLER_ROLE", "HOLLER_PEER", "HOLLER_PROJECT", "HOLLER_CHANNEL", "HOLLER_NAME_MODE", "HOLLER_LAUNCH_TAG", "HOLLER_TAKEOVER"} {
 		environment[name] = "{env:" + name + "}"
 	}
 	return map[string]interface{}{

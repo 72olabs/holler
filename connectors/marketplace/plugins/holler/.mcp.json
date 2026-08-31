@@ -14,6 +14,9 @@
         "HOLLER_PEER",
         "HOLLER_PROJECT",
         "HOLLER_CHANNEL",
+        "HOLLER_NAME_MODE",
+        "HOLLER_LAUNCH_TAG",
+        "HOLLER_TAKEOVER",
         "HOLLER_CODEX_BIN",
         "PATH"
       ],

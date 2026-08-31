@@ -26,6 +26,16 @@ var (
 	ErrLeaseTokenMismatch  = errors.New("lease token mismatch")
 	ErrLeaseExpired        = errors.New("lease expired")
 	ErrDeliveryTerminal    = errors.New("delivery is already terminal")
+	ErrActorLive           = errors.New("actor already has a live presence")
+	ErrContinuityConflict  = errors.New("continuity handles resolve to different actors")
+	ErrBindingReassigned   = errors.New("provisional actor binding was reassigned")
+)
+
+type NameMode string
+
+const (
+	NameModeExact    NameMode = "exact"
+	NameModeAllocate NameMode = "allocate"
 )
 
 type DeliveryRequest string
@@ -205,6 +215,25 @@ type ActorDirectory struct {
 	GeneratedAt   time.Time             `json:"generated_at"`
 	Truncated     bool                  `json:"truncated"`
 	MetadataTrust string                `json:"metadata_trust"`
+}
+
+type ActorBindRequest struct {
+	RequestedActor    string   `json:"requested_actor"`
+	RunID             string   `json:"run_id"`
+	NameMode          NameMode `json:"name_mode"`
+	ContinuityHandles []string `json:"continuity_handles,omitempty"`
+	ProjectID         string   `json:"project_id,omitempty"`
+	Takeover          bool     `json:"takeover,omitempty"`
+}
+
+type ActorBindResult struct {
+	Actor               string         `json:"actor"`
+	RequestedActor      string         `json:"requested_actor"`
+	NameMode            NameMode       `json:"name_mode"`
+	Minted              bool           `json:"minted"`
+	Provisional         bool           `json:"provisional"`
+	ContinuityReclaimed bool           `json:"continuity_reclaimed"`
+	SupersededPresences []Registration `json:"-"`
 }
 
 type NotificationAttempt struct {

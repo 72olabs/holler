@@ -20,6 +20,7 @@ type OpenCodeConnectorConfig struct {
 	AttentionMode  string `json:"attention_mode"`
 	PluginID       string `json:"plugin_id,omitempty"`
 	Actor          string `json:"actor,omitempty"`
+	NameMode       string `json:"name_mode,omitempty"`
 	Role           string `json:"role,omitempty"`
 	Peer           string `json:"peer,omitempty"`
 	Project        string `json:"project,omitempty"`
@@ -84,6 +85,7 @@ func LoadOpenCodeConnectorConfig(path string) (OpenCodeConnectorConfig, error) {
 	if err := validateOpenCodeConnectorConfig(config); err != nil {
 		return OpenCodeConnectorConfig{}, err
 	}
+	config.NameMode = strings.TrimSpace(config.NameMode)
 	return config, nil
 }
 
@@ -106,6 +108,9 @@ func ResolveOpenCodeAttentionMode() (string, error) {
 
 func validateOpenCodeConnectorConfig(config OpenCodeConnectorConfig) error {
 	if err := ValidateOpenCodeAttentionMode(config.AttentionMode); err != nil {
+		return err
+	}
+	if err := ValidateNameMode(config.NameMode); err != nil {
 		return err
 	}
 	if strings.TrimSpace(config.PackageRoot) == "" || strings.TrimSpace(config.ProfilePath) == "" {

@@ -36,4 +36,6 @@ holler connector launch --harness claude --actor <actor> -- [additional claude a
 
 The launcher creates a fresh random run identity and supplies the selected adapter. Explicit launcher values always override persisted plain-session defaults.
 
-Treat actor identity as an inbox identity, not a display name. Before starting a second concurrent session with the same actor, explain that both sessions become competing consumers and the first successful claim owns each message. Use distinct actors when the user expects each session to be independently addressable.
+Naming is opt-in so existing installations retain their current behavior. Use `--name-mode exact` when one durable actor must refuse a second live run; add launcher-only `--takeover` to supersede that run deliberately. Use `--name-mode allocate` when concurrent sessions should receive `actor`, `actor-2`, and so on. Add `--launch-tag <stable-tag>` when a supervisor needs a restarted process to reclaim its previous allocation. Never generate takeover from an agent tool call.
+
+Treat actor identity as an inbox identity, not a display name. In legacy mode concurrent sessions using one actor are competing consumers and the first successful claim owns each message. Prefer allocate mode when the user expects each session to be independently addressable.

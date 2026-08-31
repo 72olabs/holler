@@ -137,7 +137,8 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 
 func (s *Server) heartbeat(ctx context.Context) {
 	const registrationLease = 5 * time.Minute
-	_, _ = s.store.HeartbeatRegistrations(ctx, s.config.Actor, s.config.RunID, registrationLease)
+	actor, runID := s.boundIdentity()
+	_, _ = s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -145,7 +146,8 @@ func (s *Server) heartbeat(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = s.store.HeartbeatRegistrations(ctx, s.config.Actor, s.config.RunID, registrationLease)
+			actor, runID := s.boundIdentity()
+			_, _ = s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
 		}
 	}
 }
@@ -205,6 +207,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 	if err != nil {
 		return nil, err
 	}
+	actor, runID := s.boundIdentity()
 	switch name {
 	case "bus_send":
 		var args struct {
@@ -226,7 +229,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			return nil, &bus.ValidationError{Field: "bus_send", Problem: "recipient (or configured peer), body, and idempotency_key are required"}
 		}
 		if args.ThreadID == "" && args.ReplyTo == "" {
-			args.ThreadID = deterministicThreadID(s.config.Actor, args.IdempotencyKey)
+			args.ThreadID = deterministicThreadID(actor, args.IdempotencyKey)
 		}
 		body, err := json.Marshal(map[string]string{"text": args.Body})
 		if err != nil {
@@ -237,8 +240,8 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			ProjectID:       s.config.ProjectID,
 			ChannelID:       s.config.ChannelID,
 			ThreadID:        args.ThreadID,
-			FromActor:       s.config.Actor,
-			FromRun:         s.config.RunID,
+			FromActor:       actor,
+			FromRun:         runID,
 			FromRole:        s.config.Role,
 			ToActors:        []string{args.To},
 			Type:            "MESSAGE",
@@ -262,11 +265,12 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		items, err := s.store.CheckInbox(ctx, s.config.Actor, args.Limit)
+		items, err := s.store.CheckInbox(ctx, actor, args.Limit)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"actor": s.config.Actor, "messages": items}, nil
+		actor, _ = s.boundIdentity()
+		return map[string]interface{}{"actor": actor, "messages": items}, nil
 	case "bus_claim":
 		var args struct {
 			MessageID    string `json:"message_id"`
@@ -278,7 +282,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if args.LeaseSeconds == 0 {
 			args.LeaseSeconds = 300
 		}
-		claim, err := s.store.Claim(ctx, s.config.Actor, args.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+		claim, err := s.store.Claim(ctx, actor, args.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
 		if err != nil {
 			return nil, err
 		}
@@ -297,7 +301,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if args.LeaseSeconds == 0 {
 			args.LeaseSeconds = 300
 		}
-		items, err := s.store.CheckInbox(ctx, s.config.Actor, args.Limit)
+		items, err := s.store.CheckInbox(ctx, actor, args.Limit)
 		if err != nil {
 			return nil, err
 		}
@@ -306,7 +310,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			if !item.Available {
 				continue
 			}
-			claim, err := s.store.Claim(ctx, s.config.Actor, item.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+			claim, err := s.store.Claim(ctx, actor, item.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
 			if err != nil {
 				if errors.Is(err, bus.ErrNoMessage) {
 					continue
@@ -315,7 +319,8 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			}
 			messages = append(messages, messageView(claim.Message, claim.LeaseToken, claim.LeaseExpiresAt, claim.Attempt))
 		}
-		return map[string]interface{}{"actor": s.config.Actor, "messages": messages}, nil
+		actor, _ = s.boundIdentity()
+		return map[string]interface{}{"actor": actor, "messages": messages}, nil
 	case "bus_ack":
 		var args struct {
 			MessageID  string `json:"message_id"`
@@ -324,7 +329,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		if err := s.store.Ack(ctx, s.config.Actor, args.MessageID, args.LeaseToken); err != nil {
+		if err := s.store.Ack(ctx, actor, args.MessageID, args.LeaseToken); err != nil {
 			return nil, err
 		}
 		return map[string]bool{"acked": true}, nil
@@ -340,7 +345,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if args.LeaseSeconds == 0 {
 			args.LeaseSeconds = 300
 		}
-		return s.store.Extend(ctx, s.config.Actor, args.MessageID, args.LeaseToken, time.Duration(args.LeaseSeconds)*time.Second)
+		return s.store.Extend(ctx, actor, args.MessageID, args.LeaseToken, time.Duration(args.LeaseSeconds)*time.Second)
 	case "bus_nack":
 		var args struct {
 			MessageID  string `json:"message_id"`
@@ -351,7 +356,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		if err := s.store.Nack(ctx, s.config.Actor, args.MessageID, args.LeaseToken, args.Reason, args.Final); err != nil {
+		if err := s.store.Nack(ctx, actor, args.MessageID, args.LeaseToken, args.Reason, args.Final); err != nil {
 			return nil, err
 		}
 		return map[string]bool{"nacked": true}, nil
@@ -359,7 +364,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &struct{}{}); err != nil {
 			return nil, err
 		}
-		items, err := s.store.CheckInbox(ctx, s.config.Actor, 100)
+		items, err := s.store.CheckInbox(ctx, actor, 100)
 		if err != nil {
 			return nil, err
 		}
@@ -369,8 +374,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 				available++
 			}
 		}
+		actor, runID = s.boundIdentity()
 		return map[string]interface{}{
-			"actor": s.config.Actor, "run": s.config.RunID, "peer": s.config.Peer,
+			"actor": actor, "run": runID, "peer": s.config.Peer,
 			"unread": len(items), "available": available, "counts_truncated": len(items) == 100,
 		}, nil
 	case "holler_profile":
@@ -381,7 +387,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		return s.store.SetActorProfile(ctx, s.config.Actor, s.config.RunID, s.config.ProjectID, bus.ActorProfileRequest{
+		return s.store.SetActorProfile(ctx, actor, runID, s.config.ProjectID, bus.ActorProfileRequest{
 			RoleText: args.RoleText, Accepts: args.Accepts,
 		})
 	case "holler_who":
@@ -395,6 +401,13 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+func (s *Server) boundIdentity() (string, string) {
+	if provider, ok := s.store.(interface{ BoundIdentity() (string, string) }); ok {
+		return provider.BoundIdentity()
+	}
+	return s.config.Actor, s.config.RunID
 }
 
 func messageView(message bus.Message, leaseToken string, leaseExpires time.Time, attempt int) map[string]interface{} {

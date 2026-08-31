@@ -428,6 +428,172 @@ func TestAPIProfileAndWhoUseConnectionBoundIdentity(t *testing.T) {
 	}
 }
 
+func TestUnixAPIAllocatesAndReclaimsActorsBeforeStampingRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	dialAllocated := func(runID, handle string) *api.Client {
+		t.Helper()
+		client, err := api.Dial(ctx, socket, api.Identity{
+			Actor: "reviewer", RunID: runID, Client: "allocation-test",
+			NameMode: bus.NameModeAllocate, ContinuityHandles: []string{handle}, ProjectID: "coupon",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = client.Close() })
+		return client
+	}
+
+	first := dialAllocated("run-1", "launch:test:first")
+	second := dialAllocated("run-2", "launch:test:second")
+	if got := first.Identity().Actor; got != "reviewer" {
+		t.Fatalf("first actor = %q", got)
+	}
+	if got := second.Identity().Actor; got != "reviewer-2" {
+		t.Fatalf("second actor = %q", got)
+	}
+	registration, err := second.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "reviewer-2", RunID: "run-2", Harness: "test", SessionID: "session-2", ProjectID: "coupon", Lease: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.Actor != "reviewer-2" || registration.RunID != "run-2" {
+		t.Fatalf("server-stamped registration = %+v", registration)
+	}
+	sent, err := second.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "allocated-send", ProjectID: "coupon", ChannelID: "direct",
+		ToActors: []string{"reviewer"}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"ready"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.Message.FromActor != "reviewer-2" || sent.Message.FromRun != "run-2" {
+		t.Fatalf("server-stamped send = %+v", sent.Message)
+	}
+
+	reclaimed := dialAllocated("run-3", "launch:test:second")
+	if got := reclaimed.Identity().Actor; got != "reviewer-2" {
+		t.Fatalf("reclaimed actor = %q", got)
+	}
+}
+
+func TestUnixAPIExactModeRefusesLiveActorWithoutTakeover(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	first, err := api.Dial(ctx, socket, api.Identity{Actor: "reviewer", RunID: "run-1", Client: "test", NameMode: bus.NameModeExact})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := first.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "reviewer", RunID: "run-1", Harness: "test", SessionID: "session-1", ProjectID: "test", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if collided, err := api.Dial(ctx, socket, api.Identity{Actor: "reviewer", RunID: "run-2", Client: "test", NameMode: bus.NameModeExact}); !errors.Is(err, bus.ErrActorLive) {
+		if collided != nil {
+			_ = collided.Close()
+		}
+		t.Fatalf("exact collision error = %v", err)
+	}
+	takeover, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "run-2", Client: "test", NameMode: bus.NameModeExact, Takeover: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer takeover.Close()
+	if registrations, err := takeover.LiveRegistrations(ctx, "reviewer"); err != nil || len(registrations) != 0 {
+		t.Fatalf("registrations after takeover = %+v, err = %v", registrations, err)
+	}
+}
+
+func TestUnixAPIProvisionalConnectionFollowsSessionResumeReconciliation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	first, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "run-1", Client: "hook", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:run-1", "session:codex:session-1"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	provisional, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "run-2", Client: "mcp", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:run-2"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provisional.Close()
+	if identity := provisional.Identity(); identity.Actor != "reviewer-2" || !identity.Provisional {
+		t.Fatalf("provisional identity = %+v", identity)
+	}
+	hook, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "run-2", Client: "hook", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:run-2", "session:codex:session-1"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hook.Close()
+	if hook.Identity().Actor != "reviewer" {
+		t.Fatalf("hook reclaimed %q", hook.Identity().Actor)
+	}
+	if _, err := provisional.Who(ctx, 10); err != nil {
+		t.Fatalf("provisional client did not reconnect after reconciliation: %v", err)
+	}
+	if identity := provisional.Identity(); identity.Actor != "reviewer" || identity.Provisional {
+		t.Fatalf("reconciled client identity = %+v", identity)
+	}
+	sent, err := provisional.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "resume-reconciled", ProjectID: "coupon", ChannelID: "direct",
+		ToActors: []string{"peer"}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"resumed"}`),
+	})
+	if err != nil || sent.Message.FromActor != "reviewer" {
+		t.Fatalf("reconciled send = %+v, err = %v", sent, err)
+	}
+}
+
+func TestUnixAPIReleasesUnusedProvisionalActorOnDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	db, socket := startServer(t, ctx, cancel)
+	provisional, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "worker", RunID: "run-1", Client: "mcp", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:run-1"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provisional.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, bindingErr := db.CurrentActorForContinuity(ctx, []string{"process:codex:run-1"})
+		if errors.Is(bindingErr, bus.ErrNotFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("provisional actor was not released: %v", bindingErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	active, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "worker", RunID: "run-2", Client: "launcher", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"launch:codex:worker-2"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+	if active.Identity().Actor != "worker" {
+		t.Fatalf("actor after provisional disconnect = %q", active.Identity().Actor)
+	}
+}
+
 func startServer(t *testing.T, ctx context.Context, cancel context.CancelFunc, options ...api.ServerOption) (*store.Store, string) {
 	t.Helper()
 	directory := t.TempDir()

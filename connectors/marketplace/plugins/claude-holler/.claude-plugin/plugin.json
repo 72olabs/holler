@@ -43,6 +43,11 @@
       "description": "Choose hook-long-poll or startup-only.",
       "default": "hook-long-poll"
     },
+    "name_mode": {
+      "type": "string",
+      "title": "Actor naming mode",
+      "description": "Optional exact or allocate naming. Leave unset for legacy behavior."
+    },
     "binary": {
       "type": "string",
       "title": "Holler executable",
