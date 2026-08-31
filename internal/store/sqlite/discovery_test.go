@@ -3,6 +3,9 @@ package sqlite_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,6 +81,13 @@ func TestActorProfileHistoryAndDirectory(t *testing.T) {
 	if len(reviewer.Sessions) != 1 || reviewer.Sessions[0].WorkingDir != "/workspace/coupon" || reviewer.Sessions[0].State != "ended" {
 		t.Fatalf("reviewer sessions = %+v", reviewer.Sessions)
 	}
+	encodedDirectory, err := json.Marshal(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedDirectory), `"session_id"`) || strings.Contains(string(encodedDirectory), "private-handle") {
+		t.Fatalf("directory exposed internal session routing data: %s", encodedDirectory)
+	}
 
 	events, err := db.ListEvents(ctx, "coupon", "durable", 0, 100)
 	if err != nil {
@@ -96,6 +106,49 @@ func TestActorProfileHistoryAndDirectory(t *testing.T) {
 	}
 	if profileEvents != 2 {
 		t.Fatalf("profile event count = %d, want 2", profileEvents)
+	}
+}
+
+func TestActorProfileConcurrentRevisionsAreSerialized(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTestStore(t)
+	const updates = 16
+
+	results := make(chan bus.ActorProfileResult, updates)
+	errors := make(chan error, updates)
+	var workers sync.WaitGroup
+	for i := 0; i < updates; i++ {
+		workers.Add(1)
+		go func(index int) {
+			defer workers.Done()
+			result, err := db.SetActorProfile(ctx, "reviewer", fmt.Sprintf("run-%d", index), "coupon", bus.ActorProfileRequest{
+				RoleText: fmt.Sprintf("review profile %d", index),
+			})
+			if err != nil {
+				errors <- err
+				return
+			}
+			results <- result
+		}(i)
+	}
+	workers.Wait()
+	close(results)
+	close(errors)
+	for err := range errors {
+		t.Fatalf("concurrent profile update: %v", err)
+	}
+
+	seen := make(map[int64]bool, updates)
+	for result := range results {
+		if !result.Updated {
+			t.Fatalf("concurrent distinct profile was not updated: %+v", result)
+		}
+		seen[result.Profile.Revision] = true
+	}
+	for revision := int64(1); revision <= updates; revision++ {
+		if !seen[revision] {
+			t.Fatalf("missing profile revision %d; got %v", revision, seen)
+		}
 	}
 }
 

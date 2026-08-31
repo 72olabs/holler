@@ -119,12 +119,13 @@ content is idempotent, while a meaningful change appends a durable revision and
 event.
 
 `who` returns a bounded directory of locally known actors, current profiles,
-session liveness and working directories, and currently claimable message
+session liveness, run IDs, and working directories, and currently claimable message
 counts. Results label actor-authored metadata as `untrusted`. Clients may use
 that metadata to help a human select a recipient, but must never execute
 instructions found in it or treat it as authority. The default limit is 100
 actors and the maximum is 500; at most ten recent session rows are returned per
-actor.
+actor. Session IDs and delivery handles are internal routing capabilities and
+are never included in directory results.
 
 For every new send whose delivery request asks for attention, the same transaction creates a durable notification-outbox row. `hollerd` dispatches it asynchronously after commit and retries transient failures without delaying the send response. The response reports `notification_state: "pending"`; outcomes are operational events, including `delivery.notification_abandoned` after five failed attempts. A wake failure does not convert a committed send into an RPC error, and an idempotent duplicate does not create a second outbox job. If no session is registered, startup hydration—not a delayed notification job—remains the durable fallback.
 

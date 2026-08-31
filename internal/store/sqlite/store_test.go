@@ -676,6 +676,12 @@ func TestMigrationV6AddsDiscoverySchemaWithoutLosingRegistration(t *testing.T) {
 
 func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 	db, path := openTestStore(t)
+	if _, err := db.RegisterSession(context.Background(), bus.RegistrationRequest{
+		Actor: "legacy", RunID: "legacy-run", Harness: "claude", SessionID: "legacy-session",
+		ProjectID: "migration", WorkingDir: "/workspace/legacy", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -701,6 +707,14 @@ func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 		t.Fatalf("repair unversioned schema: %v", err)
 	}
 	defer reopened.Close()
+	directory, err := reopened.Who(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("read directory after schema repair: %v", err)
+	}
+	legacy := directoryActor(t, directory, "legacy")
+	if len(legacy.Sessions) != 1 || legacy.Sessions[0].StartedAt.IsZero() || legacy.Sessions[0].WorkingDir != "" {
+		t.Fatalf("legacy directory entry after schema repair = %+v", legacy)
+	}
 }
 
 func openTestStore(t *testing.T, options ...store.Option) (*store.Store, string) {

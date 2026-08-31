@@ -181,7 +181,6 @@ type ActorSession struct {
 	RunID          string     `json:"run_id"`
 	Harness        string     `json:"harness"`
 	AttentionMode  string     `json:"attention_mode,omitempty"`
-	SessionID      string     `json:"session_id"`
 	ProjectID      string     `json:"project_id"`
 	WorkingDir     string     `json:"working_directory,omitempty"`
 	State          string     `json:"state"`

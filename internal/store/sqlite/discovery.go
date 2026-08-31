@@ -219,7 +219,7 @@ func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) 
 	}
 
 	sessionRows, err := tx.QueryContext(ctx, `
-		SELECT actor, run_id, harness, attention_mode, session_id, project_id, working_directory,
+		SELECT actor, run_id, harness, attention_mode, project_id, working_directory,
 		       registered_at_ns, updated_at_ns, lease_expires_at_ns, ended_at_ns, attention_superseded_at_ns
 		FROM registrations
 		ORDER BY actor, registered_at_ns DESC, run_id, session_id`)
@@ -229,15 +229,20 @@ func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) 
 	for sessionRows.Next() {
 		var session bus.ActorSession
 		var actor string
-		var startedNS, updatedNS, expiresNS int64
+		var startedNS sql.NullInt64
+		var updatedNS, expiresNS int64
 		var endedNS, supersededNS sql.NullInt64
 		if err := sessionRows.Scan(&actor, &session.RunID, &session.Harness, &session.AttentionMode,
-			&session.SessionID, &session.ProjectID, &session.WorkingDir, &startedNS, &updatedNS,
+			&session.ProjectID, &session.WorkingDir, &startedNS, &updatedNS,
 			&expiresNS, &endedNS, &supersededNS); err != nil {
 			sessionRows.Close()
 			return bus.ActorDirectory{}, fmt.Errorf("scan actor session: %w", err)
 		}
-		session.StartedAt = time.Unix(0, startedNS).UTC()
+		startedAtNS := updatedNS
+		if startedNS.Valid {
+			startedAtNS = startedNS.Int64
+		}
+		session.StartedAt = time.Unix(0, startedAtNS).UTC()
 		session.LastSeenAt = time.Unix(0, updatedNS).UTC()
 		session.LeaseExpiresAt = time.Unix(0, expiresNS).UTC()
 		switch {
