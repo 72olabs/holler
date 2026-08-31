@@ -80,6 +80,8 @@ type Store interface {
 	RecordHydration(context.Context, string, string, string, string, string, int) error
 	ExpireRegistration(context.Context, string, string, string, string) error
 	HeartbeatRegistrations(context.Context, string, string, time.Duration) (int, error)
+	SetActorProfile(context.Context, string, string, string, bus.ActorProfileRequest) (bus.ActorProfileResult, error)
+	Who(context.Context, int) (bus.ActorDirectory, error)
 }
 
 type AttentionBroker interface {
@@ -379,6 +381,26 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 			return nil, err
 		}
 		return s.store.ListEvents(ctx, args.Partition, args.Stream, args.After, args.Limit)
+	case "set_actor_profile":
+		var args struct {
+			ProjectID string   `json:"project_id"`
+			RoleText  string   `json:"role_text"`
+			Accepts   []string `json:"accepts"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.SetActorProfile(ctx, identity.Actor, identity.RunID, args.ProjectID, bus.ActorProfileRequest{
+			RoleText: args.RoleText, Accepts: args.Accepts,
+		})
+	case "who":
+		var args struct {
+			Limit int `json:"limit"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.Who(ctx, args.Limit)
 	case "register_session":
 		var request bus.RegistrationRequest
 		if err := decodeStrict(raw, &request); err != nil {
@@ -687,6 +709,26 @@ func (c *Client) ListEvents(ctx context.Context, partition, stream string, after
 	return result, err
 }
 
+func (c *Client) SetActorProfile(ctx context.Context, actor, runID, projectID string, request bus.ActorProfileRequest) (bus.ActorProfileResult, error) {
+	if err := c.requireActor(actor); err != nil {
+		return bus.ActorProfileResult{}, err
+	}
+	if strings.TrimSpace(runID) != c.identity.RunID {
+		return bus.ActorProfileResult{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+	}
+	var result bus.ActorProfileResult
+	err := c.call(ctx, "set_actor_profile", map[string]interface{}{
+		"project_id": projectID, "role_text": request.RoleText, "accepts": request.Accepts,
+	}, &result)
+	return result, err
+}
+
+func (c *Client) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) {
+	var result bus.ActorDirectory
+	err := c.call(ctx, "who", map[string]interface{}{"limit": limit}, &result)
+	return result, err
+}
+
 func (c *Client) RegisterSession(ctx context.Context, request bus.RegistrationRequest) (bus.Registration, error) {
 	if err := c.requireActor(request.Actor); err != nil {
 		return bus.Registration{}, err
@@ -813,7 +855,7 @@ func (c *Client) callOnceLocked(ctx context.Context, op string, args interface{}
 
 func retryAfterReconnect(op string) bool {
 	switch op {
-	case "ping", "send", "check_inbox", "ack", "extend", "list_events", "live_registrations", "monitor_attach", "expire_registration", "heartbeat_registrations":
+	case "ping", "send", "check_inbox", "ack", "extend", "list_events", "who", "live_registrations", "monitor_attach", "expire_registration", "heartbeat_registrations":
 		return true
 	default:
 		return false

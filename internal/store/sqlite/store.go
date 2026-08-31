@@ -22,7 +22,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const migrationVersion = 6
+const migrationVersion = 7
 
 type Store struct {
 	db    *sql.DB
@@ -109,6 +109,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"registrations", "registered_at_ns", "registered_at_ns INTEGER"},
 		{"registrations", "attention_mode", "attention_mode TEXT NOT NULL DEFAULT ''"},
 		{"registrations", "attention_superseded_at_ns", "attention_superseded_at_ns INTEGER"},
+		{"registrations", "working_directory", "working_directory TEXT NOT NULL DEFAULT ''"},
 	} {
 		hasColumn, err := columnExists(ctx, tx, addition.table, addition.column)
 		if err != nil {

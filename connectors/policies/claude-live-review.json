@@ -9,7 +9,9 @@
       "mcp__plugin_holler_holler__bus_ack",
       "mcp__plugin_holler_holler__bus_extend",
       "mcp__plugin_holler_holler__bus_nack",
-      "mcp__plugin_holler_holler__bus_status"
+      "mcp__plugin_holler_holler__bus_status",
+      "mcp__plugin_holler_holler__holler_profile",
+      "mcp__plugin_holler_holler__holler_who"
     ]
   }
 }

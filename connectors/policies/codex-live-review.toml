@@ -13,6 +13,8 @@ enabled_tools = [
   "bus_extend",
   "bus_nack",
   "bus_status",
+  "holler_profile",
+  "holler_who",
 ]
 
 # Codex 0.149.1 did not apply the server default to leased/write calls in the
@@ -33,4 +35,8 @@ approval_mode = "approve"
 [plugins."holler@holler".mcp_servers.holler.tools.bus_nack]
 approval_mode = "approve"
 [plugins."holler@holler".mcp_servers.holler.tools.bus_status]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_profile]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_who]
 approval_mode = "approve"

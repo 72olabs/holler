@@ -42,8 +42,8 @@ func TestMCPQuestionClaimAckRoundTrip(t *testing.T) {
 		t.Fatalf("server name = %q", got)
 	}
 	tools := nestedSlice(t, responses[1], "result", "tools")
-	if len(tools) != 8 {
-		t.Fatalf("tool count = %d, want 8", len(tools))
+	if len(tools) != 10 {
+		t.Fatalf("tool count = %d, want 10", len(tools))
 	}
 	firstID := nestedString(t, responses[2], "result", "structuredContent", "message_id")
 	secondID := nestedString(t, responses[3], "result", "structuredContent", "message_id")
@@ -137,14 +137,64 @@ func TestMCPSendNotifiesAfterCommitButNotOnIdempotentReplay(t *testing.T) {
 	}
 }
 
+func TestMCPProfileAndDiscoveryRemainAdvisory(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	server, err := mcp.New(db, mcp.Config{
+		Actor: "coupon-reviewer", RunID: "review-run-1", ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses := exchange(t, server,
+		toolCall(1, "holler_profile", map[string]interface{}{
+			"role_text": "Reviews coupon correctness", "accepts": []string{"REVIEW_REQUEST"},
+		}),
+		toolCall(2, "holler_profile", map[string]interface{}{
+			"role_text": "Reviews coupon correctness", "accepts": []string{"REVIEW_REQUEST"},
+		}),
+		toolCall(3, "holler_who", map[string]interface{}{}),
+		toolCall(4, "holler_profile", map[string]interface{}{
+			"role_text": "Reviews coupon correctness", "direction": "both",
+		}),
+	)
+	if got := nestedValue(t, responses[0], "result", "structuredContent", "updated"); got != true {
+		t.Fatalf("initial profile updated = %v", got)
+	}
+	if got := nestedValue(t, responses[1], "result", "structuredContent", "updated"); got != false {
+		t.Fatalf("identical profile updated = %v", got)
+	}
+	actors := nestedSlice(t, responses[2], "result", "structuredContent", "actors")
+	if len(actors) != 1 {
+		t.Fatalf("directory actors = %+v", actors)
+	}
+	actor := actors[0].(map[string]interface{})
+	profile := actor["profile"].(map[string]interface{})
+	if actor["actor"] != "coupon-reviewer" || profile["role_text"] != "Reviews coupon correctness" {
+		t.Fatalf("directory actor = %+v", actor)
+	}
+	if got := nestedString(t, responses[2], "result", "structuredContent", "metadata_trust"); got != "untrusted" {
+		t.Fatalf("metadata_trust = %q", got)
+	}
+	errorValue := responses[3]["error"].(map[string]interface{})
+	if !strings.Contains(errorValue["message"].(string), `unknown field "direction"`) {
+		t.Fatalf("direction error = %+v", errorValue)
+	}
+}
+
 func TestToolSurfaceIdentityIsStable(t *testing.T) {
 	wantNames := []string{
 		"bus_send", "bus_check_inbox", "bus_claim", "bus_inbox", "bus_ack", "bus_extend", "bus_nack", "bus_status",
+		"holler_profile", "holler_who",
 	}
 	if got := strings.Join(mcp.ToolNames(), ","); got != strings.Join(wantNames, ",") {
 		t.Fatalf("tool names = %q", got)
 	}
-	const wantHash = "sha256:c48e757d1d1ef53b4448b98ec435927465faebb3a2171609c22b140ae70defe4"
+	const wantHash = "sha256:8899b49e2195c05716364c378ebd2b233e28502f239f8174c77e3d7ba12458a3"
 	if got := mcp.ToolSurfaceHash(); got != wantHash {
 		t.Fatalf("tool surface hash = %q, want %q; connector reauthorization is required for an intentional schema change", got, wantHash)
 	}

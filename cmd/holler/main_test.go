@@ -70,6 +70,30 @@ func TestCLISendInboxClaimAck(t *testing.T) {
 	}
 }
 
+func TestCLIProfileAndWho(t *testing.T) {
+	ctx := context.Background()
+	socket := startAPIServer(t)
+	profileRaw := invoke(t, ctx, "profile",
+		"--socket", socket,
+		"--actor", "coupon-reviewer",
+		"--run", "review-run-1",
+		"--project", "coupon",
+		"--role", "Reviews coupon correctness",
+		"--accepts", "REVIEW_REQUEST,QUESTION",
+	)
+	var profile bus.ActorProfileResult
+	decode(t, profileRaw, &profile)
+	if !profile.Updated || profile.Profile.Actor != "coupon-reviewer" {
+		t.Fatalf("profile = %+v", profile)
+	}
+	whoRaw := invoke(t, ctx, "who", "--socket", socket)
+	var directory bus.ActorDirectory
+	decode(t, whoRaw, &directory)
+	if len(directory.Actors) != 1 || directory.Actors[0].Actor != "coupon-reviewer" || directory.Actors[0].Profile == nil {
+		t.Fatalf("directory = %+v", directory)
+	}
+}
+
 func TestCLIMCPUsesConnectorBoundEnvironment(t *testing.T) {
 	socket := startAPIServer(t)
 	t.Setenv("HOLLER_SOCKET", socket)

@@ -19,8 +19,8 @@
     "skills/holler/SKILL.md",
     "skills/holler-setup/SKILL.md"
   ],
-  "package_hash": "sha256:fc96c9bfd9785ade5363341b2a99ed8c023f20d6a75df6dcb98344e94091616f",
-  "tool_surface_hash": "sha256:c48e757d1d1ef53b4448b98ec435927465faebb3a2171609c22b140ae70defe4",
+  "package_hash": "sha256:f6d8cb9174dc7085f9c654beebcf3d70f0c0f0cec096ab614289f28e444a62d9",
+  "tool_surface_hash": "sha256:8899b49e2195c05716364c378ebd2b233e28502f239f8174c77e3d7ba12458a3",
   "mcp_server_name": "holler",
   "tools": [
     {"name": "bus_send", "class": "idempotent-write"},
@@ -30,7 +30,9 @@
     {"name": "bus_ack", "class": "idempotent-write"},
     {"name": "bus_extend", "class": "idempotent-write"},
     {"name": "bus_nack", "class": "leased-write"},
-    {"name": "bus_status", "class": "read-only"}
+    {"name": "bus_status", "class": "read-only"},
+    {"name": "holler_profile", "class": "idempotent-write"},
+    {"name": "holler_who", "class": "read-only"}
   ],
   "profiles": [
     {"name": "async-peer", "requires_wake": false, "description": "Durable messaging with visible polling fallback."},

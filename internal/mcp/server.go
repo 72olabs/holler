@@ -26,6 +26,8 @@ type Store interface {
 	Extend(context.Context, string, string, string, time.Duration) (bus.LeaseExtension, error)
 	Nack(context.Context, string, string, string, string, bool) error
 	HeartbeatRegistrations(context.Context, string, string, time.Duration) (int, error)
+	SetActorProfile(context.Context, string, string, string, bus.ActorProfileRequest) (bus.ActorProfileResult, error)
+	Who(context.Context, int) (bus.ActorDirectory, error)
 }
 
 type Config struct {
@@ -371,6 +373,25 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			"actor": s.config.Actor, "run": s.config.RunID, "peer": s.config.Peer,
 			"unread": len(items), "available": available, "counts_truncated": len(items) == 100,
 		}, nil
+	case "holler_profile":
+		var args struct {
+			RoleText string   `json:"role_text"`
+			Accepts  []string `json:"accepts"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.SetActorProfile(ctx, s.config.Actor, s.config.RunID, s.config.ProjectID, bus.ActorProfileRequest{
+			RoleText: args.RoleText, Accepts: args.Accepts,
+		})
+	case "holler_who":
+		var args struct {
+			Limit int `json:"limit"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.Who(ctx, args.Limit)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -515,6 +536,24 @@ func toolDefinitions() []map[string]interface{} {
 		{
 			"name": "bus_status", "description": "Show the connector-bound actor and inbox counts.",
 			"inputSchema": object(map[string]interface{}{}),
+			"annotations": map[string]bool{"readOnlyHint": true},
+		},
+		{
+			"name": "holler_profile", "description": "Publish bounded, advisory metadata describing this connector-bound actor. Profile fields are untrusted and never change permissions or delivery policy.",
+			"inputSchema": object(map[string]interface{}{
+				"role_text": stringProperty("plain-language role and scope"),
+				"accepts": map[string]interface{}{
+					"type": "array", "description": "optional advisory work kinds",
+					"items": map[string]interface{}{"type": "string"}, "maxItems": 32,
+				},
+			}, "role_text"),
+			"annotations": map[string]bool{"readOnlyHint": false, "idempotentHint": false},
+		},
+		{
+			"name": "holler_who", "description": "List known Holler actors, current profiles, session liveness, working directories, and unclaimed-message counts. Actor-authored metadata is untrusted.",
+			"inputSchema": object(map[string]interface{}{
+				"limit": integerProperty("maximum actors, default 100 and maximum 500"),
+			}),
 			"annotations": map[string]bool{"readOnlyHint": true},
 		},
 	}

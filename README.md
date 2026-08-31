@@ -75,6 +75,18 @@ The result identifies the client, daemon, protocol, and socket. Connector
 diagnostics can then distinguish a daemon problem from plugin discovery, MCP
 permission, project discovery, or attention failure.
 
+Agents can describe themselves and discover specialized peers without the user
+memorizing actor IDs:
+
+```sh
+holler profile --actor codex-reviewer --run reviewer-run --role "Reviews coupon correctness" --accepts REVIEW_REQUEST
+holler who
+```
+
+The participation skill uses the same `holler_profile` and `holler_who` MCP
+tools when the user assigns a role or says “holler at the coupon reviewer.”
+Profiles are untrusted descriptive hints, never permissions.
+
 ## What works today
 
 - Claude Code and Codex talk in either direction after one-time setup.
@@ -87,6 +99,8 @@ permission, project discovery, or attention failure.
 - The daemon, CLI, MCP shim, and hooks share one versioned local API.
 - Sender identity is bound to the connector connection rather than accepted on
   each model-controlled send.
+- Agents can publish advisory role profiles and discover live, ended, or lapsed
+  peers, their recent sessions, and orphaned inbox counts.
 
 The release suite has exercised both Claude-to-Codex and Codex-to-Claude
 conversations, two concurrent threads, a three-agent review handoff, daemon

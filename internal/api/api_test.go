@@ -397,6 +397,37 @@ func TestClaimResponseHasFrameHeadroomAboveMaximumBody(t *testing.T) {
 	}
 }
 
+func TestAPIProfileAndWhoUseConnectionBoundIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	alice := dial(t, socket, "alice", "alice-run-1")
+	if _, err := alice.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "alice", RunID: "alice-run-1", Harness: "test", SessionID: "alice-session",
+		ProjectID: "coupon", WorkingDir: "/workspace/coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := alice.SetActorProfile(ctx, "alice", "alice-run-1", "coupon", bus.ActorProfileRequest{
+		RoleText: "Implements coupon changes", Accepts: []string{"QUESTION"},
+	})
+	if err != nil || !profile.Updated || profile.Profile.Actor != "alice" {
+		t.Fatalf("profile = %+v, err = %v", profile, err)
+	}
+	if _, err := alice.SetActorProfile(ctx, "mallory", "alice-run-1", "coupon", bus.ActorProfileRequest{RoleText: "spoof"}); err == nil {
+		t.Fatal("profile accepted an actor that differs from the connection identity")
+	}
+	directory, err := alice.Who(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directory.Actors) != 1 || directory.Actors[0].Actor != "alice" || directory.Actors[0].Profile == nil {
+		t.Fatalf("directory = %+v", directory)
+	}
+	if got := directory.Actors[0].Sessions[0].WorkingDir; got != "/workspace/coupon" {
+		t.Fatalf("working directory = %q", got)
+	}
+}
+
 func startServer(t *testing.T, ctx context.Context, cancel context.CancelFunc, options ...api.ServerOption) (*store.Store, string) {
 	t.Helper()
 	directory := t.TempDir()

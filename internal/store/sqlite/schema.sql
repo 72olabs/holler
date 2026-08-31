@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS registrations (
     session_id TEXT NOT NULL,
     delivery_handle TEXT NOT NULL,
     project_id TEXT NOT NULL,
+    working_directory TEXT NOT NULL DEFAULT '',
     epoch INTEGER NOT NULL,
     registered_at_ns INTEGER,
     updated_at_ns INTEGER NOT NULL,
@@ -77,6 +78,20 @@ CREATE TABLE IF NOT EXISTS registrations (
 
 CREATE INDEX IF NOT EXISTS registrations_live_actor
     ON registrations(actor, lease_expires_at_ns, updated_at_ns);
+
+CREATE TABLE IF NOT EXISTS actor_profiles (
+    actor TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    role_text TEXT NOT NULL,
+    accepts_json BLOB NOT NULL,
+    updated_by_run TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    updated_at_ns INTEGER NOT NULL,
+    PRIMARY KEY (actor, revision)
+);
+
+CREATE INDEX IF NOT EXISTS actor_profiles_current
+    ON actor_profiles(actor, revision DESC);
 
 CREATE TABLE IF NOT EXISTS partition_counters (
     partition_id TEXT NOT NULL,

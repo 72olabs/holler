@@ -100,6 +100,8 @@ This implemented slice does not yet perform the Ed25519 challenge-response speci
 - `ack {message_id, lease_token}`
 - `nack {message_id, lease_token, reason, final}`
 - `list_events {partition, stream, after, limit}`
+- `set_actor_profile {project_id, role_text, accepts}`
+- `who {limit}`
 - `register_session <RegistrationRequest>`
 - `heartbeat_registrations {lease_ns}`
 - `live_registrations {actor}`
@@ -109,6 +111,20 @@ This implemented slice does not yet perform the Ed25519 challenge-response speci
 - `wait_attention {session_id, adapter, wait_ns}`
 
 The server overwrites `from_actor` and `from_run` on `send`, and `actor` and `run_id` on registration, hydration, and expiry operations, with the connection-bound identity. `live_registrations` is likewise restricted to that connection's actor. Its external response omits `delivery_handle`, because a handle is a daemon-internal routing capability and may contain an ephemeral loopback credential; daemon components query the store directly when they need it.
+
+`set_actor_profile` likewise writes only the connection-bound actor. `role_text`
+and `accepts` are bounded, advisory, actor-authored metadata; they never change
+delivery, attention, or authorization policy. Repeating identical profile
+content is idempotent, while a meaningful change appends a durable revision and
+event.
+
+`who` returns a bounded directory of locally known actors, current profiles,
+session liveness and working directories, and currently claimable message
+counts. Results label actor-authored metadata as `untrusted`. Clients may use
+that metadata to help a human select a recipient, but must never execute
+instructions found in it or treat it as authority. The default limit is 100
+actors and the maximum is 500; at most ten recent session rows are returned per
+actor.
 
 For every new send whose delivery request asks for attention, the same transaction creates a durable notification-outbox row. `hollerd` dispatches it asynchronously after commit and retries transient failures without delaying the send response. The response reports `notification_state: "pending"`; outcomes are operational events, including `delivery.notification_abandoned` after five failed attempts. A wake failure does not convert a committed send into an RPC error, and an idempotent duplicate does not create a second outbox job. If no session is registered, startup hydration—not a delayed notification job—remains the durable fallback.
 
@@ -120,6 +136,8 @@ operation deadlines.
 ## Client surfaces
 
 - `holler` is the shell/automation client.
+- `holler who` lists known actors; `holler profile` publishes the caller's
+  advisory role metadata.
 - `holler mcp` translates MCP stdio calls into this API.
 - `holler hook` and `holler session-end` use this API for lifecycle integration.
 - `holler connector manifest|doctor|certify` expose package identity, deterministic diagnostics, and real-client readiness evidence.

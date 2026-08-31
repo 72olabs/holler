@@ -607,7 +607,7 @@ func TestMigrationV5AddsSupersessionWithoutLosingRegistration(t *testing.T) {
 	if _, err := raw.Exec(`ALTER TABLE registrations DROP COLUMN attention_superseded_at_ns`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`DELETE FROM schema_migrations WHERE version = 6`); err != nil {
+	if _, err := raw.Exec(`DELETE FROM schema_migrations`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at_ns) VALUES (5, 1)`); err != nil {
@@ -626,6 +626,54 @@ func TestMigrationV5AddsSupersessionWithoutLosingRegistration(t *testing.T) {
 	}
 }
 
+func TestMigrationV6AddsDiscoverySchemaWithoutLosingRegistration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "codex", RunID: "run-1", Harness: "codex", SessionID: "session-1",
+		ProjectID: "migration", WorkingDir: "/workspace/coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE actor_profiles`,
+		`ALTER TABLE registrations DROP COLUMN working_directory`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (6, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	registrations, err := db.LiveRegistrations(ctx, "codex")
+	if err != nil || len(registrations) != 1 || registrations[0].WorkingDir != "" {
+		t.Fatalf("migrated registrations = %+v, err = %v", registrations, err)
+	}
+	profile, err := db.SetActorProfile(ctx, "codex", "run-1", "migration", bus.ActorProfileRequest{RoleText: "Migration reviewer"})
+	if err != nil || !profile.Updated {
+		t.Fatalf("profile after migration = %+v, err = %v", profile, err)
+	}
+}
+
 func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 	db, path := openTestStore(t)
 	if err := db.Close(); err != nil {
@@ -641,6 +689,7 @@ func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 		`ALTER TABLE registrations DROP COLUMN ended_at_ns`,
 		`ALTER TABLE registrations DROP COLUMN registered_at_ns`,
 		`ALTER TABLE registrations DROP COLUMN attention_mode`,
+		`ALTER TABLE registrations DROP COLUMN working_directory`,
 	} {
 		if _, err := raw.Exec(statement); err != nil {
 			t.Fatal(err)

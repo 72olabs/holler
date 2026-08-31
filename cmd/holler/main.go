@@ -40,6 +40,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	switch args[0] {
 	case "status":
 		err = runStatus(ctx, args[1:], stdout, stderr)
+	case "who":
+		err = runWho(ctx, args[1:], stdout, stderr)
+	case "profile":
+		err = runProfile(ctx, args[1:], stdout, stderr)
 	case "send":
 		err = runSend(ctx, args[1:], stdout, stderr)
 	case "inbox":
@@ -216,9 +220,11 @@ func runMonitor(ctx context.Context, args []string, stdin io.Reader, stdout, std
 					contentionDelay = nextRetryDelay(contentionDelay)
 					continue
 				}
+				workingDir, _ := os.Getwd()
 				_, registrationErr := client.RegisterSession(monitorCtx, bus.RegistrationRequest{
 					Actor: *actor, RunID: *runID, Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
-					SessionID: sessionID, DeliveryHandle: sessionID, ProjectID: binding.Project, Lease: 5 * time.Minute,
+					SessionID: sessionID, DeliveryHandle: sessionID, ProjectID: binding.Project,
+					WorkingDir: workingDir, Lease: 5 * time.Minute,
 				})
 				if registrationErr == nil {
 					contentionDelay = 100 * time.Millisecond
@@ -387,6 +393,58 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		"ok": true, "socket": *socketPath, "protocol": api.ProtocolVersion,
 		"client_build": buildinfo.Current(), "daemon_build": client.ServerBuild(),
 	})
+}
+
+func runWho(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := commandFlags("who", stderr)
+	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
+	actor := flags.String("actor", environmentOr("HOLLER_ACTOR", "operator"), "session actor")
+	runID := flags.String("run", environmentOr("HOLLER_RUN", "operator-who"), "session run")
+	limit := flags.Int("limit", 100, "maximum actors")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	client, err := dialAPI(ctx, *socketPath, *actor, *runID, "holler-cli/1.5")
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	directory, err := client.Who(ctx, *limit)
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, directory)
+}
+
+func runProfile(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := commandFlags("profile", stderr)
+	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
+	actor := flags.String("actor", os.Getenv("HOLLER_ACTOR"), "connector-bound actor")
+	runID := flags.String("run", os.Getenv("HOLLER_RUN"), "immutable actor run")
+	project := flags.String("project", environmentOr("HOLLER_PROJECT", "default"), "project/partition")
+	roleText := flags.String("role", "", "plain-language role and scope")
+	accepts := flags.String("accepts", "", "comma-separated advisory work kinds")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	acceptedKinds := make([]string, 0)
+	for _, value := range strings.Split(*accepts, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			acceptedKinds = append(acceptedKinds, value)
+		}
+	}
+	client, err := dialAPI(ctx, *socketPath, *actor, *runID, "holler-cli/1.5")
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	result, err := client.SetActorProfile(ctx, *actor, *runID, *project, bus.ActorProfileRequest{
+		RoleText: *roleText, Accepts: acceptedKinds,
+	})
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, result)
 }
 
 func runSend(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -1037,6 +1095,8 @@ Usage:
   holler setup claude [--yes|--remove]
   holler setup codex [--yes|--remove]
   holler status [--socket PATH]
+  holler who [--socket PATH] [--limit 100]
+  holler profile --actor ACTOR --run RUN --role TEXT [--accepts KIND,KIND]
   holler send   --socket PATH --actor ACTOR --run RUN --to ACTOR[,ACTOR] --idempotency-key KEY [options]
   holler inbox  --socket PATH --actor ACTOR
   holler claim  --socket PATH --actor ACTOR [--message ID] [--lease 5m]

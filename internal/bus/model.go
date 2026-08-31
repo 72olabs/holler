@@ -138,6 +138,7 @@ type Registration struct {
 	SessionID      string    `json:"session_id"`
 	DeliveryHandle string    `json:"delivery_handle"`
 	ProjectID      string    `json:"project_id"`
+	WorkingDir     string    `json:"working_directory,omitempty"`
 	Epoch          int64     `json:"epoch"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
@@ -151,7 +152,60 @@ type RegistrationRequest struct {
 	SessionID      string        `json:"session_id"`
 	DeliveryHandle string        `json:"delivery_handle"`
 	ProjectID      string        `json:"project_id"`
+	WorkingDir     string        `json:"working_directory,omitempty"`
 	Lease          time.Duration `json:"lease"`
+}
+
+// ActorProfile is model-authored discovery metadata. It is descriptive only:
+// no field in a profile changes delivery, authorization, or attention policy.
+type ActorProfile struct {
+	Actor        string    `json:"actor"`
+	RoleText     string    `json:"role_text"`
+	Accepts      []string  `json:"accepts,omitempty"`
+	Revision     int64     `json:"revision"`
+	UpdatedByRun string    `json:"updated_by_run"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type ActorProfileRequest struct {
+	RoleText string   `json:"role_text"`
+	Accepts  []string `json:"accepts,omitempty"`
+}
+
+type ActorProfileResult struct {
+	Profile ActorProfile `json:"profile"`
+	Updated bool         `json:"updated"`
+}
+
+type ActorSession struct {
+	RunID          string     `json:"run_id"`
+	Harness        string     `json:"harness"`
+	AttentionMode  string     `json:"attention_mode,omitempty"`
+	SessionID      string     `json:"session_id"`
+	ProjectID      string     `json:"project_id"`
+	WorkingDir     string     `json:"working_directory,omitempty"`
+	State          string     `json:"state"`
+	StartedAt      time.Time  `json:"started_at"`
+	LastSeenAt     time.Time  `json:"last_seen_at"`
+	LeaseExpiresAt time.Time  `json:"lease_expires_at"`
+	EndedAt        *time.Time `json:"ended_at,omitempty"`
+}
+
+type ActorDirectoryEntry struct {
+	Actor             string         `json:"actor"`
+	State             string         `json:"state"`
+	LastSeenAt        time.Time      `json:"last_seen_at"`
+	Profile           *ActorProfile  `json:"profile,omitempty"`
+	Sessions          []ActorSession `json:"sessions"`
+	SessionsTruncated bool           `json:"sessions_truncated,omitempty"`
+	UnclaimedMessages int            `json:"unclaimed_messages"`
+}
+
+type ActorDirectory struct {
+	Actors        []ActorDirectoryEntry `json:"actors"`
+	GeneratedAt   time.Time             `json:"generated_at"`
+	Truncated     bool                  `json:"truncated"`
+	MetadataTrust string                `json:"metadata_trust"`
 }
 
 type NotificationAttempt struct {
