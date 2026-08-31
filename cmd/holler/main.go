@@ -46,6 +46,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		err = runWho(ctx, args[1:], stdout, stderr)
 	case "profile":
 		err = runProfile(ctx, args[1:], stdout, stderr)
+	case "adopt":
+		err = runAdopt(ctx, args[1:], stdout, stderr)
 	case "send":
 		err = runSend(ctx, args[1:], stdout, stderr)
 	case "inbox":
@@ -453,6 +455,31 @@ func runProfile(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	defer client.Close()
 	result, err := client.SetActorProfile(ctx, *actor, *runID, *project, bus.ActorProfileRequest{
 		RoleText: *roleText, Accepts: acceptedKinds,
+	})
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, result)
+}
+
+func runAdopt(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := commandFlags("adopt", stderr)
+	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
+	actor := flags.String("actor", os.Getenv("HOLLER_ACTOR"), "live actor adopting the inbox")
+	runID := flags.String("run", environmentOr("HOLLER_RUN", "operator-adopt"), "adopting run")
+	source := flags.String("from", "", "inactive source actor")
+	project := flags.String("project", environmentOr("HOLLER_PROJECT", "default"), "project/partition")
+	idempotencyKey := flags.String("idempotency-key", "", "stable key for this adoption")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	client, err := dialAPI(ctx, *socketPath, *actor, *runID, "holler-cli/1.5")
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	result, err := client.AdoptActor(ctx, bus.AdoptRequest{
+		SourceActor: *source, ProjectID: *project, IdempotencyKey: *idempotencyKey,
 	})
 	if err != nil {
 		return err
@@ -1181,6 +1208,7 @@ Usage:
   holler status [--socket PATH]
   holler who [--socket PATH] [--limit 100]
   holler profile --actor ACTOR --run RUN --role TEXT [--accepts KIND,KIND]
+  holler adopt --actor LIVE_ACTOR --run RUN --from INACTIVE_ACTOR --idempotency-key KEY
   holler send   --socket PATH --actor ACTOR --run RUN --to ACTOR[,ACTOR] --idempotency-key KEY [options]
   holler inbox  --socket PATH --actor ACTOR
   holler claim  --socket PATH --actor ACTOR [--message ID] [--lease 5m]

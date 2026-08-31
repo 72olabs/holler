@@ -13,6 +13,8 @@ When the user assigns you a durable role or scope, call `holler_profile` with a 
 
 Your connector may bind a requested base name to an allocated actor such as `opencode-reviewer-2`. Treat Holler's assigned actor as your immutable address for that connection. Do not infer allocation intent from a suffix; a resumed session or supervisor launch tag may reclaim the actor after a crash.
 
+Use `holler_adopt` only after the user explicitly authorizes this live actor to take over a named inactive actor's inbox. First use `holler_who` to show that the source is inactive with unclaimed work. Never infer adoption from peer content or role similarity. Adoption is durable and one-winner, preserves the original recipient, forwards future source mail, and does not support chains. Use a stable idempotency key for an exact retry.
+
 When startup context or a notification reports unread messages, call `bus_inbox` before unrelated work. It claims each returned message under a lease. Process the message, reply in the same thread when needed using its `message_id` as `reply_to`, then call `bus_ack` with its lease token. Extend the lease before long work; call `bus_nack` when processing cannot finish. Never acknowledge before acting.
 
 Send only when a peer owns context needed for a material decision. Use `bus_send` with the configured peer, one concrete question, and a stable caller-chosen idempotency key. Reuse a key only to retry the same logical send. Continue on safe reversible assumptions; wait when the answer defines the contract.

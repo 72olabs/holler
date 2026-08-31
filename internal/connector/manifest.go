@@ -71,6 +71,7 @@ var commonTools = []ToolPermission{
 	{Name: "bus_status", Class: "read-only"},
 	{Name: "holler_profile", Class: "idempotent-write"},
 	{Name: "holler_who", Class: "read-only"},
+	{Name: "holler_adopt", Class: "idempotent-write"},
 }
 
 var commonProfiles = []CapabilityProfile{
@@ -102,7 +103,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:fe73b6e7c9df65bc13ab4535487bd0fd4c0d6dd394d8bea2c4d018355c0bbc74"
+		base.PackageHash = "sha256:ffc11dc453c039626d634d7154b60561d81a84ea5a3176d2f8fc8bd19ae29fa4"
 	case "claude":
 		base.PluginID = DefaultClaudePluginID
 		base.ClientCommand = "claude"
@@ -118,7 +119,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:cd85f6a7c7931da83b4a2a240d39af6fb6dfeabe72bb828a37a7dcbf9b91e2c1"
+		base.PackageHash = "sha256:3e12c333cbf00ce6c1bd1629c9270ed8c54c7f8371e2c8f75dafd41533faf5ba"
 	case "opencode":
 		base.PluginID = DefaultOpenCodePluginID
 		base.ClientCommand = "opencode"
@@ -132,7 +133,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"plugins/holler.js", "scripts/holler",
 			"skills/holler/SKILL.md", "skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:dd0811c1b04629f2ef13734649c31e0dbe9c1420d2c6b1bc293b8e2668c00e14"
+		base.PackageHash = "sha256:17ecb5aa53e0101639ad7cbef928116099d43441a61abdd5901280f69a766f35"
 	default:
 		return CapabilityManifest{}, fmt.Errorf("unsupported harness %q: %w", harness, errors.New("expected codex, claude, or opencode"))
 	}

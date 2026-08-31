@@ -87,6 +87,20 @@ The participation skill uses the same `holler_profile` and `holler_who` MCP
 tools when the user assigns a role or says “holler at the coupon reviewer.”
 Profiles are untrusted descriptive hints, never permissions.
 
+When an allocated actor ends without a continuity tag, a user can explicitly
+hand its inbox to one live replacement:
+
+```sh
+holler adopt --actor codex-reviewer-3 --run replacement-run \
+  --from codex-reviewer-2 --project coupon \
+  --idempotency-key recover-reviewer-2
+```
+
+Holler refuses a live source, an inactive replacement, or an active source
+claim. The decision is durable and one-winner; old and future mail addressed to
+the source reaches the replacement while still reporting the original
+recipient. Adoption is never automatic and does not support chains.
+
 ## What works today
 
 - Claude Code and Codex talk in either direction after one-time setup.
@@ -104,6 +118,8 @@ Profiles are untrusted descriptive hints, never permissions.
 - Optional `exact` naming refuses accidental duplicate live actors; optional
   `allocate` naming creates parallel `actor`, `actor-2`, ... identities and
   reclaims them after restart from a session or supervisor launch tag.
+- An explicitly authorized live actor can adopt one inactive actor's orphaned
+  inbox without rewriting message recipients or losing provenance.
 
 The release suite has exercised both Claude-to-Codex and Codex-to-Claude
 conversations, two concurrent threads, a three-agent review handoff, daemon

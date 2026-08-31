@@ -30,6 +30,9 @@ var (
 	ErrBindingStale        = errors.New("actor binding is stale: this run was superseded and cannot reclaim the actor")
 	ErrContinuityConflict  = errors.New("continuity handles resolve to different actors")
 	ErrBindingReassigned   = errors.New("provisional actor binding was reassigned")
+	ErrAdoptionConflict    = errors.New("actor inbox was already adopted by another actor")
+	ErrAdoptionBusy        = errors.New("actor inbox has an active claim")
+	ErrActorNotLive        = errors.New("adopting actor has no live presence")
 )
 
 type NameMode string
@@ -118,27 +121,49 @@ const (
 )
 
 type InboxItem struct {
-	MessageID       string          `json:"message_id"`
-	ProjectID       string          `json:"project_id"`
-	ChannelID       string          `json:"channel_id"`
-	ThreadID        string          `json:"thread_id,omitempty"`
-	FromActor       string          `json:"from_actor"`
-	FromRole        string          `json:"from_role,omitempty"`
-	Type            string          `json:"type"`
-	DeliveryRequest DeliveryRequest `json:"delivery_request"`
-	State           DeliveryState   `json:"state"`
-	Attempt         int             `json:"attempt"`
-	Available       bool            `json:"available"`
-	CreatedAt       time.Time       `json:"created_at"`
-	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+	MessageID              string          `json:"message_id"`
+	ProjectID              string          `json:"project_id"`
+	ChannelID              string          `json:"channel_id"`
+	ThreadID               string          `json:"thread_id,omitempty"`
+	FromActor              string          `json:"from_actor"`
+	FromRole               string          `json:"from_role,omitempty"`
+	Type                   string          `json:"type"`
+	DeliveryRequest        DeliveryRequest `json:"delivery_request"`
+	State                  DeliveryState   `json:"state"`
+	Attempt                int             `json:"attempt"`
+	Available              bool            `json:"available"`
+	CreatedAt              time.Time       `json:"created_at"`
+	ExpiresAt              *time.Time      `json:"expires_at,omitempty"`
+	RecipientActor         string          `json:"recipient_actor"`
+	OriginalRecipientActor string          `json:"original_recipient_actor,omitempty"`
 }
 
 type Claim struct {
-	Message        Message   `json:"message"`
-	RecipientActor string    `json:"recipient_actor"`
-	Attempt        int       `json:"attempt"`
-	LeaseToken     string    `json:"lease_token"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	Message                Message   `json:"message"`
+	RecipientActor         string    `json:"recipient_actor"`
+	OriginalRecipientActor string    `json:"original_recipient_actor,omitempty"`
+	Attempt                int       `json:"attempt"`
+	LeaseToken             string    `json:"lease_token"`
+	LeaseExpiresAt         time.Time `json:"lease_expires_at"`
+}
+
+type AdoptRequest struct {
+	SourceActor    string `json:"source_actor"`
+	AdoptingActor  string `json:"adopting_actor,omitempty"`
+	AdoptingRun    string `json:"adopting_run,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type AdoptResult struct {
+	SourceActor      string    `json:"source_actor"`
+	AdoptingActor    string    `json:"adopting_actor"`
+	AdoptingRun      string    `json:"adopting_run"`
+	Transferred      int       `json:"transferred"`
+	Deduplicated     int       `json:"deduplicated"`
+	DuplicateRequest bool      `json:"duplicate_request"`
+	AdoptedAt        time.Time `json:"adopted_at"`
+	IdempotencyKey   string    `json:"-"`
 }
 
 type Registration struct {

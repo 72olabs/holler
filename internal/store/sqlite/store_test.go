@@ -722,6 +722,59 @@ func TestMigrationV7AddsActorBindingsWithoutLosingProfiles(t *testing.T) {
 	}
 }
 
+func TestMigrationV8AddsActorAdoptionsWithoutLosingMessages(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, err := db.Send(ctx, testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE actor_adoptions`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (8, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "replacement", RunID: "replacement-run", Harness: "test", SessionID: "replacement-session",
+		ProjectID: "migration", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdoptActor(ctx, bus.AdoptRequest{
+		SourceActor: "reviewer", AdoptingActor: "replacement", AdoptingRun: "replacement-run",
+		ProjectID: "migration", IdempotencyKey: "migration-adopt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := db.CheckInbox(ctx, "replacement", 10)
+	if err != nil || len(items) != 1 || items[0].MessageID != sent.Message.ID || items[0].OriginalRecipientActor != "reviewer" {
+		t.Fatalf("migrated adopted inbox = %+v, err = %v", items, err)
+	}
+}
+
 func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 	db, path := openTestStore(t)
 	if _, err := db.RegisterSession(context.Background(), bus.RegistrationRequest{

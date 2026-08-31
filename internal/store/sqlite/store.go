@@ -22,7 +22,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const migrationVersion = 8
+const migrationVersion = 9
 
 type Store struct {
 	db    *sql.DB
@@ -265,10 +265,15 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 			return bus.SendResult{}, fmt.Errorf("insert delivery for %s: %w", recipient, err)
 		}
 		if message.DeliveryRequest != bus.DeliveryNonBlocking {
+			notificationActor := recipient
+			if err := tx.QueryRowContext(ctx, `SELECT adopting_actor FROM actor_adoptions WHERE source_actor = ?`, recipient).
+				Scan(&notificationActor); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return bus.SendResult{}, fmt.Errorf("resolve adopted notification actor: %w", err)
+			}
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO notification_outbox(
+				INSERT OR IGNORE INTO notification_outbox(
 					message_id, recipient_actor, state, available_at_ns, created_at_ns
-				) VALUES (?, ?, 'pending', ?, ?)`, message.ID, recipient, now.UnixNano(), now.UnixNano()); err != nil {
+				) VALUES (?, ?, 'pending', ?, ?)`, message.ID, notificationActor, now.UnixNano(), now.UnixNano()); err != nil {
 				return bus.SendResult{}, fmt.Errorf("enqueue notification for %s: %w", recipient, err)
 			}
 		}
@@ -307,16 +312,28 @@ func (s *Store) CheckInbox(ctx context.Context, actor string, limit int) ([]bus.
 	}
 	nowNS := s.now().UTC().UnixNano()
 	rows, err := s.db.QueryContext(ctx, `
+		WITH candidates AS (
+			SELECT d.message_id, d.recipient_actor AS original_recipient_actor, d.state, d.attempt,
+			       d.lease_expires_at_ns,
+			       ROW_NUMBER() OVER (
+				   PARTITION BY d.message_id
+				   ORDER BY CASE WHEN d.recipient_actor = ? AND a.source_actor IS NULL THEN 0 ELSE 1 END,
+				            d.recipient_actor
+			       ) AS preference
+			FROM deliveries d
+			LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
+			WHERE (d.recipient_actor = ? AND a.source_actor IS NULL) OR a.adopting_actor = ?
+		)
 		SELECT m.message_id, m.project_id, m.channel_id, COALESCE(m.thread_id, ''),
 		       m.from_actor, COALESCE(m.from_role, ''), m.message_type, m.delivery_request,
-		       d.state, d.attempt, m.created_at_ns, m.expires_at_ns, d.lease_expires_at_ns
-		FROM deliveries d
-		JOIN messages m ON m.message_id = d.message_id
-		WHERE d.recipient_actor = ?
-		  AND d.state IN (?, ?)
+		       c.state, c.attempt, m.created_at_ns, m.expires_at_ns, c.lease_expires_at_ns,
+		       c.original_recipient_actor
+		FROM candidates c
+		JOIN messages m ON m.message_id = c.message_id
+		WHERE c.preference = 1 AND c.state IN (?, ?)
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)
 		ORDER BY m.created_at_ns, m.message_id
-		LIMIT ?`, actor, bus.DeliveryQueued, bus.DeliveryClaimed, nowNS, limit)
+		LIMIT ?`, actor, actor, actor, bus.DeliveryQueued, bus.DeliveryClaimed, nowNS, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query inbox: %w", err)
 	}
@@ -329,13 +346,18 @@ func (s *Store) CheckInbox(ctx context.Context, actor string, limit int) ([]bus.
 		var expiresNS, leaseExpiresNS sql.NullInt64
 		if err := rows.Scan(&item.MessageID, &item.ProjectID, &item.ChannelID, &item.ThreadID,
 			&item.FromActor, &item.FromRole, &item.Type, &item.DeliveryRequest,
-			&item.State, &item.Attempt, &createdNS, &expiresNS, &leaseExpiresNS); err != nil {
+			&item.State, &item.Attempt, &createdNS, &expiresNS, &leaseExpiresNS,
+			&item.OriginalRecipientActor); err != nil {
 			return nil, fmt.Errorf("scan inbox: %w", err)
 		}
 		item.CreatedAt = time.Unix(0, createdNS).UTC()
 		item.ExpiresAt = timeFromNull(expiresNS)
 		item.Available = item.State == bus.DeliveryQueued ||
 			(item.State == bus.DeliveryClaimed && leaseExpiresNS.Valid && leaseExpiresNS.Int64 <= nowNS)
+		item.RecipientActor = actor
+		if item.OriginalRecipientActor == actor {
+			item.OriginalRecipientActor = ""
+		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -362,19 +384,31 @@ func (s *Store) Claim(ctx context.Context, actor, messageID string, lease time.D
 	defer tx.Rollback()
 
 	query := `
-		SELECT m.message_id
-		FROM deliveries d
-		JOIN messages m ON m.message_id = d.message_id
-		WHERE d.recipient_actor = ?
-		  AND (d.state = ? OR (d.state = ? AND d.lease_expires_at_ns <= ?))
+		WITH candidates AS (
+			SELECT d.message_id, d.recipient_actor AS original_recipient_actor, d.state,
+			       d.lease_expires_at_ns,
+			       ROW_NUMBER() OVER (
+				   PARTITION BY d.message_id
+				   ORDER BY CASE WHEN d.recipient_actor = ? AND a.source_actor IS NULL THEN 0 ELSE 1 END,
+				            d.recipient_actor
+			       ) AS preference
+			FROM deliveries d
+			LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
+			WHERE (d.recipient_actor = ? AND a.source_actor IS NULL) OR a.adopting_actor = ?
+		)
+		SELECT m.message_id, c.original_recipient_actor
+		FROM candidates c JOIN messages m ON m.message_id = c.message_id
+		WHERE c.preference = 1
+		  AND (c.state = ? OR (c.state = ? AND c.lease_expires_at_ns <= ?))
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)`
-	args := []interface{}{actor, bus.DeliveryQueued, bus.DeliveryClaimed, now.UnixNano(), now.UnixNano()}
+	args := []interface{}{actor, actor, actor, bus.DeliveryQueued, bus.DeliveryClaimed, now.UnixNano(), now.UnixNano()}
 	if messageID != "" {
 		query += " AND m.message_id = ?"
 		args = append(args, messageID)
 	}
 	query += " ORDER BY m.created_at_ns, m.message_id LIMIT 1"
-	if err := tx.QueryRowContext(ctx, query, args...).Scan(&messageID); err != nil {
+	var originalRecipient string
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&messageID, &originalRecipient); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return bus.Claim{}, bus.ErrNoMessage
 		}
@@ -393,7 +427,7 @@ func (s *Store) Claim(ctx context.Context, actor, messageID string, lease time.D
 		WHERE message_id = ? AND recipient_actor = ?
 		  AND (state = ? OR (state = ? AND lease_expires_at_ns <= ?))`,
 		bus.DeliveryClaimed, leaseToken, leaseExpires.UnixNano(), now.UnixNano(),
-		messageID, actor, bus.DeliveryQueued, bus.DeliveryClaimed, now.UnixNano())
+		messageID, originalRecipient, bus.DeliveryQueued, bus.DeliveryClaimed, now.UnixNano())
 	if err != nil {
 		return bus.Claim{}, fmt.Errorf("claim delivery: %w", err)
 	}
@@ -412,11 +446,14 @@ func (s *Store) Claim(ctx context.Context, actor, messageID string, lease time.D
 	var attempt int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT attempt FROM deliveries WHERE message_id = ? AND recipient_actor = ?`,
-		messageID, actor).Scan(&attempt); err != nil {
+		messageID, originalRecipient).Scan(&attempt); err != nil {
 		return bus.Claim{}, fmt.Errorf("read claim attempt: %w", err)
 	}
 	claimPayload := bus.EventProvenance(ctx, "")
 	claimPayload["attempt"] = attempt
+	if originalRecipient != actor {
+		claimPayload["original_recipient_actor"] = originalRecipient
+	}
 	if err := s.appendEventTx(ctx, tx, message.ProjectID, "operational", "delivery.claimed",
 		message.ID, actor, claimPayload, now); err != nil {
 		return bus.Claim{}, err
@@ -433,7 +470,7 @@ func (s *Store) Claim(ctx context.Context, actor, messageID string, lease time.D
 		return bus.Claim{}, fmt.Errorf("commit claim: %w", err)
 	}
 	return bus.Claim{
-		Message: message, RecipientActor: actor, Attempt: attempt,
+		Message: message, RecipientActor: actor, OriginalRecipientActor: adoptionProvenance(actor, originalRecipient), Attempt: attempt,
 		LeaseToken: leaseToken, LeaseExpiresAt: leaseExpires,
 	}, nil
 }
@@ -459,12 +496,16 @@ func (s *Store) Extend(ctx context.Context, actor, messageID, leaseToken string,
 		return bus.LeaseExtension{}, fmt.Errorf("begin lease extension: %w", err)
 	}
 	defer tx.Rollback()
+	originalRecipient, err := effectiveDeliveryRecipientTx(ctx, tx, actor, messageID)
+	if err != nil {
+		return bus.LeaseExtension{}, err
+	}
 	var state bus.DeliveryState
 	var storedToken sql.NullString
 	var leaseExpires sql.NullInt64
 	if err := tx.QueryRowContext(ctx, `
 		SELECT state, lease_token, lease_expires_at_ns FROM deliveries
-		WHERE message_id = ? AND recipient_actor = ?`, messageID, actor).Scan(&state, &storedToken, &leaseExpires); err != nil {
+		WHERE message_id = ? AND recipient_actor = ?`, messageID, originalRecipient).Scan(&state, &storedToken, &leaseExpires); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return bus.LeaseExtension{}, bus.ErrNotFound
 		}
@@ -479,7 +520,7 @@ func (s *Store) Extend(ctx context.Context, actor, messageID, leaseToken string,
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE deliveries SET lease_expires_at_ns = ?
 		WHERE message_id = ? AND recipient_actor = ? AND state = ? AND lease_token = ?`,
-		expires.UnixNano(), messageID, actor, bus.DeliveryClaimed, leaseToken); err != nil {
+		expires.UnixNano(), messageID, originalRecipient, bus.DeliveryClaimed, leaseToken); err != nil {
 		return bus.LeaseExtension{}, fmt.Errorf("extend delivery lease: %w", err)
 	}
 	message, err := getMessageByIDTx(ctx, tx, messageID)
@@ -488,6 +529,9 @@ func (s *Store) Extend(ctx context.Context, actor, messageID, leaseToken string,
 	}
 	payload := bus.EventProvenance(ctx, "")
 	payload["lease_expires_at"] = expires
+	if originalRecipient != actor {
+		payload["original_recipient_actor"] = originalRecipient
+	}
 	if err := s.appendEventTx(ctx, tx, message.ProjectID, "operational", "delivery.extended", messageID, actor, payload, now); err != nil {
 		return bus.LeaseExtension{}, err
 	}
@@ -515,13 +559,17 @@ func (s *Store) finish(ctx context.Context, actor, messageID, leaseToken string,
 		return fmt.Errorf("begin delivery transition: %w", err)
 	}
 	defer tx.Rollback()
+	originalRecipient, err := effectiveDeliveryRecipientTx(ctx, tx, actor, messageID)
+	if err != nil {
+		return err
+	}
 	var state bus.DeliveryState
 	var storedToken sql.NullString
 	var terminalToken sql.NullString
 	if err := tx.QueryRowContext(ctx, `
 		SELECT state, lease_token, terminal_lease_token
 		FROM deliveries WHERE message_id = ? AND recipient_actor = ?`,
-		messageID, actor).Scan(&state, &storedToken, &terminalToken); err != nil {
+		messageID, originalRecipient).Scan(&state, &storedToken, &terminalToken); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return bus.ErrNotFound
 		}
@@ -565,12 +613,15 @@ func (s *Store) finish(ctx context.Context, actor, messageID, leaseToken string,
 		SET state = ?, lease_token = NULL, lease_expires_at_ns = NULL,
 		    terminal_lease_token = ?, acked_at_ns = ?, last_error = NULLIF(?, '')
 		WHERE message_id = ? AND recipient_actor = ?`,
-		next, terminalLease, ackedAt, reason, messageID, actor); err != nil {
+		next, terminalLease, ackedAt, reason, messageID, originalRecipient); err != nil {
 		return fmt.Errorf("finish delivery: %w", err)
 	}
 	payload := bus.EventProvenance(ctx, "")
 	if reason != "" {
 		payload["reason"] = reason
+	}
+	if originalRecipient != actor {
+		payload["original_recipient_actor"] = originalRecipient
 	}
 	if err := s.appendEventTx(ctx, tx, message.ProjectID, "operational", kind,
 		messageID, actor, payload, now); err != nil {
@@ -580,6 +631,37 @@ func (s *Store) finish(ctx context.Context, actor, messageID, leaseToken string,
 		return fmt.Errorf("commit delivery transition: %w", err)
 	}
 	return nil
+}
+
+func effectiveDeliveryRecipientTx(ctx context.Context, tx *sql.Tx, actor, messageID string) (string, error) {
+	var original string
+	err := tx.QueryRowContext(ctx, `
+		WITH candidates AS (
+			SELECT d.recipient_actor AS original_recipient_actor,
+			       ROW_NUMBER() OVER (
+				   ORDER BY CASE WHEN d.recipient_actor = ? AND a.source_actor IS NULL THEN 0 ELSE 1 END,
+				            d.recipient_actor
+			       ) AS preference
+			FROM deliveries d
+			LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
+			WHERE d.message_id = ?
+			  AND ((d.recipient_actor = ? AND a.source_actor IS NULL) OR a.adopting_actor = ?)
+		)
+		SELECT original_recipient_actor FROM candidates WHERE preference = 1`, actor, messageID, actor, actor).Scan(&original)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", bus.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve effective delivery recipient: %w", err)
+	}
+	return original, nil
+}
+
+func adoptionProvenance(actor, original string) string {
+	if actor == original {
+		return ""
+	}
+	return original
 }
 
 func (s *Store) ListEvents(ctx context.Context, partition, stream string, after int64, limit int) ([]bus.Event, error) {

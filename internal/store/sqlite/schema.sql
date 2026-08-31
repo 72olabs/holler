@@ -113,6 +113,18 @@ CREATE TABLE IF NOT EXISTS continuity_bindings (
 CREATE INDEX IF NOT EXISTS continuity_bindings_actor
     ON continuity_bindings(actor);
 
+CREATE TABLE IF NOT EXISTS actor_adoptions (
+    source_actor TEXT PRIMARY KEY,
+    adopting_actor TEXT NOT NULL,
+    adopting_run TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    transferred_count INTEGER NOT NULL,
+    deduplicated_count INTEGER NOT NULL,
+    adopted_at_ns INTEGER NOT NULL,
+    UNIQUE (adopting_actor, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS partition_counters (
     partition_id TEXT NOT NULL,
     stream TEXT NOT NULL,

@@ -14,7 +14,7 @@ holler connector setup --harness opencode --attention <native-prompt|startup-onl
   --actor <actor> --peer <peer> --project <project> --package-source <source-package> --apply
 ```
 
-Setup installs a connector-owned OpenCode config directory rather than rewriting the user's general config. It adds only the Holler MCP server, its ten explicit tool permissions, lifecycle plugin, and two skills. Existing connector-owned files receive backups.
+Setup installs a connector-owned OpenCode config directory rather than rewriting the user's general config. It adds only the Holler MCP server, its eleven explicit tool permissions, lifecycle plugin, and two skills. Existing connector-owned files receive backups.
 
 Launch configured sessions through:
 

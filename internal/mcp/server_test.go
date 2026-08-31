@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/72olabs/holler/internal/bus"
 	"github.com/72olabs/holler/internal/mcp"
 	store "github.com/72olabs/holler/internal/store/sqlite"
 )
@@ -42,8 +44,13 @@ func TestMCPQuestionClaimAckRoundTrip(t *testing.T) {
 		t.Fatalf("server name = %q", got)
 	}
 	tools := nestedSlice(t, responses[1], "result", "tools")
-	if len(tools) != 10 {
-		t.Fatalf("tool count = %d, want 10", len(tools))
+	if len(tools) != 11 {
+		t.Fatalf("tool count = %d, want 11", len(tools))
+	}
+	adoptTool := tools[10].(map[string]interface{})
+	annotations := adoptTool["annotations"].(map[string]interface{})
+	if adoptTool["name"] != "holler_adopt" || annotations["destructiveHint"] != true || annotations["idempotentHint"] != true {
+		t.Fatalf("adoption tool contract = %+v", adoptTool)
 	}
 	firstID := nestedString(t, responses[2], "result", "structuredContent", "message_id")
 	secondID := nestedString(t, responses[3], "result", "structuredContent", "message_id")
@@ -186,15 +193,59 @@ func TestMCPProfileAndDiscoveryRemainAdvisory(t *testing.T) {
 	}
 }
 
+func TestMCPAdoptRequiresLiveBoundActorAndPreservesProvenance(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "replacement", RunID: "replacement-run", Harness: "test", SessionID: "replacement-session",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sent, err := db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "mcp-orphan", ProjectID: "coupon", ChannelID: "direct",
+		FromActor: "sender", FromRun: "sender-run", ToActors: []string{"reviewer-old"}, Type: "REVIEW_REQUEST",
+		Body: json.RawMessage(`{"text":"review"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := mcp.New(db, mcp.Config{Actor: "replacement", RunID: "replacement-run", ProjectID: "coupon"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses := exchange(t, server,
+		toolCall(1, "holler_adopt", map[string]interface{}{
+			"source_actor": "reviewer-old", "idempotency_key": "mcp-adopt-once",
+		}),
+		toolCall(2, "bus_inbox", map[string]interface{}{}),
+	)
+	if got := nestedString(t, responses[0], "result", "structuredContent", "adopting_actor"); got != "replacement" {
+		t.Fatalf("adopting actor = %q", got)
+	}
+	messages := nestedSlice(t, responses[1], "result", "structuredContent", "messages")
+	if len(messages) != 1 {
+		t.Fatalf("messages = %+v", messages)
+	}
+	message := messages[0].(map[string]interface{})
+	if message["message_id"] != sent.Message.ID || message["recipient_actor"] != "replacement" || message["original_recipient_actor"] != "reviewer-old" {
+		t.Fatalf("adopted message = %+v", message)
+	}
+}
+
 func TestToolSurfaceIdentityIsStable(t *testing.T) {
 	wantNames := []string{
 		"bus_send", "bus_check_inbox", "bus_claim", "bus_inbox", "bus_ack", "bus_extend", "bus_nack", "bus_status",
-		"holler_profile", "holler_who",
+		"holler_profile", "holler_who", "holler_adopt",
 	}
 	if got := strings.Join(mcp.ToolNames(), ","); got != strings.Join(wantNames, ",") {
 		t.Fatalf("tool names = %q", got)
 	}
-	const wantHash = "sha256:8899b49e2195c05716364c378ebd2b233e28502f239f8174c77e3d7ba12458a3"
+	const wantHash = "sha256:68b22898f6a8bf89a6505a2e49e5704e7732f64fcb518ca5e9c22d7701093e42"
 	if got := mcp.ToolSurfaceHash(); got != wantHash {
 		t.Fatalf("tool surface hash = %q, want %q; connector reauthorization is required for an intentional schema change", got, wantHash)
 	}

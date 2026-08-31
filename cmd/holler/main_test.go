@@ -94,6 +94,39 @@ func TestCLIProfileAndWho(t *testing.T) {
 	}
 }
 
+func TestCLIAdoptInactiveInbox(t *testing.T) {
+	ctx := context.Background()
+	socket := startAPIServer(t)
+	live, err := api.Dial(ctx, socket, api.Identity{Actor: "replacement", RunID: "replacement-run", Client: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	if _, err := live.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "replacement", RunID: "replacement-run", Harness: "test", SessionID: "replacement-session",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sendRaw := invoke(t, ctx, "send", "--socket", socket, "--actor", "sender", "--run", "sender-run",
+		"--to", "reviewer-old", "--project", "coupon", "--idempotency-key", "cli-orphan", "--body", `{"text":"review"}`)
+	var sent bus.SendResult
+	decode(t, sendRaw, &sent)
+	adoptRaw := invoke(t, ctx, "adopt", "--socket", socket, "--actor", "replacement", "--run", "replacement-run",
+		"--from", "reviewer-old", "--project", "coupon", "--idempotency-key", "cli-adopt-once")
+	var adopted bus.AdoptResult
+	decode(t, adoptRaw, &adopted)
+	if adopted.AdoptingActor != "replacement" || adopted.Transferred != 1 {
+		t.Fatalf("adoption = %+v", adopted)
+	}
+	inboxRaw := invoke(t, ctx, "inbox", "--socket", socket, "--actor", "replacement")
+	var items []bus.InboxItem
+	decode(t, inboxRaw, &items)
+	if len(items) != 1 || items[0].MessageID != sent.Message.ID || items[0].OriginalRecipientActor != "reviewer-old" {
+		t.Fatalf("adopted inbox = %+v", items)
+	}
+}
+
 func TestCLIMCPUsesConnectorBoundEnvironment(t *testing.T) {
 	socket := startAPIServer(t)
 	t.Setenv("HOLLER_SOCKET", socket)

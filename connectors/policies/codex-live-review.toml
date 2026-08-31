@@ -15,6 +15,7 @@ enabled_tools = [
   "bus_status",
   "holler_profile",
   "holler_who",
+  "holler_adopt",
 ]
 
 # Codex 0.149.1 did not apply the server default to leased/write calls in the
@@ -39,4 +40,6 @@ approval_mode = "approve"
 [plugins."holler@holler".mcp_servers.holler.tools.holler_profile]
 approval_mode = "approve"
 [plugins."holler@holler".mcp_servers.holler.tools.holler_who]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_adopt]
 approval_mode = "approve"

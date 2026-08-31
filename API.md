@@ -140,6 +140,7 @@ This implemented slice does not yet perform the Ed25519 challenge-response speci
 - `list_events {partition, stream, after, limit}`
 - `set_actor_profile {project_id, role_text, accepts}`
 - `who {limit}`
+- `adopt_actor {source_actor, project_id, idempotency_key}`
 - `register_session <RegistrationRequest>`
 - `heartbeat_registrations {lease_ns}`
 - `live_registrations {actor}`
@@ -165,6 +166,16 @@ actors and the maximum is 500; at most ten recent session rows are returned per
 actor. Session IDs and delivery handles are internal routing capabilities and
 are never included in directory results.
 
+`adopt_actor` records an explicit recovery decision from an inactive source
+actor to the live connection-bound actor. The daemon ignores any caller-supplied
+target identity, requires at least one claimable source delivery, refuses a
+live source or an active source claim, and commits exactly one winner. A stable
+idempotency key makes an exact retry safe. Existing and future source deliveries
+become visible to the adopter without changing the message's `to_actors` or the
+stored delivery recipient; inbox and claim results expose
+`original_recipient_actor`. One target may adopt multiple independent sources,
+but adoption chains are rejected because they would make routing ambiguous.
+
 For every new send whose delivery request asks for attention, the same transaction creates a durable notification-outbox row. `hollerd` dispatches it asynchronously after commit and retries transient failures without delaying the send response. The response reports `notification_state: "pending"`; outcomes are operational events, including `delivery.notification_abandoned` after five failed attempts. A wake failure does not convert a committed send into an RPC error, and an idempotent duplicate does not create a second outbox job. If no session is registered, startup hydration—not a delayed notification job—remains the durable fallback.
 
 The reference Go client reconnects and repeats the handshake after a daemon
@@ -177,6 +188,7 @@ operation deadlines.
 - `holler` is the shell/automation client.
 - `holler who` lists known actors; `holler profile` publishes the caller's
   advisory role metadata.
+- `holler adopt` performs an explicitly authorized inactive-inbox handoff.
 - `holler mcp` translates MCP stdio calls into this API.
 - `holler hook` and `holler session-end` use this API for lifecycle integration.
 - `holler connector manifest|doctor|certify` expose package identity, deterministic diagnostics, and real-client readiness evidence.

@@ -58,6 +58,44 @@ func TestUnixAPIMessageLifecycleAndSessionIdentity(t *testing.T) {
 	}
 }
 
+func TestUnixAPIAdoptsInactiveInboxWithConnectionBoundIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	sender := dial(t, socket, "sender", "sender-run")
+	replacement := dial(t, socket, "replacement", "replacement-run")
+	if _, err := replacement.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "replacement", RunID: "replacement-run", Harness: "test", SessionID: "replacement-session",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sent, err := sender.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "api-orphan", ProjectID: "coupon", ChannelID: "direct",
+		ToActors: []string{"reviewer-old"}, Type: "REVIEW_REQUEST", Body: json.RawMessage(`{"text":"review"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := replacement.AdoptActor(ctx, bus.AdoptRequest{
+		SourceActor: "reviewer-old", AdoptingActor: "spoofed", AdoptingRun: "spoofed-run",
+		ProjectID: "coupon", IdempotencyKey: "api-adopt-once",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.AdoptingActor != "replacement" || adopted.AdoptingRun != "replacement-run" || adopted.Transferred != 1 {
+		t.Fatalf("adoption = %+v", adopted)
+	}
+	items, err := replacement.CheckInbox(ctx, "replacement", 10)
+	if err != nil || len(items) != 1 || items[0].MessageID != sent.Message.ID || items[0].OriginalRecipientActor != "reviewer-old" {
+		t.Fatalf("adopted inbox = %+v, err = %v", items, err)
+	}
+	claim, err := replacement.Claim(ctx, "replacement", sent.Message.ID, time.Minute)
+	if err != nil || claim.OriginalRecipientActor != "reviewer-old" {
+		t.Fatalf("adopted claim = %+v, err = %v", claim, err)
+	}
+}
+
 func TestUnixAPIConnectorRegistrationAndEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	_, socket := startServer(t, ctx, cancel)

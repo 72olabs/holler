@@ -28,6 +28,7 @@ type Store interface {
 	HeartbeatRegistrations(context.Context, string, string, time.Duration) (int, error)
 	SetActorProfile(context.Context, string, string, string, bus.ActorProfileRequest) (bus.ActorProfileResult, error)
 	Who(context.Context, int) (bus.ActorDirectory, error)
+	AdoptActor(context.Context, bus.AdoptRequest) (bus.AdoptResult, error)
 }
 
 type Config struct {
@@ -252,7 +253,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		view := messageView(result.Message, "", time.Time{}, 0)
+		view := messageView(result.Message, "", "", "", time.Time{}, 0)
 		view["duplicate"] = result.Duplicate
 		if result.NotificationState != "" {
 			view["notification_state"] = result.NotificationState
@@ -286,7 +287,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		return messageView(claim.Message, claim.LeaseToken, claim.LeaseExpiresAt, claim.Attempt), nil
+		return messageView(claim.Message, claim.RecipientActor, claim.OriginalRecipientActor, claim.LeaseToken, claim.LeaseExpiresAt, claim.Attempt), nil
 	case "bus_inbox":
 		var args struct {
 			Limit        int `json:"limit"`
@@ -317,7 +318,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 				}
 				return nil, err
 			}
-			messages = append(messages, messageView(claim.Message, claim.LeaseToken, claim.LeaseExpiresAt, claim.Attempt))
+			messages = append(messages, messageView(claim.Message, claim.RecipientActor, claim.OriginalRecipientActor, claim.LeaseToken, claim.LeaseExpiresAt, claim.Attempt))
 		}
 		actor, _ = s.boundIdentity()
 		return map[string]interface{}{"actor": actor, "messages": messages}, nil
@@ -398,6 +399,18 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			return nil, err
 		}
 		return s.store.Who(ctx, args.Limit)
+	case "holler_adopt":
+		var args struct {
+			SourceActor    string `json:"source_actor"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.AdoptActor(ctx, bus.AdoptRequest{
+			SourceActor: args.SourceActor, AdoptingActor: actor, AdoptingRun: runID,
+			ProjectID: s.config.ProjectID, IdempotencyKey: args.IdempotencyKey,
+		})
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -410,7 +423,7 @@ func (s *Server) boundIdentity() (string, string) {
 	return s.config.Actor, s.config.RunID
 }
 
-func messageView(message bus.Message, leaseToken string, leaseExpires time.Time, attempt int) map[string]interface{} {
+func messageView(message bus.Message, recipientActor, originalRecipientActor, leaseToken string, leaseExpires time.Time, attempt int) map[string]interface{} {
 	body := string(message.Body)
 	var decoded struct {
 		Text string `json:"text"`
@@ -431,6 +444,10 @@ func messageView(message bus.Message, leaseToken string, leaseExpires time.Time,
 		result["lease_token"] = leaseToken
 		result["lease_expires_at"] = leaseExpires
 		result["attempt"] = attempt
+		result["recipient_actor"] = recipientActor
+		if originalRecipientActor != "" {
+			result["original_recipient_actor"] = originalRecipientActor
+		}
 	}
 	return result
 }
@@ -568,6 +585,14 @@ func toolDefinitions() []map[string]interface{} {
 				"limit": integerProperty("maximum actors, default 100 and maximum 500"),
 			}),
 			"annotations": map[string]bool{"readOnlyHint": true},
+		},
+		{
+			"name": "holler_adopt", "description": "Adopt an inactive actor's durable inbox into this live actor after explicit user authorization. Original-recipient provenance is preserved and only one actor can win.",
+			"inputSchema": object(map[string]interface{}{
+				"source_actor":    stringProperty("inactive actor whose inbox is being adopted"),
+				"idempotency_key": stringProperty("stable key for this explicitly authorized adoption"),
+			}, "source_actor", "idempotency_key"),
+			"annotations": map[string]bool{"readOnlyHint": false, "idempotentHint": true, "destructiveHint": true},
 		},
 	}
 }

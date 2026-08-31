@@ -89,6 +89,7 @@ type Store interface {
 	HeartbeatRegistrations(context.Context, string, string, time.Duration) (int, error)
 	SetActorProfile(context.Context, string, string, string, bus.ActorProfileRequest) (bus.ActorProfileResult, error)
 	Who(context.Context, int) (bus.ActorDirectory, error)
+	AdoptActor(context.Context, bus.AdoptRequest) (bus.AdoptResult, error)
 	BindActor(context.Context, bus.ActorBindRequest) (bus.ActorBindResult, error)
 	FinalizeActorAllocation(context.Context, string, string, string, []string) error
 	CurrentActorForContinuity(context.Context, []string) (string, error)
@@ -491,6 +492,19 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 			return nil, err
 		}
 		return s.store.Who(ctx, args.Limit)
+	case "adopt_actor":
+		var args struct {
+			SourceActor    string `json:"source_actor"`
+			ProjectID      string `json:"project_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.AdoptActor(ctx, bus.AdoptRequest{
+			SourceActor: args.SourceActor, AdoptingActor: identity.Actor, AdoptingRun: identity.RunID,
+			ProjectID: args.ProjectID, IdempotencyKey: args.IdempotencyKey,
+		})
 	case "register_session":
 		var request bus.RegistrationRequest
 		if err := decodeStrict(raw, &request); err != nil {
@@ -849,6 +863,14 @@ func (c *Client) Who(ctx context.Context, limit int) (bus.ActorDirectory, error)
 	return result, err
 }
 
+func (c *Client) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.AdoptResult, error) {
+	var result bus.AdoptResult
+	err := c.call(ctx, "adopt_actor", map[string]interface{}{
+		"source_actor": request.SourceActor, "project_id": request.ProjectID, "idempotency_key": request.IdempotencyKey,
+	}, &result)
+	return result, err
+}
+
 func (c *Client) RegisterSession(ctx context.Context, request bus.RegistrationRequest) (bus.Registration, error) {
 	if err := c.requireActor(request.Actor); err != nil {
 		return bus.Registration{}, err
@@ -1130,6 +1152,12 @@ func rpcError(err error) *RPCError {
 		code = "continuity_conflict"
 	case errors.Is(err, bus.ErrBindingReassigned):
 		return &RPCError{Code: "binding_reassigned", Message: err.Error(), Retryable: true}
+	case errors.Is(err, bus.ErrAdoptionConflict):
+		code = "adoption_conflict"
+	case errors.Is(err, bus.ErrAdoptionBusy):
+		code = "adoption_busy"
+	case errors.Is(err, bus.ErrActorNotLive):
+		code = "actor_not_live"
 	}
 	return &RPCError{Code: code, Message: err.Error(), Retryable: false}
 }
@@ -1170,6 +1198,12 @@ func errorFromRPC(rpc *RPCError) error {
 		sentinel = bus.ErrContinuityConflict
 	case "binding_reassigned":
 		sentinel = bus.ErrBindingReassigned
+	case "adoption_conflict":
+		sentinel = bus.ErrAdoptionConflict
+	case "adoption_busy":
+		sentinel = bus.ErrAdoptionBusy
+	case "actor_not_live":
+		sentinel = bus.ErrActorNotLive
 	}
 	if sentinel != nil {
 		return fmt.Errorf("%s: %w", rpc.Message, sentinel)

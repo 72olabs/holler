@@ -54,13 +54,13 @@ OpenCode support targets the current 1.x plugin and configuration contract. `nat
 
 The files under `policies/` are examples to review and merge into a user, profile, managed, or enterprise configuration layer. A repository or plugin must not grant itself authority.
 
-For Codex, use a real `$CODEX_HOME/<name>.config.toml` profile or managed configuration. Codex 0.149.1 passed the least-privilege canary with a profile file but ignored the equivalent repeated dotted `-c` overrides for leased/write MCP calls. The policy therefore names the exact ten-tool allowlist and repeats `approval_mode = "approve"` for every tool instead of relying only on the server default.
+For Codex, use a real `$CODEX_HOME/<name>.config.toml` profile or managed configuration. Codex 0.149.1 passed the least-privilege canary with a profile file but ignored the equivalent repeated dotted `-c` overrides for leased/write MCP calls. The policy therefore names the exact eleven-tool allowlist and repeats `approval_mode = "approve"` for every tool instead of relying only on the server default.
 
 Codex plugin installation does not trust plugin hooks. A human can review the exact definition with `/hooks`, or externally vetted automation can use `--dangerously-bypass-hook-trust` for that one certification invocation. The latter proves hook functionality, not persisted operator trust.
 
 For Claude, pass the reviewed settings file using `--settings` or install equivalent operator/managed permissions. Project settings are effective only after project trust.
 
-For OpenCode, setup previews and, only after the operator chooses `--apply`, generates a connector-owned `opencode.json` with one local MCP server and exact `allow` entries for the frozen ten-tool surface. It does not modify the user's general OpenCode config. The launcher points `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` at that isolated package for the launched process only. This is an operator-authorized installation action, not authority a plugin grants itself at runtime.
+For OpenCode, setup previews and, only after the operator chooses `--apply`, generates a connector-owned `opencode.json` with one local MCP server and exact `allow` entries for the frozen eleven-tool surface. It does not modify the user's general OpenCode config. The launcher points `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` at that isolated package for the launched process only. This is an operator-authorized installation action, not authority a plugin grants itself at runtime.
 
 ## Actor naming lifecycle
 
@@ -111,7 +111,7 @@ The normal product setup is:
 holler setup claude
 ```
 
-It registers the marketplace, installs or updates the plugin, merges only the frozen ten-tool allowlist and Holler plugin options into Claude user settings, writes `~/.holler/connectors/claude.json`, and installs and verifies the per-user daemon; changed existing files receive `.bak` backups.
+It registers the marketplace, installs or updates the plugin, merges only the frozen eleven-tool allowlist and Holler plugin options into Claude user settings, writes `~/.holler/connectors/claude.json`, and installs and verifies the per-user daemon; changed existing files receive `.bak` backups.
 
 Plain `claude` sessions load the persisted connector binding and setup-recorded Holler executable, so hook-long-poll does not depend on shell-only environment variables. Use the connector launcher when the session needs an explicit identity override or a separately addressable actor:
 

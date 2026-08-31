@@ -304,6 +304,10 @@ func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) 
 			SELECT actor, updated_at_ns FROM registrations
 			UNION ALL
 			SELECT actor, updated_at_ns FROM actor_profiles
+			UNION ALL
+			SELECT source_actor, adopted_at_ns FROM actor_adoptions
+			UNION ALL
+			SELECT adopting_actor, adopted_at_ns FROM actor_adoptions
 		)
 		SELECT actor, MAX(at_ns) FROM activity WHERE actor <> '' GROUP BY actor`)
 	if err != nil {
@@ -324,11 +328,22 @@ func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) 
 	}
 
 	unclaimedRows, err := tx.QueryContext(ctx, `
-		SELECT d.recipient_actor, COUNT(*)
-		FROM deliveries d JOIN messages m ON m.message_id = d.message_id
-		WHERE (d.state = ? OR (d.state = ? AND d.lease_expires_at_ns <= ?))
+		WITH candidates AS (
+			SELECT d.message_id, d.state, d.lease_expires_at_ns,
+			       COALESCE(a.adopting_actor, d.recipient_actor) AS effective_actor,
+			       ROW_NUMBER() OVER (
+				   PARTITION BY d.message_id, COALESCE(a.adopting_actor, d.recipient_actor)
+				   ORDER BY CASE WHEN a.source_actor IS NULL THEN 0 ELSE 1 END, d.recipient_actor
+			       ) AS preference
+			FROM deliveries d
+			LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
+		)
+		SELECT c.effective_actor, COUNT(*)
+		FROM candidates c JOIN messages m ON m.message_id = c.message_id
+		WHERE c.preference = 1
+		  AND (c.state = ? OR (c.state = ? AND c.lease_expires_at_ns <= ?))
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)
-		GROUP BY d.recipient_actor`, bus.DeliveryQueued, bus.DeliveryClaimed, now.UnixNano(), now.UnixNano())
+		GROUP BY c.effective_actor`, bus.DeliveryQueued, bus.DeliveryClaimed, now.UnixNano(), now.UnixNano())
 	if err != nil {
 		return bus.ActorDirectory{}, fmt.Errorf("query actor unclaimed messages: %w", err)
 	}
