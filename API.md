@@ -7,6 +7,9 @@ a universal local protocol over a Unix socket, not an HTTP or network API.
 ## Boundary
 
 `hollerd` is the only process that opens the SQLite database. Every ordinary client—including `holler`, the MCP stdio shim, lifecycle hooks, and future SDKs—connects to a Unix domain socket.
+The daemon holds an exclusive database lock to enforce that ownership, so live
+database inspection must use this API rather than opening the SQLite file with
+external tooling.
 
 Default paths:
 
