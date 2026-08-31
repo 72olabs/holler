@@ -159,6 +159,104 @@ func TestContinuityBindingSurvivesStoreRestart(t *testing.T) {
 	}
 }
 
+func TestSupersededRunCannotReclaimAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 31, 15, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	open := func() *store.Store {
+		db, err := store.Open(ctx, path, store.WithClock(func() time.Time { return now }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+
+	db := open()
+	first, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "reviewer", RunID: "run-a", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:run-a", "session:codex:session-a"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: first.Actor, RunID: "run-a", Harness: "codex", SessionID: "session-a",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: first.Actor, RunID: "run-b", NameMode: bus.NameModeExact,
+		ProjectID: "coupon", Takeover: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: first.Actor, RunID: "run-b", Harness: "codex", SessionID: "session-b",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db = open()
+	defer db.Close()
+	_, err = db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "reviewer", RunID: "run-a", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:run-a", "session:codex:session-a"}, ProjectID: "coupon",
+	})
+	if !errors.Is(err, bus.ErrBindingStale) {
+		t.Fatalf("superseded reclaim error = %v", err)
+	}
+	live, err := db.LiveRegistrations(ctx, first.Actor)
+	if err != nil || len(live) != 1 || live[0].RunID != "run-b" {
+		t.Fatalf("live registrations after stale reclaim = %+v, err = %v", live, err)
+	}
+}
+
+func TestEndedRunStillReclaimsAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "reviewer", RunID: "run-a", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"session:claude:session-a"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: first.Actor, RunID: "run-a", Harness: "claude", SessionID: "session-a",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ExpireRegistration(ctx, first.Actor, "run-a", "session-a", "SessionEnd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	reclaimed, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "reviewer", RunID: "run-b", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"session:claude:session-a"}, ProjectID: "coupon",
+	})
+	if err != nil || reclaimed.Actor != first.Actor || !reclaimed.ContinuityReclaimed {
+		t.Fatalf("ended binding reclaim = %+v, err = %v", reclaimed, err)
+	}
+}
+
 func TestSessionContinuityReconcilesMCPFirstResumeWithoutPhantomActor(t *testing.T) {
 	ctx := context.Background()
 	db, _ := openTestStore(t)

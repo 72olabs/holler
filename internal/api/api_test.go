@@ -509,6 +509,55 @@ func TestUnixAPIExactModeRefusesLiveActorWithoutTakeover(t *testing.T) {
 	}
 }
 
+func TestUnixAPISupersededRunGetsTerminalStaleBindingError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	continuity := []string{"process:codex:run-a", "session:codex:session-a"}
+	first, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "run-a", Client: "test", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: continuity, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := first.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "reviewer", RunID: "run-a", Harness: "codex", SessionID: "session-a",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	winner, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "run-b", Client: "test", NameMode: bus.NameModeExact,
+		ProjectID: "coupon", Takeover: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer winner.Close()
+	if _, err := winner.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "reviewer", RunID: "run-b", Harness: "codex", SessionID: "session-b",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stale, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "run-a", Client: "test", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: continuity, ProjectID: "coupon",
+	})
+	if stale != nil {
+		_ = stale.Close()
+	}
+	if !errors.Is(err, bus.ErrBindingStale) {
+		t.Fatalf("stale binding API error = %v", err)
+	}
+	live, err := winner.LiveRegistrations(ctx, "reviewer")
+	if err != nil || len(live) != 1 || live[0].RunID != "run-b" {
+		t.Fatalf("winner registrations after stale hello = %+v, err = %v", live, err)
+	}
+}
+
 func TestUnixAPIProvisionalConnectionFollowsSessionResumeReconciliation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	_, socket := startServer(t, ctx, cancel)

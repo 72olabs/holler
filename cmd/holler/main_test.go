@@ -266,6 +266,20 @@ func TestCLIHookDegradesWithoutBlockingHarnessStartup(t *testing.T) {
 	}
 }
 
+func TestCLIHookExplainsStaleBindingWithoutBlockingHarnessStartup(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := writeDegradedHook(&stdout, &stderr, fmt.Errorf("hello refused: %w", bus.ErrBindingStale)); err != nil {
+		t.Fatal(err)
+	}
+	var output connector.HookOutput
+	decode(t, stdout.Bytes(), &output)
+	if !strings.Contains(stderr.String(), "relaunch") ||
+		!strings.Contains(output.HookSpecificOutput.AdditionalContext, "STALE") ||
+		!strings.Contains(output.HookSpecificOutput.AdditionalContext, "Relaunch") {
+		t.Fatalf("stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+}
+
 func TestCLIClaudeMonitorExitsTwoWithReferenceOnlyWake(t *testing.T) {
 	broker := attention.NewBroker()
 	socket := startAPIServerWithOptions(t, api.WithAttentionBroker(broker))
@@ -452,6 +466,60 @@ func TestCLIClaudeMonitorReportsTerminalPresenceOutcomes(t *testing.T) {
 				t.Fatalf("exit=%d stderr=%q", exit, stderr)
 			}
 		})
+	}
+}
+
+func TestCLIClaudeMonitorStopsOnStaleBindingWithoutRetrying(t *testing.T) {
+	socket := startAPIServerWithOptions(t, api.WithAttentionBroker(attention.NewBroker()))
+	continuity := []string{"process:claude:run-a", "session:claude:session-a"}
+	first, err := api.Dial(context.Background(), socket, api.Identity{
+		Actor: "reviewer", RunID: "run-a", Client: "test", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: continuity, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := first.RegisterSession(context.Background(), bus.RegistrationRequest{
+		Actor: "reviewer", RunID: "run-a", Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
+		SessionID: "session-a", ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	winner, err := api.Dial(context.Background(), socket, api.Identity{
+		Actor: "reviewer", RunID: "run-b", Client: "test", NameMode: bus.NameModeExact,
+		ProjectID: "coupon", Takeover: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer winner.Close()
+	if _, err := winner.RegisterSession(context.Background(), bus.RegistrationRequest{
+		Actor: "reviewer", RunID: "run-b", Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
+		SessionID: "session-b", ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
+	t.Setenv("HOLLER_SOCKET", socket)
+	t.Setenv("HOLLER_ACTOR", "reviewer")
+	t.Setenv("HOLLER_RUN", "run-a")
+	t.Setenv("HOLLER_PROJECT", "coupon")
+	t.Setenv("HOLLER_NAME_MODE", "allocate")
+	t.Setenv("HOLLER_CONNECTOR_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	var stdout bytes.Buffer
+	stderrWriter, finishStderr := startPipeCapture(t)
+	exit := run(context.Background(), []string{"monitor", "--harness", "claude"},
+		strings.NewReader(`{"session_id":"session-a"}`), &stdout, stderrWriter)
+	_ = stderrWriter.Close()
+	stderr := finishStderr()
+	if exit != 0 || !strings.Contains(stderr, "lost actor") || !strings.Contains(stderr, "relaunch") {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr)
+	}
+	live, err := winner.LiveRegistrations(context.Background(), "reviewer")
+	if err != nil || len(live) != 1 || live[0].RunID != "run-b" {
+		t.Fatalf("winner registrations after stale monitor = %+v, err = %v", live, err)
 	}
 }
 

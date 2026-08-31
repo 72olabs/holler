@@ -1124,6 +1124,8 @@ func rpcError(err error) *RPCError {
 		code = "delivery_terminal"
 	case errors.Is(err, bus.ErrActorLive):
 		code = "actor_live"
+	case errors.Is(err, bus.ErrBindingStale):
+		code = "binding_stale"
 	case errors.Is(err, bus.ErrContinuityConflict):
 		code = "continuity_conflict"
 	case errors.Is(err, bus.ErrBindingReassigned):
@@ -1162,6 +1164,8 @@ func errorFromRPC(rpc *RPCError) error {
 		sentinel = bus.ErrDeliveryTerminal
 	case "actor_live":
 		sentinel = bus.ErrActorLive
+	case "binding_stale":
+		sentinel = bus.ErrBindingStale
 	case "continuity_conflict":
 		sentinel = bus.ErrContinuityConflict
 	case "binding_reassigned":

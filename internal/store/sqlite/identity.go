@@ -59,6 +59,13 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			return bus.ActorBindResult{}, err
 		}
 		if found {
+			superseded, err := runSupersededForActorTx(ctx, tx, boundActor, req.RunID)
+			if err != nil {
+				return bus.ActorBindResult{}, err
+			}
+			if superseded {
+				return bus.ActorBindResult{}, bus.ErrBindingStale
+			}
 			result.Actor = boundActor
 			result.ContinuityReclaimed = true
 		} else {
@@ -455,6 +462,19 @@ func actorExistsTx(ctx context.Context, tx *sql.Tx, actor string) (bool, error) 
 		return false, fmt.Errorf("check actor allocation: %w", err)
 	}
 	return exists != 0, nil
+}
+
+func runSupersededForActorTx(ctx context.Context, tx *sql.Tx, actor, runID string) (bool, error) {
+	var superseded int
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM registrations
+			WHERE actor = ? AND run_id = ? AND attention_superseded_at_ns IS NOT NULL
+		)`, actor, runID).Scan(&superseded)
+	if err != nil {
+		return false, fmt.Errorf("check superseded actor binding: %w", err)
+	}
+	return superseded != 0, nil
 }
 
 func liveOtherPresencesTx(ctx context.Context, tx *sql.Tx, actor, runID string, now time.Time) ([]bus.Registration, error) {

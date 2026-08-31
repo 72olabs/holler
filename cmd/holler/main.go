@@ -194,6 +194,10 @@ func runMonitor(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		if client == nil {
 			client, err = dialAPIBinding(monitorCtx, *socketPath, binding, *harness, sessionID, "claude-monitor/"+connector.ConnectorVersion)
 			if err != nil {
+				if errors.Is(err, bus.ErrBindingStale) {
+					fmt.Fprintf(stderr, "holler monitor stopped: this session lost actor %q to a takeover; relaunch the session to get a new identity\n", *actor)
+					return 0
+				}
 				if !waitForRetry(monitorCtx, 250*time.Millisecond) {
 					return 0
 				}
@@ -746,6 +750,13 @@ func runHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 }
 
 func writeDegradedHook(stdout, stderr io.Writer, cause error) error {
+	if errors.Is(cause, bus.ErrBindingStale) {
+		fmt.Fprintf(stderr, "holler SessionStart stopped: %v; relaunch the session to get a new identity\n", cause)
+		return writeJSON(stdout, connector.HookOutput{HookSpecificOutput: connector.HookSpecificOutput{
+			HookEventName:     "SessionStart",
+			AdditionalContext: "Holler connector state is STALE because this session lost its actor identity to a takeover. Relaunch this harness session to get a new identity; this stale session must not reconnect or receive wakes.",
+		}})
+	}
 	fmt.Fprintf(stderr, "holler SessionStart degraded: %v\n", cause)
 	return writeJSON(stdout, connector.HookOutput{HookSpecificOutput: connector.HookSpecificOutput{
 		HookEventName:     "SessionStart",

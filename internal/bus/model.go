@@ -27,6 +27,7 @@ var (
 	ErrLeaseExpired        = errors.New("lease expired")
 	ErrDeliveryTerminal    = errors.New("delivery is already terminal")
 	ErrActorLive           = errors.New("actor already has a live presence")
+	ErrBindingStale        = errors.New("actor binding is stale: this run was superseded and cannot reclaim the actor")
 	ErrContinuityConflict  = errors.New("continuity handles resolve to different actors")
 	ErrBindingReassigned   = errors.New("provisional actor binding was reassigned")
 )

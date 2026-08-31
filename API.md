@@ -114,7 +114,10 @@ operator/launcher capability, never an MCP tool. The ready response returns the
 assigned actor; all later requests are stamped with it. Omitting every naming
 field preserves the original protocol-v1 behavior exactly. A feature client
 must not downgrade to legacy exact naming when the daemon lacks the negotiated
-capability.
+capability. Once a run has been superseded, the daemon permanently refuses that
+run from reclaiming the superseded actor through continuity, returning the
+non-retryable `binding_stale` error. Ended or lapsed runs may still be resumed
+by a successor run.
 
 When an MCP process connects before its lifecycle hook, the daemon may hold an
 invisible process-only reservation. The hook either finalizes it or reconciles
