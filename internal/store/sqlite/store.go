@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	mathrand "math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/72olabs/holler/internal/bus"
+	"golang.org/x/sys/unix"
 	sqlitedriver "modernc.org/sqlite"
 )
 
@@ -23,6 +25,12 @@ import (
 var schema string
 
 const migrationVersion = 9
+
+const (
+	migrationRetryWindow = 5 * time.Second
+	migrationRetryBase   = 20 * time.Millisecond
+	migrationRetryJitter = 20 * time.Millisecond
+)
 
 type Store struct {
 	db    *sql.DB
@@ -51,6 +59,15 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
+	deadline := time.Now().Add(migrationRetryWindow)
+	migrationLock, err := acquireMigrationLock(ctx, abs, deadline)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = unix.Flock(int(migrationLock.Fd()), unix.LOCK_UN)
+		_ = migrationLock.Close()
+	}()
 
 	dsn := (&url.URL{Scheme: "file", Path: abs}).String() +
 		"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)" +
@@ -62,23 +79,33 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	// V1 deliberately has one in-process connection. In production this store is
 	// owned only by hollerd; EXCLUSIVE locking rejects a second daemon or embedded writer.
 	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// Do not retain a connection that lost a cross-process migration race. With
+	// exclusive locking, caching that connection can retain a read lock and make
+	// all contenders deadlock until their retry windows expire.
+	db.SetMaxIdleConns(0)
 
 	store := &Store{db: db, now: time.Now, newID: randomID}
 	for _, option := range options {
 		option(store)
 	}
-	deadline := time.Now().Add(5 * time.Second)
 	for {
 		err = store.migrate(ctx)
 		if err == nil {
+			err = store.retainExclusiveLock(ctx)
+		}
+		if err == nil {
 			break
 		}
-		if !sqliteBusy(err) || !time.Now().Before(deadline) {
+		if !sqliteBusy(err) {
 			db.Close()
 			return nil, err
 		}
-		timer := time.NewTimer(25 * time.Millisecond)
+		if !time.Now().Before(deadline) {
+			db.Close()
+			return nil, fmt.Errorf("%w: %v", bus.ErrDatabaseOwned, err)
+		}
+		delay := migrationRetryDelay(deadline)
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -90,6 +117,43 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	return store, nil
 }
 
+func acquireMigrationLock(ctx context.Context, databasePath string, deadline time.Time) (*os.File, error) {
+	lock, err := os.OpenFile(databasePath+".migrate.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open migration lock: %w", err)
+	}
+	for {
+		err = unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			_ = lock.Close()
+			return nil, fmt.Errorf("acquire migration lock: %w", err)
+		}
+		if !time.Now().Before(deadline) {
+			_ = lock.Close()
+			return nil, fmt.Errorf("%w: migration lock did not become available within %s", bus.ErrDatabaseOwned, migrationRetryWindow)
+		}
+		timer := time.NewTimer(migrationRetryDelay(deadline))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			_ = lock.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func migrationRetryDelay(deadline time.Time) time.Duration {
+	delay := migrationRetryBase + time.Duration(mathrand.Int64N(int64(migrationRetryJitter)))
+	if remaining := time.Until(deadline); delay > remaining {
+		return remaining
+	}
+	return delay
+}
+
 func sqliteBusy(err error) bool {
 	var sqliteErr *sqlitedriver.Error
 	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == 5
@@ -98,27 +162,86 @@ func sqliteBusy(err error) bool {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("begin migration: %w", err)
+		return fmt.Errorf("acquire migration connection: %w", err)
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+	// The general connection timeout is five seconds. A migration contender
+	// needs a short lock attempt so Open can apply its own jittered retry policy
+	// instead of every process timing out in the SQLite busy handler together.
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = 100`); err != nil {
+		return fmt.Errorf("configure migration busy timeout: %w", err)
+	}
+	// The advisory flock serializes cooperating Holler processes. BEGIN
+	// IMMEDIATE remains a second ownership boundary for non-Holler SQLite
+	// writers and filesystems that do not preserve local flock semantics.
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin immediate migration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			rollbackCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, _ = conn.ExecContext(rollbackCtx, `ROLLBACK`)
+		}
+	}()
+	if err := s.applyMigrations(ctx, conn); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("commit migration: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func (s *Store) retainExclusiveLock(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire exclusive store connection: %w", err)
+	}
+	// MaxIdleConns remains zero until the lock is proven. A losing contender's
+	// connection is therefore destroyed instead of caching a lock that can
+	// deadlock the other daemon candidates.
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = 100`); err != nil {
+		return fmt.Errorf("configure exclusive lock timeout: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("acquire exclusive store lock: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		return fmt.Errorf("commit exclusive store lock: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = 5000`); err != nil {
+		return fmt.Errorf("restore sqlite busy timeout: %w", err)
+	}
+	// Closing this verified connection into a one-slot idle pool preserves
+	// SQLite's EXCLUSIVE lock continuously until Store.Close.
+	s.db.SetMaxIdleConns(1)
+	return nil
+}
+
+func (s *Store) applyMigrations(ctx context.Context, conn *sql.Conn) error {
 	var migrationsTable int
-	if err := tx.QueryRowContext(ctx, `
+	if err := conn.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM sqlite_master
 		WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&migrationsTable); err != nil {
 		return fmt.Errorf("inspect schema migrations: %w", err)
 	}
 	var current int
 	if migrationsTable != 0 {
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
 			return fmt.Errorf("read schema version: %w", err)
 		}
 		if current > migrationVersion {
 			return fmt.Errorf("database schema version %d is newer than supported version %d", current, migrationVersion)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, schema); err != nil {
+	if _, err := conn.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
 	for _, addition := range []struct {
@@ -132,18 +255,18 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"registrations", "working_directory", "working_directory TEXT NOT NULL DEFAULT ''"},
 		{"actor_allocations", "provisional", "provisional INTEGER NOT NULL DEFAULT 0"},
 	} {
-		hasColumn, err := columnExists(ctx, tx, addition.table, addition.column)
+		hasColumn, err := columnExists(ctx, conn, addition.table, addition.column)
 		if err != nil {
 			return err
 		}
 		if !hasColumn {
 			statement := `ALTER TABLE ` + addition.table + ` ADD COLUMN ` + addition.definition
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
+			if _, err := conn.ExecContext(ctx, statement); err != nil {
 				return fmt.Errorf("add %s.%s: %w", addition.table, addition.column, err)
 			}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE registrations SET registered_at_ns = updated_at_ns WHERE registered_at_ns IS NULL`); err != nil {
+	if _, err := conn.ExecContext(ctx, `UPDATE registrations SET registered_at_ns = updated_at_ns WHERE registered_at_ns IS NULL`); err != nil {
 		return fmt.Errorf("backfill registration timestamps: %w", err)
 	}
 	// Process-only actor reservations belong to live API connections. No such
@@ -157,25 +280,22 @@ func (s *Store) migrate(ctx context.Context) error {
 		  AND NOT EXISTS (SELECT 1 FROM registrations r WHERE r.actor = a.actor)
 		  AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.from_actor = a.actor)
 		  AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.recipient_actor = a.actor)`
-	if _, err := tx.ExecContext(ctx, `DELETE FROM continuity_bindings WHERE actor IN (`+staleProvisional+`)`); err != nil {
+	if _, err := conn.ExecContext(ctx, `DELETE FROM continuity_bindings WHERE actor IN (`+staleProvisional+`)`); err != nil {
 		return fmt.Errorf("clear stale provisional continuity bindings: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM actor_allocations WHERE actor IN (`+staleProvisional+`)`); err != nil {
+	if _, err := conn.ExecContext(ctx, `DELETE FROM actor_allocations WHERE actor IN (`+staleProvisional+`)`); err != nil {
 		return fmt.Errorf("clear stale provisional actor allocations: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)`,
 		migrationVersion, s.now().UTC().UnixNano()); err != nil {
 		return fmt.Errorf("record migration: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit migration: %w", err)
-	}
 	return nil
 }
 
-func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
-	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+func columnExists(ctx context.Context, conn *sql.Conn, table, column string) (bool, error) {
+	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return false, fmt.Errorf("inspect %s columns: %w", table, err)
 	}
