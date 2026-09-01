@@ -151,38 +151,50 @@ func TestDoctorRejectsClaudeServerLevelDeny(t *testing.T) {
 func TestDoctorRequiresExplicitClaudeAdoptionApproval(t *testing.T) {
 	repo := repositoryRoot(t)
 	socket := startDoctorAPI(t)
-	policy := filepath.Join(t.TempDir(), "claude-overbroad.json")
-	raw, err := os.ReadFile(filepath.Join(repo, "connectors", "policies", "claude-live-review.json"))
+	base, err := os.ReadFile(filepath.Join(repo, "connectors", "policies", "claude-live-review.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var settings map[string]interface{}
-	if err := json.Unmarshal(raw, &settings); err != nil {
-		t.Fatal(err)
-	}
-	permissions := settings["permissions"].(map[string]interface{})
-	asked := permissions["ask"].([]interface{})
-	adopt := asked[0]
-	permissions["ask"] = []interface{}{}
-	permissions["allow"] = append(permissions["allow"].([]interface{}), adopt)
-	raw, err = json.Marshal(settings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(policy, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	config := doctorConfig(repo, socket, "claude")
-	config.PolicyPath = policy
-	report, err := connector.Doctor(context.Background(), config,
-		connector.WithDoctorLookPath(func(name string) (string, error) { return "/test/" + name, nil }),
-		connector.WithDoctorCommandRunner(healthyDoctorRunner(repo, "claude")),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.State != connector.StateAuthorizationRequired || !hasCheck(report, "authorization.tool_policy", connector.CheckFail) {
-		t.Fatalf("overbroad adoption permission was accepted: state=%s checks=%+v", report.State, report.Checks)
+	for _, test := range []struct {
+		name      string
+		removeAsk bool
+	}{
+		{name: "allow_without_ask", removeAsk: true},
+		{name: "allow_and_ask"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var settings map[string]interface{}
+			if err := json.Unmarshal(base, &settings); err != nil {
+				t.Fatal(err)
+			}
+			permissions := settings["permissions"].(map[string]interface{})
+			asked := permissions["ask"].([]interface{})
+			adopt := asked[0]
+			if test.removeAsk {
+				permissions["ask"] = []interface{}{}
+			}
+			permissions["allow"] = append(permissions["allow"].([]interface{}), adopt)
+			raw, err := json.Marshal(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := filepath.Join(t.TempDir(), "claude-overbroad.json")
+			if err := os.WriteFile(policy, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			config := doctorConfig(repo, socket, "claude")
+			config.PolicyPath = policy
+			report, err := connector.Doctor(context.Background(), config,
+				connector.WithDoctorLookPath(func(name string) (string, error) { return "/test/" + name, nil }),
+				connector.WithDoctorCommandRunner(healthyDoctorRunner(repo, "claude")),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.State != connector.StateAuthorizationRequired || !hasCheck(report, "authorization.tool_policy", connector.CheckFail) {
+				t.Fatalf("overbroad adoption permission was accepted: state=%s checks=%+v", report.State, report.Checks)
+			}
+		})
 	}
 }
 

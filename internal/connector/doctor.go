@@ -384,6 +384,9 @@ func checkPolicy(runtime *doctorRuntime, config *DoctorConfig, manifest Capabili
 				if _, ok := asked[name]; !ok {
 					missing = append(missing, "permissions.ask:"+name)
 				}
+				if _, ok := allowed[name]; ok {
+					missing = append(missing, "permissions.allow:"+name+" (must require explicit approval)")
+				}
 			} else if _, ok := allowed[name]; !ok {
 				missing = append(missing, "permissions.allow:"+name)
 			}
