@@ -128,10 +128,19 @@ adopted inboxes. Adoption is never automatic and does not support chains.
 - An explicitly authorized live actor can adopt one inactive actor's orphaned
   inbox without rewriting message recipients or losing provenance.
 
-The release suite has exercised both Claude-to-Codex and Codex-to-Claude
-conversations, two concurrent threads, a three-agent review handoff, daemon
-restart, abrupt Claude exit, lease recovery, and zero orphan Holler monitors.
-The current macOS rehearsal used Claude Code 2.1.251 and Codex CLI 0.150.1.
+The naming, continuity, and adoption behaviors were validated separately in an
+isolated two-Codex lab at commit `71611fb` with Codex CLI 0.151.0. That lab did
+not include Claude, and the later connector approval path has not yet been
+exercised by a live harness.
+
+The 2026-08-28 pre-extraction release suite exercised both Claude-to-Codex and
+Codex-to-Claude conversations, two concurrent threads, a three-agent review
+handoff, daemon restart, abrupt Claude exit, lease recovery, and zero orphan
+Holler monitors.
+It used Claude Code 2.1.251 and Codex CLI 0.150.1. Those behavioral artifacts
+identify build `0.1.0-alpha.1@2cc800b`, whose commit is not present in this
+repository's post-extraction history; they are behavioral evidence, not
+certification of the current commit.
 
 ## How it works
 

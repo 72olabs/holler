@@ -36,10 +36,14 @@ The release validation suite has demonstrated:
 - zero Holler-owned orphan Claude monitors after shutdown;
 - Go tests, vet, race tests, macOS builds, and Linux cross-builds.
 
-The current macOS release rehearsal used Claude Code 2.1.251 and Codex CLI
+The 2026-08-28 macOS release rehearsal used Claude Code 2.1.251 and Codex CLI
 0.150.1. Both two-agent role directions passed all nine behavioral assertions;
 the three-agent handoff passed all 11 infrastructure and 12 functionality
-assertions.
+assertions. These end-to-end runs predate repository extraction and identify
+build `0.1.0-alpha.1@2cc800b`; that commit is not present in this repository's
+history. They demonstrate the listed behavior but do not certify the current
+commit. A packaged Claude-to-Codex canary from this repository remains a
+release-candidate gate.
 Release certification against the current and immediately previous supported
 client versions remains part of the release-candidate gate.
 
