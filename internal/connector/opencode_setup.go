@@ -235,7 +235,11 @@ func copySetupAsset(source, target string) (string, error) {
 func openCodeProfile(config OpenCodeSetupConfig, manifest CapabilityManifest) map[string]interface{} {
 	permissions := map[string]interface{}{}
 	for _, tool := range manifest.Tools {
-		permissions[manifest.MCPServerName+"_"+tool.Name] = "allow"
+		mode := "allow"
+		if tool.RequiresExplicitApproval {
+			mode = "ask"
+		}
+		permissions[manifest.MCPServerName+"_"+tool.Name] = mode
 	}
 	environment := map[string]interface{}{}
 	for _, name := range []string{"HOLLER_BIN", "HOLLER_SOCKET", "HOLLER_ACTOR", "HOLLER_RUN", "HOLLER_ROLE", "HOLLER_PEER", "HOLLER_PROJECT", "HOLLER_CHANNEL", "HOLLER_NAME_MODE", "HOLLER_LAUNCH_TAG", "HOLLER_TAKEOVER"} {

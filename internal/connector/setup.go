@@ -361,9 +361,20 @@ func mergeClaudeSettings(readFile func(string) ([]byte, error), config ClaudeSet
 	for _, value := range allow {
 		allowed[value] = struct{}{}
 	}
+	ask := stringSliceAt(permissions, "ask")
+	asked := make(map[string]struct{}, len(ask))
+	for _, value := range ask {
+		asked[value] = struct{}{}
+	}
 	manifest, _ := Manifest("claude")
 	for _, tool := range manifest.Tools {
-		allowed[manifest.ClaudeToolPrefix+tool.Name] = struct{}{}
+		name := manifest.ClaudeToolPrefix + tool.Name
+		if tool.RequiresExplicitApproval {
+			delete(allowed, name)
+			asked[name] = struct{}{}
+			continue
+		}
+		allowed[name] = struct{}{}
 	}
 	allow = allow[:0]
 	for value := range allowed {
@@ -371,6 +382,12 @@ func mergeClaudeSettings(readFile func(string) ([]byte, error), config ClaudeSet
 	}
 	sort.Strings(allow)
 	permissions["allow"] = allow
+	ask = ask[:0]
+	for value := range asked {
+		ask = append(ask, value)
+	}
+	sort.Strings(ask)
+	permissions["ask"] = ask
 	settings["permissions"] = permissions
 
 	pluginConfigs := objectAt(settings, "pluginConfigs")

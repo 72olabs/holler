@@ -32,8 +32,9 @@ type CapabilityProfile struct {
 }
 
 type ToolPermission struct {
-	Name  string `json:"name"`
-	Class string `json:"class"`
+	Name                     string `json:"name"`
+	Class                    string `json:"class"`
+	RequiresExplicitApproval bool   `json:"requires_explicit_approval,omitempty"`
 }
 
 type CapabilityManifest struct {
@@ -71,7 +72,7 @@ var commonTools = []ToolPermission{
 	{Name: "bus_status", Class: "read-only"},
 	{Name: "holler_profile", Class: "idempotent-write"},
 	{Name: "holler_who", Class: "read-only"},
-	{Name: "holler_adopt", Class: "idempotent-write"},
+	{Name: "holler_adopt", Class: "idempotent-write", RequiresExplicitApproval: true},
 }
 
 var commonProfiles = []CapabilityProfile{

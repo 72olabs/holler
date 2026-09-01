@@ -2,6 +2,7 @@ package connector_test
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -147,6 +148,44 @@ func TestDoctorRejectsClaudeServerLevelDeny(t *testing.T) {
 	}
 }
 
+func TestDoctorRequiresExplicitClaudeAdoptionApproval(t *testing.T) {
+	repo := repositoryRoot(t)
+	socket := startDoctorAPI(t)
+	policy := filepath.Join(t.TempDir(), "claude-overbroad.json")
+	raw, err := os.ReadFile(filepath.Join(repo, "connectors", "policies", "claude-live-review.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	permissions := settings["permissions"].(map[string]interface{})
+	asked := permissions["ask"].([]interface{})
+	adopt := asked[0]
+	permissions["ask"] = []interface{}{}
+	permissions["allow"] = append(permissions["allow"].([]interface{}), adopt)
+	raw, err = json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(policy, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := doctorConfig(repo, socket, "claude")
+	config.PolicyPath = policy
+	report, err := connector.Doctor(context.Background(), config,
+		connector.WithDoctorLookPath(func(name string) (string, error) { return "/test/" + name, nil }),
+		connector.WithDoctorCommandRunner(healthyDoctorRunner(repo, "claude")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.State != connector.StateAuthorizationRequired || !hasCheck(report, "authorization.tool_policy", connector.CheckFail) {
+		t.Fatalf("overbroad adoption permission was accepted: state=%s checks=%+v", report.State, report.Checks)
+	}
+}
+
 func TestDoctorEvaluatesSelectedClaudeAttentionMode(t *testing.T) {
 	repo := repositoryRoot(t)
 	socket := startDoctorAPI(t)
@@ -209,6 +248,36 @@ func TestDoctorValidatesInstalledOpenCodeProfileAndNativePrompt(t *testing.T) {
 		!hasCheck(report, "authorization.tool_policy", connector.CheckPass) ||
 		!hasCheck(report, "notification.adapter", connector.CheckPass) {
 		t.Fatalf("state=%s ready=%v checks=%+v", report.State, report.Ready, report.Checks)
+	}
+	raw, err := os.ReadFile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["permission"].(map[string]interface{})["holler_holler_adopt"] = "allow"
+	raw, err = json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profile, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err = connector.Doctor(context.Background(), connector.DoctorConfig{
+		Harness: "opencode", Profile: "live-review", ProjectRoot: repo, PluginRoot: installRoot,
+		PolicyPath: profile, SocketPath: socket, Actor: "opencode-live", RunID: "opencode-doctor",
+		AttentionMode: connector.AttentionNativePrompt,
+	},
+		connector.WithDoctorLookPath(func(name string) (string, error) { return "/test/" + name, nil }),
+		connector.WithDoctorCommandRunner(versionedDoctorRunner(repo, "opencode", "1.18.4", true)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.State != connector.StateAuthorizationRequired || !hasCheck(report, "authorization.tool_policy", connector.CheckFail) {
+		t.Fatalf("overbroad OpenCode adoption permission was accepted: state=%s checks=%+v", report.State, report.Checks)
 	}
 }
 

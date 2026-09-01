@@ -135,24 +135,26 @@ func removeClaudeSettings(readFile func(string) ([]byte, error), path, pluginID 
 		managedTools[manifest.ClaudeToolPrefix+tool.Name] = true
 	}
 	if permissions, ok := settings["permissions"].(map[string]interface{}); ok {
-		if values, ok := permissions["allow"].([]interface{}); ok {
-			filtered := make([]interface{}, 0, len(values))
-			for _, value := range values {
-				text, isString := value.(string)
-				if isString && managedTools[text] {
-					changed = true
-					continue
+		for _, key := range []string{"allow", "ask"} {
+			if values, ok := permissions[key].([]interface{}); ok {
+				filtered := make([]interface{}, 0, len(values))
+				for _, value := range values {
+					text, isString := value.(string)
+					if isString && managedTools[text] {
+						changed = true
+						continue
+					}
+					filtered = append(filtered, value)
 				}
-				filtered = append(filtered, value)
+				if len(filtered) == 0 {
+					delete(permissions, key)
+				} else {
+					permissions[key] = filtered
+				}
 			}
-			if len(filtered) == 0 {
-				delete(permissions, "allow")
-			} else {
-				permissions["allow"] = filtered
-			}
-			if len(permissions) == 0 {
-				delete(settings, "permissions")
-			}
+		}
+		if len(permissions) == 0 {
+			delete(settings, "permissions")
 		}
 	}
 	if pluginConfigs, ok := settings["pluginConfigs"].(map[string]interface{}); ok {

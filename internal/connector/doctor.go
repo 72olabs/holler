@@ -360,6 +360,7 @@ func checkPolicy(runtime *doctorRuntime, config *DoctorConfig, manifest Capabili
 		var settings struct {
 			Permissions struct {
 				Allow []string `json:"allow"`
+				Ask   []string `json:"ask"`
 				Deny  []string `json:"deny"`
 			} `json:"permissions"`
 		}
@@ -372,11 +373,19 @@ func checkPolicy(runtime *doctorRuntime, config *DoctorConfig, manifest Capabili
 		for _, name := range settings.Permissions.Allow {
 			allowed[name] = struct{}{}
 		}
+		asked := make(map[string]struct{}, len(settings.Permissions.Ask))
+		for _, name := range settings.Permissions.Ask {
+			asked[name] = struct{}{}
+		}
 		for _, tool := range manifest.Tools {
 			name := manifest.ClaudeToolPrefix + tool.Name
 			serverName := strings.TrimSuffix(manifest.ClaudeToolPrefix, "__")
-			if _, ok := allowed[name]; !ok {
-				missing = append(missing, name)
+			if tool.RequiresExplicitApproval {
+				if _, ok := asked[name]; !ok {
+					missing = append(missing, "permissions.ask:"+name)
+				}
+			} else if _, ok := allowed[name]; !ok {
+				missing = append(missing, "permissions.allow:"+name)
 			}
 			for _, rule := range settings.Permissions.Deny {
 				toolMatched, _ := pathpkg.Match(rule, name)
@@ -416,8 +425,12 @@ func checkPolicy(runtime *doctorRuntime, config *DoctorConfig, manifest Capabili
 		}
 		for _, tool := range manifest.Tools {
 			name := manifest.MCPServerName + "_" + tool.Name
-			if value, ok := settings.Permission[name]; !ok || value != "allow" {
-				missing = append(missing, "permission."+name+"=allow")
+			want := "allow"
+			if tool.RequiresExplicitApproval {
+				want = "ask"
+			}
+			if value, ok := settings.Permission[name]; !ok || value != want {
+				missing = append(missing, "permission."+name+"="+want)
 			}
 		}
 	}

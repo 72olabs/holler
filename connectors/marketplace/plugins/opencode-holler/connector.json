@@ -33,7 +33,7 @@
     {"name": "bus_status", "class": "read-only"},
     {"name": "holler_profile", "class": "idempotent-write"},
     {"name": "holler_who", "class": "read-only"},
-    {"name": "holler_adopt", "class": "idempotent-write"}
+    {"name": "holler_adopt", "class": "idempotent-write", "requires_explicit_approval": true}
   ],
   "profiles": [
     {"name": "async-peer", "requires_wake": false, "description": "Durable messaging with visible polling fallback."},
