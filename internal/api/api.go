@@ -1224,6 +1224,9 @@ func errorFromRPC(rpc *RPCError) error {
 		sentinel = bus.ErrActorAdopted
 	}
 	if sentinel != nil {
+		if rpc.Message == "" || rpc.Message == sentinel.Error() {
+			return sentinel
+		}
 		return fmt.Errorf("%s: %w", rpc.Message, sentinel)
 	}
 	return errors.New(rpc.Message)

@@ -472,7 +472,8 @@ func TestCLIClaudeMonitorStopsWhenAttentionIsUnavailable(t *testing.T) {
 		strings.NewReader(`{"session_id":"session-1"}`), &stdout, stderrWriter)
 	_ = stderrWriter.Close()
 	stderr := finishStderr()
-	if exit != 1 || !strings.Contains(stderr, bus.ErrAttentionUnavailable.Error()) {
+	want := "holler monitor degraded: " + bus.ErrAttentionUnavailable.Error() + "\n"
+	if exit != 1 || stderr != want {
 		t.Fatalf("exit=%d stderr=%q", exit, stderr)
 	}
 }

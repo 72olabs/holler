@@ -406,11 +406,11 @@ func TestUnixAPIAttentionUnavailableIsTypedAndTerminal(t *testing.T) {
 	client := dial(t, socket, "claude", "claude-run")
 	defer client.Close()
 
-	if _, err := client.WaitAttention(ctx, "claude", "claude-run", "session-1", "hook-long-poll", 50*time.Millisecond); !errors.Is(err, bus.ErrAttentionUnavailable) {
-		t.Fatalf("wait attention error = %v, want ErrAttentionUnavailable", err)
+	if _, err := client.WaitAttention(ctx, "claude", "claude-run", "session-1", "hook-long-poll", 50*time.Millisecond); !errors.Is(err, bus.ErrAttentionUnavailable) || err.Error() != bus.ErrAttentionUnavailable.Error() {
+		t.Fatalf("wait attention error = %v, want unduplicated ErrAttentionUnavailable", err)
 	}
-	if _, err := client.MonitorAttach(ctx, "claude", "claude-run", "session-1", "hook-long-poll", 5*time.Minute); !errors.Is(err, bus.ErrAttentionUnavailable) {
-		t.Fatalf("monitor attach error = %v, want ErrAttentionUnavailable", err)
+	if _, err := client.MonitorAttach(ctx, "claude", "claude-run", "session-1", "hook-long-poll", 5*time.Minute); !errors.Is(err, bus.ErrAttentionUnavailable) || err.Error() != bus.ErrAttentionUnavailable.Error() {
+		t.Fatalf("monitor attach error = %v, want unduplicated ErrAttentionUnavailable", err)
 	}
 }
 
