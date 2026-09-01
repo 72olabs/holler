@@ -112,6 +112,9 @@ func Run(ctx context.Context, config Config, ready io.Writer) error {
 	<-workerDone
 	closeErr := db.Close()
 	if serveErr != nil {
+		if closeErr != nil {
+			return fmt.Errorf("%w; close database: %v", serveErr, closeErr)
+		}
 		return serveErr
 	}
 	return closeErr

@@ -249,7 +249,7 @@ func runMonitor(ctx context.Context, args []string, stdin io.Reader, stdout, std
 					fmt.Fprintf(stderr, "holler monitor stopped: this session lost actor %q because it was superseded or adopted; relaunch with allocated naming to get a fresh identity\n", *actor)
 					return 0
 				}
-			case strings.Contains(attachErr.Error(), "attention waiting is unavailable"):
+			case errors.Is(attachErr, bus.ErrAttentionUnavailable):
 				fmt.Fprintf(stderr, "holler monitor degraded: %v\n", attachErr)
 				return 1
 			}
@@ -295,7 +295,7 @@ func runMonitor(ctx context.Context, args []string, stdin io.Reader, stdout, std
 				}
 				contentionDelay = nextRetryDelay(contentionDelay)
 				continue
-			case strings.Contains(waitErr.Error(), "attention waiting is unavailable"):
+			case errors.Is(waitErr, bus.ErrAttentionUnavailable):
 				fmt.Fprintf(stderr, "holler monitor degraded: %v\n", waitErr)
 				return 1
 			default:

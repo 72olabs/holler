@@ -460,6 +460,23 @@ func TestCLIClaudeMonitorFailsVisiblyWithoutResultChannel(t *testing.T) {
 	}
 }
 
+func TestCLIClaudeMonitorStopsWhenAttentionIsUnavailable(t *testing.T) {
+	socket := startAPIServerWithOptions(t)
+	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
+	t.Setenv("HOLLER_SOCKET", socket)
+	t.Setenv("HOLLER_ACTOR", "claude")
+	t.Setenv("HOLLER_RUN", "claude-run")
+	var stdout bytes.Buffer
+	stderrWriter, finishStderr := startPipeCapture(t)
+	exit := run(context.Background(), []string{"monitor", "--harness", "claude", "--startup-grace", "50ms"},
+		strings.NewReader(`{"session_id":"session-1"}`), &stdout, stderrWriter)
+	_ = stderrWriter.Close()
+	stderr := finishStderr()
+	if exit != 1 || !strings.Contains(stderr, bus.ErrAttentionUnavailable.Error()) {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr)
+	}
+}
+
 func TestCLIClaudeMonitorReportsTerminalPresenceOutcomes(t *testing.T) {
 	for _, test := range []struct {
 		name, want string

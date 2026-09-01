@@ -391,7 +391,7 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 			return nil, &bus.ValidationError{Field: "wait", Problem: "must be between 0 and 25s"}
 		}
 		if s.attention == nil {
-			return nil, errors.New("attention waiting is unavailable")
+			return nil, bus.ErrAttentionUnavailable
 		}
 		waitCtx, cancel := context.WithTimeout(ctx, wait)
 		defer cancel()
@@ -412,7 +412,7 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		args.SessionID = strings.TrimSpace(args.SessionID)
 		args.Adapter = strings.TrimSpace(args.Adapter)
 		if s.attention == nil {
-			return nil, errors.New("attention waiting is unavailable")
+			return nil, bus.ErrAttentionUnavailable
 		}
 		registration, err := s.store.AttachMonitor(ctx, identity.Actor, identity.RunID, args.SessionID,
 			"claude", args.Adapter, time.Duration(args.LeaseNS))
@@ -1136,6 +1136,8 @@ func rpcError(err error) *RPCError {
 		code = "no_message"
 	case errors.Is(err, bus.ErrAttentionWaiterBusy):
 		code = "attention_waiter_busy"
+	case errors.Is(err, bus.ErrAttentionUnavailable):
+		code = "attention_unavailable"
 	case errors.Is(err, bus.ErrSessionEnded):
 		code = "session_ended"
 	case errors.Is(err, bus.ErrPresenceSuperseded):
@@ -1186,6 +1188,8 @@ func errorFromRPC(rpc *RPCError) error {
 		sentinel = bus.ErrNoMessage
 	case "attention_waiter_busy":
 		sentinel = bus.ErrAttentionWaiterBusy
+	case "attention_unavailable":
+		sentinel = bus.ErrAttentionUnavailable
 	case "session_ended":
 		sentinel = bus.ErrSessionEnded
 	case "presence_superseded":

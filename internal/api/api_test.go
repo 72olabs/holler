@@ -400,6 +400,20 @@ func TestUnixAPIWaitAttentionRejectsUnsupportedAdapter(t *testing.T) {
 	}
 }
 
+func TestUnixAPIAttentionUnavailableIsTypedAndTerminal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	client := dial(t, socket, "claude", "claude-run")
+	defer client.Close()
+
+	if _, err := client.WaitAttention(ctx, "claude", "claude-run", "session-1", "hook-long-poll", 50*time.Millisecond); !errors.Is(err, bus.ErrAttentionUnavailable) {
+		t.Fatalf("wait attention error = %v, want ErrAttentionUnavailable", err)
+	}
+	if _, err := client.MonitorAttach(ctx, "claude", "claude-run", "session-1", "hook-long-poll", 5*time.Minute); !errors.Is(err, bus.ErrAttentionUnavailable) {
+		t.Fatalf("monitor attach error = %v, want ErrAttentionUnavailable", err)
+	}
+}
+
 func TestMonitorAttachRearmsOnlyOnPresenceTransition(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	broker := attention.NewBroker()
