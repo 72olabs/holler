@@ -99,7 +99,9 @@ func SetupCodex(ctx context.Context, config CodexSetupConfig, options ...SetupOp
 	}
 	if strings.TrimSpace(config.Marketplace) != "" {
 		marketplace := marketplaceName(config.PluginID)
-		registered, stale, err := codexMarketplaceRegistration(ctx, runtime.run, config.CodexBinary, config.Marketplace, marketplace)
+		registered, stale, err := codexMarketplaceRegistration(
+			ctx, runtime.run, runtime.readFile, config.CodexBinary, config.UserConfigPath, config.Marketplace, marketplace,
+		)
 		if err != nil {
 			return plan, err
 		}
@@ -157,7 +159,31 @@ func SetupCodex(ctx context.Context, config CodexSetupConfig, options ...SetupOp
 	return plan, nil
 }
 
-func codexMarketplaceRegistration(ctx context.Context, runner CommandRunner, binary, source, wantedName string) (bool, bool, error) {
+func codexMarketplaceRegistration(
+	ctx context.Context,
+	runner CommandRunner,
+	readFile func(string) ([]byte, error),
+	binary string,
+	userConfigPath string,
+	source string,
+	wantedName string,
+) (bool, bool, error) {
+	configuredSource, configured, err := codexConfiguredLocalMarketplace(readFile, userConfigPath, wantedName)
+	if err != nil {
+		return false, false, err
+	}
+	if configured {
+		if sameLocalPath(configuredSource, source) {
+			return true, false, nil
+		}
+		// Codex loads every configured marketplace before `marketplace list`.
+		// A Homebrew upgrade removes the old Cellar path, so listing cannot be
+		// used to discover or repair that stale registration. The user config is
+		// authoritative for local sources and lets setup replace only Holler's
+		// named entry without touching unrelated marketplaces.
+		return false, true, nil
+	}
+
 	stdout, stderr, exitCode, err := runner(ctx, binary, "plugin", "marketplace", "list", "--json")
 	if err != nil || exitCode != 0 {
 		return false, false, fmt.Errorf("list Codex marketplaces: %s", strings.TrimSpace(firstNonEmpty(stderr, errorText(err))))
@@ -186,6 +212,44 @@ func codexMarketplaceRegistration(ctx context.Context, runner CommandRunner, bin
 		nameConflict = nameConflict || marketplace.Name == wantedName
 	}
 	return false, nameConflict, nil
+}
+
+func codexConfiguredLocalMarketplace(readFile func(string) ([]byte, error), path, name string) (string, bool, error) {
+	raw, err := readFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read Codex user config: %w", err)
+	}
+	var settings struct {
+		Marketplaces map[string]struct {
+			SourceType string `toml:"source_type"`
+			Source     string `toml:"source"`
+		} `toml:"marketplaces"`
+	}
+	if err := toml.Unmarshal(raw, &settings); err != nil {
+		return "", false, fmt.Errorf("decode Codex user config: %w", err)
+	}
+	marketplace, ok := settings.Marketplaces[name]
+	if !ok || !strings.EqualFold(strings.TrimSpace(marketplace.SourceType), "local") {
+		return "", false, nil
+	}
+	return strings.TrimSpace(marketplace.Source), true, nil
+}
+
+func sameLocalPath(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return left == right
+	}
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr == nil && rightErr == nil {
+		return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 func codexSetupDefaults(config CodexSetupConfig) CodexSetupConfig {

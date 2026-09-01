@@ -528,6 +528,42 @@ func TestCodexSetupReplacesMarketplaceSourceAfterPackageUpgrade(t *testing.T) {
 	}
 }
 
+func TestCodexSetupRepairsStaleConfiguredMarketplaceWithoutListing(t *testing.T) {
+	directory := t.TempDir()
+	userConfig := filepath.Join(directory, "config.toml")
+	oldSource := "/opt/homebrew/Cellar/holler/0.1.0-alpha.2/share/holler/marketplace"
+	newSource := filepath.Join(directory, "new-marketplace")
+	config := "[marketplaces.holler]\nsource_type = \"local\"\nsource = " + strconv.Quote(oldSource) + "\n"
+	if err := os.WriteFile(userConfig, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var commands []string
+	runner := func(_ context.Context, command string, args ...string) (string, string, int, error) {
+		joined := strings.Join(args, " ")
+		commands = append(commands, command+" "+joined)
+		if joined == "plugin marketplace list --json" {
+			t.Fatal("setup must not list marketplaces while a configured local source is stale")
+		}
+		return "", "", 0, nil
+	}
+	_, err := connector.SetupCodex(context.Background(), connector.CodexSetupConfig{
+		Actor: "codex", ProjectRoot: directory, Marketplace: newSource,
+		PolicyPath: filepath.Join(directory, "holler.config.toml"), UserConfigPath: userConfig,
+		ConnectorConfig: filepath.Join(directory, "codex.json"),
+		HollerBinary:    "/usr/bin/true", CodexBinary: "/usr/bin/true", Apply: true,
+		RuntimeBinaryPath: filepath.Join(directory, "bin-path"),
+	}, connector.WithSetupCommandRunner(runner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(commands, "\n")
+	remove := "plugin marketplace remove holler"
+	add := "plugin marketplace add " + newSource
+	if !strings.Contains(joined, remove) || !strings.Contains(joined, add) || strings.Index(joined, remove) > strings.Index(joined, add) {
+		t.Fatalf("commands=%s", joined)
+	}
+}
+
 func TestDaemonServiceSetupIsIdempotentForLaunchd(t *testing.T) {
 	directory := t.TempDir()
 	loaded := false
