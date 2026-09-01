@@ -1,6 +1,15 @@
 #!/bin/sh
 set -eu
 
+# Claude Code runs `--print` through the sdk-cli entrypoint and waits for
+# SessionStart/Stop async hooks before exiting. A live long-poll would therefore
+# deadlock the one-shot command: Claude waits for Holler while Holler waits for
+# Claude's result channel to close. Startup hydration still runs through the
+# ordinary hook, so skip only the live monitor in this noninteractive mode.
+if [ "${1:-}" = "monitor" ] && [ "${CLAUDE_CODE_ENTRYPOINT:-}" = "sdk-cli" ]; then
+  exit 0
+fi
+
 if [ -z "${HOLLER_ACTOR:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_ACTOR:-}" ]; then
   export HOLLER_ACTOR="${CLAUDE_PLUGIN_OPTION_ACTOR}"
 fi

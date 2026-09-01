@@ -22,6 +22,37 @@ func TestClaudePluginWrapperFailsOpenWithoutHollerBinary(t *testing.T) {
 	}
 }
 
+func TestClaudePluginWrapperSkipsMonitorForPrintMode(t *testing.T) {
+	root := repositoryRoot(t)
+	wrapper := filepath.Join(root, "connectors", "marketplace", "plugins", "claude-holler", "scripts", "holler")
+	command := exec.Command("/bin/sh", wrapper, "monitor", "--harness", "claude")
+	command.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=" + t.TempDir(),
+		"HOLLER_BIN=/usr/bin/false",
+		"CLAUDE_CODE_ENTRYPOINT=sdk-cli",
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("print-mode monitor did not exit successfully: %v: %s", err, output)
+	}
+}
+
+func TestClaudePluginWrapperKeepsLifecycleHookForPrintMode(t *testing.T) {
+	root := repositoryRoot(t)
+	wrapper := filepath.Join(root, "connectors", "marketplace", "plugins", "claude-holler", "scripts", "holler")
+	command := exec.Command("/bin/sh", wrapper, "hook", "--harness", "claude")
+	command.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=" + t.TempDir(),
+		"HOLLER_BIN=/bin/echo",
+		"CLAUDE_CODE_ENTRYPOINT=sdk-cli",
+	}
+	output, err := command.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "hook --harness claude") {
+		t.Fatalf("print-mode lifecycle hook was skipped: %v: %s", err, output)
+	}
+}
+
 func TestPluginWrappersUseSetupRecordedBinaryWithMinimalPath(t *testing.T) {
 	root := repositoryRoot(t)
 	state := t.TempDir()
