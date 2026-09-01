@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Holler $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --title "Holler $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md
             gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Holler $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md

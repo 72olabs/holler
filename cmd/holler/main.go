@@ -1229,6 +1229,7 @@ func usage(writer io.Writer) {
 
 Usage:
   holler version
+  holler --version
   holler setup claude [--yes|--remove]
   holler setup codex [--yes|--remove]
   holler status [--socket PATH]
