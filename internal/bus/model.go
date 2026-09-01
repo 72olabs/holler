@@ -36,6 +36,7 @@ var (
 	ErrActorNotLive         = errors.New("adopting actor has no live presence")
 	ErrRunNotLive           = errors.New("adopting run has no live presence")
 	ErrActorAdopted         = errors.New("actor identity was permanently adopted")
+	ErrDatabaseOwned        = errors.New("another hollerd already owns this database")
 )
 
 type NameMode string

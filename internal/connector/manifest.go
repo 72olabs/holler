@@ -9,7 +9,7 @@ import (
 	"github.com/72olabs/holler/internal/mcp"
 )
 
-const ConnectorVersion = "0.2.0"
+const ConnectorVersion = "0.5.1"
 
 type ReadinessState string
 
@@ -104,7 +104,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:3d378f447cfa43f69a8a9a039ce502fa4436d310007e4478a5ee2bb5728fcdd0"
+		base.PackageHash = "sha256:1db4e2fed2b7536f95b98f57719157c0a87895a481e7d70bb77b7a6e6db3936b"
 	case "claude":
 		base.PluginID = DefaultClaudePluginID
 		base.ClientCommand = "claude"
@@ -120,7 +120,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:953f4e9def3ca39e4719dbb9ceb56357a79f53f62da23640c696d2133bdfc828"
+		base.PackageHash = "sha256:7c9b45ffba0faa2e35aba715568f9b4991eaf00e084683aa7ff447fa287d624b"
 	case "opencode":
 		base.PluginID = DefaultOpenCodePluginID
 		base.ClientCommand = "opencode"

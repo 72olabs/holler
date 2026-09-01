@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/72olabs/holler/internal/buildinfo"
 	"github.com/72olabs/holler/internal/bus"
 )
 
@@ -168,7 +169,7 @@ func (s *Server) handle(ctx context.Context, req request) (interface{}, bool, er
 		return map[string]interface{}{
 			"protocolVersion": params.ProtocolVersion,
 			"capabilities":    map[string]interface{}{"tools": map[string]bool{"listChanged": false}},
-			"serverInfo":      map[string]string{"name": "holler", "version": "0.2.0"},
+			"serverInfo":      map[string]string{"name": "holler", "version": buildinfo.Current().Version},
 		}, false, nil
 	case "tools/list":
 		return map[string]interface{}{"tools": toolDefinitions()}, false, nil

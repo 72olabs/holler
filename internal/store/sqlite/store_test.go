@@ -1,11 +1,15 @@
 package sqlite_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -416,7 +420,14 @@ func TestOpenRetriesTransientExclusiveLockDuringDaemonRestart(t *testing.T) {
 		second, openErr := store.Open(ctx, path)
 		done <- openResult{store: second, err: openErr}
 	}()
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case result := <-done:
+		if result.store != nil {
+			_ = result.store.Close()
+		}
+		t.Fatalf("second open completed before first store closed: %v", result.err)
+	case <-time.After(150 * time.Millisecond):
+	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -430,6 +441,132 @@ func TestOpenRetriesTransientExclusiveLockDuringDaemonRestart(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("restart open did not complete after lock release")
+	}
+}
+
+func TestConcurrentProcessOpenSerializesMigrations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent.sqlite3")
+	runConcurrentOpenProcesses(t, path, "success", 8)
+
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var migrationRows int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationRows); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if migrationRows != 1 {
+		raw.Close()
+		t.Fatalf("schema migration rows = %d, want 1", migrationRows)
+	}
+	var coldAppliedAt int64
+	if err := raw.QueryRow(`SELECT applied_at_ns FROM schema_migrations`).Scan(&coldAppliedAt); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopening an already-current database exercises the warm path under the
+	// same multi-process contention as a daemon restart or concurrent CLI use.
+	runConcurrentOpenProcesses(t, path, "success", 8)
+
+	raw, err = sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var warmAppliedAt int64
+	if err := raw.QueryRow(`SELECT applied_at_ns FROM schema_migrations`).Scan(&warmAppliedAt); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if warmAppliedAt != coldAppliedAt {
+		raw.Close()
+		t.Fatalf("warm open rewrote migration timestamp: got %d, want %d", warmAppliedAt, coldAppliedAt)
+	}
+	if _, err := raw.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (99, 1)`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runConcurrentOpenProcesses(t, path, "newer", 8)
+}
+
+func TestConcurrentProcessOpenHelper(t *testing.T) {
+	if os.Getenv("HOLLER_SQLITE_OPEN_HELPER") != "1" {
+		t.Skip("helper process")
+	}
+	gate := os.Getenv("HOLLER_SQLITE_OPEN_GATE")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(gate); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("timed out waiting for concurrent-open gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	db, err := store.Open(context.Background(), os.Getenv("HOLLER_SQLITE_OPEN_PATH"))
+	switch os.Getenv("HOLLER_SQLITE_OPEN_EXPECT") {
+	case "success":
+		if err != nil {
+			t.Fatalf("concurrent open: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+	case "newer":
+		if err == nil {
+			db.Close()
+			t.Fatal("opened database with a newer schema version")
+		}
+		if !strings.Contains(err.Error(), "newer than supported") {
+			t.Fatalf("newer schema error = %v", err)
+		}
+	default:
+		t.Fatalf("unknown helper expectation %q", os.Getenv("HOLLER_SQLITE_OPEN_EXPECT"))
+	}
+}
+
+func runConcurrentOpenProcesses(t *testing.T, path, expectation string, count int) {
+	t.Helper()
+	gate := filepath.Join(t.TempDir(), "open.gate")
+	type child struct {
+		command *exec.Cmd
+		output  bytes.Buffer
+	}
+	children := make([]child, count)
+	for index := range children {
+		command := exec.Command(os.Args[0], "-test.run=^TestConcurrentProcessOpenHelper$", "-test.count=1", "-test.timeout=60s")
+		command.Env = append(os.Environ(),
+			"HOLLER_SQLITE_OPEN_HELPER=1",
+			"HOLLER_SQLITE_OPEN_GATE="+gate,
+			"HOLLER_SQLITE_OPEN_PATH="+path,
+			"HOLLER_SQLITE_OPEN_EXPECT="+expectation,
+		)
+		command.Stdout = &children[index].output
+		command.Stderr = &children[index].output
+		children[index].command = command
+		if err := command.Start(); err != nil {
+			t.Fatalf("start helper %d: %v", index, err)
+		}
+	}
+	if err := os.WriteFile(gate, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for index := range children {
+		if err := children[index].command.Wait(); err != nil {
+			t.Errorf("helper %d (%s): %v\n%s", index, expectation, err, children[index].output.String())
+		}
 	}
 }
 
