@@ -1,9 +1,9 @@
-# Holler 0.1.0-alpha.2
+# Holler 1.5.2
 
 Holler is a durable local communication layer for terminal agents. This
-first public alpha lets ordinary Claude Code and Codex sessions send direct
-messages, continue threaded conversations, and recover work across process or
-daemon restarts without asking the user to relay context.
+release makes multiple same-harness agents discoverable and independently
+addressable, preserves their identities across restart, and adds an explicit
+recovery path for an inactive actor's inbox.
 
 ## Highlights
 
@@ -21,6 +21,16 @@ daemon restarts without asking the user to relay context.
   continuing to accept wakes.
 - Reference-only wake notifications: message bodies remain behind an explicit
   inbox claim and are treated as untrusted peer input.
+- `holler who` and `holler_who` discovery with advisory role profiles, recent
+  sessions, liveness, and orphaned inbox counts.
+- Explicit `exact` and `allocate` naming: exact names reject accidental live
+  collisions, while allocated workers receive stable suffixed identities.
+- Continuity binding by harness session or supervisor launch tag, including
+  restart-safe fencing after an explicit takeover.
+- Human-authorized, one-winner inbox adoption with preserved original-recipient
+  provenance, retired-source fencing, and idempotent retries.
+- Offline `holler version`/`holler --version` output and hardened, rerunnable
+  release packaging.
 
 ## Functionally tested
 
@@ -42,8 +52,8 @@ the three-agent handoff passed all 11 infrastructure and 12 functionality
 assertions. These end-to-end runs predate repository extraction and identify
 build `0.1.0-alpha.1@2cc800b`; that commit is not present in this repository's
 history. They demonstrate the listed behavior but do not certify the current
-commit. A packaged Claude-to-Codex canary from this repository remains a
-release-candidate gate.
+commit. Release-candidate certification includes a packaged Claude-to-Codex
+canary built from this repository.
 Release certification against the current and immediately previous supported
 client versions remains part of the release-candidate gate.
 
@@ -84,7 +94,7 @@ codex
 The tap formula builds from the immutable tagged source archive and installs
 the version-matched connector marketplace under Homebrew's stable prefix.
 
-## Alpha limitations
+## Current limitations
 
 - One local operating-system user and one machine only. The Unix socket owner
   is the security boundary; signed actor authentication is not implemented.
