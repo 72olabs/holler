@@ -592,8 +592,13 @@ func TestClaudeMonitorReconnectsAcrossShortAndLongDaemonOutages(t *testing.T) {
 				go func() {
 					done <- daemon.Run(ctx, daemon.Config{DatabasePath: database, SocketPath: socket, Clock: clock.Now}, nil)
 				}()
-				deadline := time.Now().Add(3 * time.Second)
+				deadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(deadline) {
+					select {
+					case err := <-done:
+						t.Fatalf("daemon failed before becoming ready: %v", err)
+					default:
+					}
 					client, err := api.Dial(context.Background(), socket, api.Identity{Actor: "probe", RunID: "probe-run", Client: "test"})
 					if err == nil {
 						_ = client.Close()
@@ -611,7 +616,7 @@ func TestClaudeMonitorReconnectsAcrossShortAndLongDaemonOutages(t *testing.T) {
 					if err != nil {
 						t.Fatalf("daemon stop: %v", err)
 					}
-				case <-time.After(3 * time.Second):
+				case <-time.After(10 * time.Second):
 					t.Fatal("daemon did not stop")
 				}
 			}

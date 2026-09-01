@@ -400,6 +400,39 @@ func TestNotificationOutboxRecordsAbandonmentAfterBoundedRetries(t *testing.T) {
 	}
 }
 
+func TestOpenRetriesTransientExclusiveLockDuringDaemonRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "restart.sqlite3")
+	first, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type openResult struct {
+		store *store.Store
+		err   error
+	}
+	done := make(chan openResult, 1)
+	go func() {
+		second, openErr := store.Open(ctx, path)
+		done <- openResult{store: second, err: openErr}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("restart open did not recover from transient lock: %v", result.err)
+		}
+		if err := result.store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("restart open did not complete after lock release")
+	}
+}
+
 func TestRecipientClaimCompletesNotificationOutbox(t *testing.T) {
 	db, _ := openTestStore(t)
 	ctx := context.Background()

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/72olabs/holler/internal/bus"
-	_ "modernc.org/sqlite"
+	sqlitedriver "modernc.org/sqlite"
 )
 
 //go:embed schema.sql
@@ -68,11 +68,31 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	for _, option := range options {
 		option(store)
 	}
-	if err := store.migrate(ctx); err != nil {
-		db.Close()
-		return nil, err
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err = store.migrate(ctx)
+		if err == nil {
+			break
+		}
+		if !sqliteBusy(err) || !time.Now().Before(deadline) {
+			db.Close()
+			return nil, err
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			db.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
 	return store, nil
+}
+
+func sqliteBusy(err error) bool {
+	var sqliteErr *sqlitedriver.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == 5
 }
 
 func (s *Store) Close() error { return s.db.Close() }

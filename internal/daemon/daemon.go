@@ -77,7 +77,6 @@ func Run(ctx context.Context, config Config, ready io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
 	codexBinary := strings.TrimSpace(config.CodexBinary)
 	if codexBinary == "" {
 		codexBinary = "codex"
@@ -87,6 +86,7 @@ func Run(ctx context.Context, config Config, ready io.Writer) error {
 			"ok": true, "database": config.DatabasePath, "socket": config.SocketPath,
 			"protocol": api.ProtocolVersion, "codex_binary": codexBinary,
 		}); err != nil {
+			_ = db.Close()
 			return err
 		}
 	}
@@ -101,8 +101,20 @@ func Run(ctx context.Context, config Config, ready io.Writer) error {
 		options = append(options, connector.WithCodexBinaryResolver(config.CodexBinaryResolver))
 	}
 	notifier := connector.New(db, options...)
-	go runNotificationWorker(ctx, db, notifier)
-	return api.NewServer(db, api.WithAttentionBroker(attentionBroker)).Serve(ctx, listener)
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		runNotificationWorker(workerCtx, db, notifier)
+	}()
+	serveErr := api.NewServer(db, api.WithAttentionBroker(attentionBroker)).Serve(ctx, listener)
+	cancelWorker()
+	<-workerDone
+	closeErr := db.Close()
+	if serveErr != nil {
+		return serveErr
+	}
+	return closeErr
 }
 
 type notificationQueue interface {

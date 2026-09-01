@@ -833,14 +833,16 @@ func runSessionEnd(ctx context.Context, args []string, stdin io.Reader, stdout, 
 	}
 	*actor, *runID, *project = binding.Actor, binding.RunID, binding.Project
 	*socketPath = firstNonEmptyString(binding.Socket, defaultSocketPath())
-	client, err := dialAPIBinding(ctx, *socketPath, binding, *harness, sessionID, "bus-session-end/0.1")
+	hookCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	client, err := dialAPIBinding(hookCtx, *socketPath, binding, *harness, sessionID, "bus-session-end/0.1")
 	if err != nil {
 		fmt.Fprintf(stderr, "holler SessionEnd advisory failed: %v\n", err)
 		return writeJSON(stdout, map[string]bool{"ok": false})
 	}
 	defer client.Close()
 	*actor = client.Identity().Actor
-	err = connector.New(client).SessionEnd(ctx, connector.SessionConfig{
+	err = connector.New(client).SessionEnd(hookCtx, connector.SessionConfig{
 		Actor: *actor, RunID: *runID, Harness: *harness, ProjectID: *project,
 	}, bytes.NewReader(payload))
 	if err != nil {
