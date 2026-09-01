@@ -168,7 +168,7 @@ func (s *Server) handle(ctx context.Context, req request) (interface{}, bool, er
 		return map[string]interface{}{
 			"protocolVersion": params.ProtocolVersion,
 			"capabilities":    map[string]interface{}{"tools": map[string]bool{"listChanged": false}},
-			"serverInfo":      map[string]string{"name": "holler", "version": "0.1.0"},
+			"serverInfo":      map[string]string{"name": "holler", "version": "0.2.0"},
 		}, false, nil
 	case "tools/list":
 		return map[string]interface{}{"tools": toolDefinitions()}, false, nil

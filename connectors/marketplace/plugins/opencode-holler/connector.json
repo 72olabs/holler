@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "connector": "holler",
-  "connector_version": "0.1.0",
+  "connector_version": "0.2.0",
   "protocol_version": 1,
   "harness": "opencode",
   "plugin_name": "holler",

@@ -130,7 +130,7 @@ adopted inboxes. Adoption is never automatic and does not support chains.
 
 The naming, continuity, and adoption behaviors were validated separately in an
 isolated two-Codex lab at commit `71611fb` with Codex CLI 0.151.0. That lab did
-not include Claude. A later packaged canary at build `1.5.2@5fa594f` used
+not include Claude. A later packaged `0.2.0` release-candidate canary used
 Claude Code 2.1.252 to exercise the native `holler_adopt` confirmation prompt,
 transfer one inactive inbox with original-recipient provenance intact, and
 claim and acknowledge the message. A fresh idle Claude session in the same

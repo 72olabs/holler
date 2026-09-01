@@ -91,13 +91,13 @@ The daemon binds the connection to that actor and run, and returns its own build
 
 Build metadata is an additive protocol-v1 hello field. A new client first sends it, then falls back once to the legacy hello only when an older strict daemon explicitly rejects the unknown `build` field. This keeps ordinary operations available during a daemon-first rolling upgrade, but the legacy connection has no daemon build identity and cannot produce a `READY` certificate. Restart `hollerd` before expecting certification from updated clients.
 
-V1.5 clients may explicitly negotiate actor allocation by adding capability
+Holler 0.2 clients may explicitly negotiate actor allocation by adding capability
 `actor-allocation-v1`, `name_mode`, and continuity metadata to `hello`:
 
 ```json
 {
   "protocol": 1,
-  "client": "codex-connector/1.5",
+  "client": "codex-connector/0.2",
   "actor": "codex-reviewer",
   "run_id": "run-07",
   "capabilities": ["actor-allocation-v1"],

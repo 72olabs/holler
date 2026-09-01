@@ -24,7 +24,7 @@ body:
     id: holler_version
     attributes:
       label: Holler version
-      placeholder: v1.5.2
+      placeholder: v0.2.0
     validations:
       required: true
   - type: dropdown
