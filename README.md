@@ -130,8 +130,12 @@ adopted inboxes. Adoption is never automatic and does not support chains.
 
 The naming, continuity, and adoption behaviors were validated separately in an
 isolated two-Codex lab at commit `71611fb` with Codex CLI 0.151.0. That lab did
-not include Claude, and the later connector approval path has not yet been
-exercised by a live harness.
+not include Claude. A later packaged canary at build `1.5.2@5fa594f` used
+Claude Code 2.1.252 to exercise the native `holler_adopt` confirmation prompt,
+transfer one inactive inbox with original-recipient provenance intact, and
+claim and acknowledge the message. A fresh idle Claude session in the same
+isolated lab also accepted a real `hook-long-poll` wake, claimed and
+acknowledged it, exited normally, and left no artifact monitor behind.
 
 The 2026-08-28 pre-extraction release suite exercised both Claude-to-Codex and
 Codex-to-Claude conversations, two concurrent threads, a three-agent review

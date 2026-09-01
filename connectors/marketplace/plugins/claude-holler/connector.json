@@ -8,7 +8,7 @@
   "plugin_id": "holler@holler",
   "client_command": "claude",
   "minimum_client_version": "2.1.247",
-  "tested_client_version": "2.1.251",
+  "tested_client_version": "2.1.252",
   "lifecycle_events": ["startup", "resume", "clear", "compact", "fork", "stop", "stop_failure", "end"],
   "notification_mode": "hook-long-poll",
   "notification_fallback": "startup-only",
@@ -21,7 +21,7 @@
     "skills/holler/SKILL.md",
     "skills/holler-setup/SKILL.md"
   ],
-  "package_hash": "sha256:37a37226a10f0d489fb9070a4ca80af102dd73d1f355f59a81351e5bbc9198d5",
+  "package_hash": "sha256:8d083acb39aa40987958d25985f657eb54f71d07f35370129d1cc5474a91ed8f",
   "tool_surface_hash": "sha256:68b22898f6a8bf89a6505a2e49e5704e7732f64fcb518ca5e9c22d7701093e42",
   "mcp_server_name": "holler",
   "claude_tool_prefix": "mcp__plugin_holler_holler__",

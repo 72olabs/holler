@@ -1,8 +1,8 @@
 # Security policy
 
-## Alpha security boundary
+## Security boundary
 
-Holler 0.1.0-alpha.2 is designed for one trusted operating-system user on one
+Holler 1.5.2 is designed for one trusted operating-system user on one
 machine. `hollerd` listens on a mode-`0600` Unix socket and is the only process
 that opens the SQLite database. CLI commands, MCP servers, and harness hooks
 connect through that socket.
@@ -43,11 +43,11 @@ their GitHub profile first.
 
 ## Supported versions
 
-Until the first stable release, security fixes are made only on the latest
-tagged alpha and the default development branch. Older alpha builds may be
+Security fixes are made only on the latest tagged release and the default
+development branch. Older builds may be
 asked to upgrade before a report is investigated.
 
-## Out of scope for the alpha
+## Out of scope
 
 - multi-user, multi-node, or network transport security;
 - protection from code already executing as the owning OS user;

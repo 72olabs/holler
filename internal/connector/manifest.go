@@ -94,7 +94,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 		base.PluginID = "holler@holler"
 		base.ClientCommand = "codex"
 		base.MinimumClient = "0.149.1"
-		base.TestedClient = "0.150.1"
+		base.TestedClient = "0.151.0"
 		base.LifecycleEvents = []string{"startup", "resume", "clear", "compact", "end"}
 		base.NotificationMode = "native-queue"
 		base.NotificationFallback = "polling"
@@ -104,12 +104,12 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:ffc11dc453c039626d634d7154b60561d81a84ea5a3176d2f8fc8bd19ae29fa4"
+		base.PackageHash = "sha256:36df46702afe612f7fbc6e6de760227d4a95ccc163cd0e9ab3a813932d132382"
 	case "claude":
 		base.PluginID = DefaultClaudePluginID
 		base.ClientCommand = "claude"
 		base.MinimumClient = "2.1.247"
-		base.TestedClient = "2.1.251"
+		base.TestedClient = "2.1.252"
 		base.LifecycleEvents = []string{"startup", "resume", "clear", "compact", "fork", "stop", "stop_failure", "end"}
 		base.NotificationMode = AttentionHookLongPoll
 		base.NotificationFallback = "startup-only"
@@ -120,7 +120,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:37a37226a10f0d489fb9070a4ca80af102dd73d1f355f59a81351e5bbc9198d5"
+		base.PackageHash = "sha256:8d083acb39aa40987958d25985f657eb54f71d07f35370129d1cc5474a91ed8f"
 	case "opencode":
 		base.PluginID = DefaultOpenCodePluginID
 		base.ClientCommand = "opencode"

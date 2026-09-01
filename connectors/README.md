@@ -45,8 +45,8 @@ and permits visible polling as the fallback attention path.
 advertises `READY` only when one message ID has accepted wake, MCP claim, and
 MCP acknowledgement evidence in the same certified run.
 
-The current packaged test versions are Claude Code 2.1.251 and Codex CLI
-0.150.1.
+The current packaged test versions are Claude Code 2.1.252 and Codex CLI
+0.151.0.
 
 OpenCode support targets the current 1.x plugin and configuration contract. `native-prompt` uses the local OpenCode HTTP server's asynchronous prompt endpoint to submit a message reference—not its body—to the exact registered session. `startup-only` retains durable hydration without a live wake path. The package is deterministically tested but remains marked `pending-live-certification` until it passes the bounded canary against an installed OpenCode client.
 
@@ -120,6 +120,11 @@ holler connector launch --harness claude --actor claude-review -- [additional cl
 ```
 
 Choose `hook-long-poll` for live attention or `startup-only` for durable hydration without live wakeups. Claude Channels are intentionally absent from the shipping plugin.
+
+Interactive Claude sessions arm `hook-long-poll` after a turn. One-shot
+`claude --print`/SDK sessions still register, hydrate their durable inbox, and
+use MCP, but skip the live monitor so the hook cannot keep the client process
+open after its response is complete.
 
 For custom identity, attention, scope, or policy destinations, `scripts/setup-claude.sh` and `holler connector setup --harness claude` retain the advanced preview/`--apply` workflow.
 

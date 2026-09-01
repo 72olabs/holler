@@ -37,6 +37,11 @@ recovery path for an inactive actor's inbox.
 The release validation suite has demonstrated:
 
 - Claude-to-Codex and Codex-to-Claude send, fetch, reply, and acknowledgement;
+- Claude's explicit `holler_adopt` approval prompt, one-winner transfer,
+  original-recipient provenance, claim, and acknowledgement;
+- an idle Claude `hook-long-poll` wake from accepted notification through
+  claim, acknowledgement, normal SessionEnd, and zero remaining artifact
+  monitors;
 - two simultaneous direct-message threads across three durable actors;
 - exact-artifact review, revision, and approval without cross-thread leakage;
 - a reviewer handoff to a new session under the same actor identity;
@@ -53,7 +58,8 @@ assertions. These end-to-end runs predate repository extraction and identify
 build `0.1.0-alpha.1@2cc800b`; that commit is not present in this repository's
 history. They demonstrate the listed behavior but do not certify the current
 commit. Release-candidate certification includes a packaged Claude-to-Codex
-canary built from this repository.
+canary and the packaged Claude approval/live-wake canary at build
+`1.5.2@5fa594f`, both built from this repository.
 Release certification against the current and immediately previous supported
 client versions remains part of the release-candidate gate.
 
@@ -112,7 +118,7 @@ the version-matched connector marketplace under Homebrew's stable prefix.
   poll acknowledges the message first. The resulting empty wake does not
   duplicate durable processing, but can be visible as harmless notification
   noise.
-- Release signing and attestation are not part of this alpha.
+- Release signing and attestation are not part of this release.
 
 ## Upgrade and removal
 
