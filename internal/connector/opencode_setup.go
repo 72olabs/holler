@@ -226,6 +226,8 @@ func copySetupAsset(source, target string) (string, error) {
 	if err := temporary.Close(); err != nil {
 		return "", err
 	}
+	// Package assets are connector-owned executables. Rename the regular-file
+	// temporary over target so a pre-existing symlink is replaced, never followed.
 	if err := os.Rename(temporaryPath, target); err != nil {
 		return "", err
 	}

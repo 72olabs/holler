@@ -22,7 +22,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: HOLLER_REQUIRE_OPENCODE_PLUGIN_TEST=1 go test ./...
       - run: go vet ./...
       - run: scripts/package-release.sh
       - uses: actions/upload-artifact@v4

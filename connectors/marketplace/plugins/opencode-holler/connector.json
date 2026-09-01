@@ -19,7 +19,7 @@
     "skills/holler/SKILL.md",
     "skills/holler-setup/SKILL.md"
   ],
-  "package_hash": "sha256:17ecb5aa53e0101639ad7cbef928116099d43441a61abdd5901280f69a766f35",
+  "package_hash": "sha256:bc6ca4fbe65f61102555b02485643e3731910d4f39acc8df5ae4ef226e5c3eae",
   "tool_surface_hash": "sha256:68b22898f6a8bf89a6505a2e49e5704e7732f64fcb518ca5e9c22d7701093e42",
   "mcp_server_name": "holler",
   "tools": [
