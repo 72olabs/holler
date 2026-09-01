@@ -42,7 +42,9 @@ func TestClaudeSetupApplyPreservesSettingsAndWritesSelection(t *testing.T) {
 	directory := t.TempDir()
 	settings := filepath.Join(directory, "settings.json")
 	configPath := filepath.Join(directory, "claude.json")
-	if err := os.WriteFile(settings, []byte(`{"theme":"dark","permissions":{"allow":["Read"]}}`), 0o600); err != nil {
+	manifest, _ := connector.Manifest("claude")
+	adoptTool := manifest.ClaudeToolPrefix + "holler_adopt"
+	if err := os.WriteFile(settings, []byte(`{"theme":"dark","permissions":{"allow":["Read",`+strconv.Quote(adoptTool)+`]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var commands []string
@@ -55,6 +57,7 @@ func TestClaudeSetupApplyPreservesSettingsAndWritesSelection(t *testing.T) {
 	}
 	plan, err := connector.SetupClaude(context.Background(), connector.ClaudeSetupConfig{
 		AttentionMode: connector.AttentionHookLongPoll,
+		NameMode:      "allocate",
 		Actor:         "claude-review", Peer: "codex", Project: "holler", Channel: "direct",
 		Marketplace: directory, ClaudeSettings: settings, ConnectorConfig: configPath, Apply: true,
 		HollerBinary: "/usr/bin/true", RuntimeBinaryPath: filepath.Join(directory, "bin-path"),
@@ -76,8 +79,14 @@ func TestClaudeSetupApplyPreservesSettingsAndWritesSelection(t *testing.T) {
 	if merged["theme"] != "dark" || !strings.Contains(string(raw), "bus_inbox") || !strings.Contains(string(raw), "hook-long-poll") {
 		t.Fatalf("settings = %s", raw)
 	}
+	permissions := merged["permissions"].(map[string]interface{})
+	allowed, _ := json.Marshal(permissions["allow"])
+	asked, _ := json.Marshal(permissions["ask"])
+	if strings.Contains(string(allowed), adoptTool) || !strings.Contains(string(asked), adoptTool) {
+		t.Fatalf("adoption must require explicit approval: allow=%s ask=%s", allowed, asked)
+	}
 	loaded, err := connector.LoadClaudeConnectorConfig(configPath)
-	if err != nil || loaded.AttentionMode != connector.AttentionHookLongPoll || loaded.Actor != "claude-review" {
+	if err != nil || loaded.AttentionMode != connector.AttentionHookLongPoll || loaded.NameMode != "allocate" || loaded.Actor != "claude-review" {
 		t.Fatalf("config=%+v err=%v", loaded, err)
 	}
 }
@@ -149,7 +158,8 @@ func TestClaudeRemovalUninstallsManagedStateAndPreservesOtherSettings(t *testing
 	selection := filepath.Join(directory, "claude.json")
 	manifest, _ := connector.Manifest("claude")
 	managedTool := manifest.ClaudeToolPrefix + manifest.Tools[0].Name
-	raw := `{"theme":"dark","permissions":{"allow":["Read",` + strconv.Quote(managedTool) + `]},"pluginConfigs":{` +
+	adoptTool := manifest.ClaudeToolPrefix + "holler_adopt"
+	raw := `{"theme":"dark","permissions":{"allow":["Read",` + strconv.Quote(managedTool) + `],"ask":[` + strconv.Quote(adoptTool) + `]},"pluginConfigs":{` +
 		strconv.Quote(connector.DefaultClaudePluginID) + `:{"options":{"actor":"claude"}}}}`
 	if err := os.WriteFile(settings, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
@@ -184,7 +194,7 @@ func TestClaudeRemovalUninstallsManagedStateAndPreservesOtherSettings(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(updated), `"Read"`) || strings.Contains(string(updated), managedTool) || strings.Contains(string(updated), "pluginConfigs") {
+	if !strings.Contains(string(updated), `"Read"`) || strings.Contains(string(updated), managedTool) || strings.Contains(string(updated), adoptTool) || strings.Contains(string(updated), "pluginConfigs") {
 		t.Fatalf("settings after removal=%s", updated)
 	}
 	if _, err := os.Stat(selection); !os.IsNotExist(err) {
@@ -870,6 +880,7 @@ func TestOpenCodeSetupDryRunAndApplyInstallIsolatedPackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(raw), `"holler_bus_inbox": "allow"`) ||
+		!strings.Contains(string(raw), `"holler_holler_adopt": "ask"`) ||
 		!strings.Contains(string(raw), filepath.Join(installRoot, "scripts", "holler")) {
 		t.Fatalf("profile=%s", raw)
 	}

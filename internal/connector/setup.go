@@ -16,6 +16,7 @@ const DefaultClaudePluginID = "holler@holler"
 
 type ClaudeSetupConfig struct {
 	AttentionMode     string
+	NameMode          string
 	Actor             string
 	Role              string
 	Peer              string
@@ -38,6 +39,7 @@ type SetupPlan struct {
 	Harness             string   `json:"harness"`
 	Applied             bool     `json:"applied"`
 	AttentionMode       string   `json:"attention_mode"`
+	NameMode            string   `json:"name_mode,omitempty"`
 	PluginID            string   `json:"plugin_id"`
 	ConnectorConfigPath string   `json:"connector_config_path"`
 	ClaudeSettingsPath  string   `json:"claude_settings_path,omitempty"`
@@ -86,8 +88,8 @@ func SetupClaude(ctx context.Context, config ClaudeSetupConfig, options ...Setup
 	}
 	plan := SetupPlan{
 		SchemaVersion: 1, Harness: "claude", Applied: config.Apply,
-		AttentionMode: config.AttentionMode,
-		PluginID:      config.PluginID, ConnectorConfigPath: config.ConnectorConfig,
+		AttentionMode: config.AttentionMode, NameMode: config.NameMode,
+		PluginID: config.PluginID, ConnectorConfigPath: config.ConnectorConfig,
 		ClaudeSettingsPath: config.ClaudeSettings,
 		Actions: []string{
 			"register the Holler Claude marketplace",
@@ -143,7 +145,7 @@ func SetupClaude(ctx context.Context, config ClaudeSetupConfig, options ...Setup
 		for _, option := range []struct{ name, value string }{
 			{"actor", config.Actor}, {"role", config.Role}, {"peer", config.Peer},
 			{"project", config.Project}, {"channel", config.Channel}, {"socket", config.Socket},
-			{"attention_mode", config.AttentionMode}, {"binary", config.HollerBinary},
+			{"attention_mode", config.AttentionMode}, {"name_mode", config.NameMode}, {"binary", config.HollerBinary},
 		} {
 			if option.value != "" {
 				installArgs = append(installArgs, "--config", option.name+"="+option.value)
@@ -162,7 +164,7 @@ func SetupClaude(ctx context.Context, config ClaudeSetupConfig, options ...Setup
 		plan.Backups = append(plan.Backups, settingsBackup)
 	}
 	connectorBackup, err := writeJSONConfig(config.ConnectorConfig, ClaudeConnectorConfig{
-		SchemaVersion: 1, AttentionMode: config.AttentionMode,
+		SchemaVersion: 1, AttentionMode: config.AttentionMode, NameMode: config.NameMode,
 		PluginID: config.PluginID, Actor: config.Actor, Role: config.Role, Peer: config.Peer,
 		Project: config.Project, Channel: config.Channel, Socket: config.Socket, HollerBinary: config.HollerBinary,
 	})
@@ -224,6 +226,7 @@ func setupDefaults(config ClaudeSetupConfig) ClaudeSetupConfig {
 		config.RuntimeBinaryPath = DefaultRuntimeBinaryPath()
 	}
 	config.AttentionMode = strings.TrimSpace(config.AttentionMode)
+	config.NameMode = strings.TrimSpace(config.NameMode)
 	if config.AttentionMode == "" {
 		config.AttentionMode = AttentionHookLongPoll
 	}
@@ -295,6 +298,9 @@ func validateSetup(config ClaudeSetupConfig) error {
 	if err := ValidateClaudeAttentionMode(config.AttentionMode); err != nil {
 		return err
 	}
+	if err := ValidateNameMode(config.NameMode); err != nil {
+		return err
+	}
 	if strings.TrimSpace(config.Actor) == "" {
 		return fmt.Errorf("actor is required")
 	}
@@ -355,9 +361,20 @@ func mergeClaudeSettings(readFile func(string) ([]byte, error), config ClaudeSet
 	for _, value := range allow {
 		allowed[value] = struct{}{}
 	}
+	ask := stringSliceAt(permissions, "ask")
+	asked := make(map[string]struct{}, len(ask))
+	for _, value := range ask {
+		asked[value] = struct{}{}
+	}
 	manifest, _ := Manifest("claude")
 	for _, tool := range manifest.Tools {
-		allowed[manifest.ClaudeToolPrefix+tool.Name] = struct{}{}
+		name := manifest.ClaudeToolPrefix + tool.Name
+		if tool.RequiresExplicitApproval {
+			delete(allowed, name)
+			asked[name] = struct{}{}
+			continue
+		}
+		allowed[name] = struct{}{}
 	}
 	allow = allow[:0]
 	for value := range allowed {
@@ -365,6 +382,12 @@ func mergeClaudeSettings(readFile func(string) ([]byte, error), config ClaudeSet
 	}
 	sort.Strings(allow)
 	permissions["allow"] = allow
+	ask = ask[:0]
+	for value := range asked {
+		ask = append(ask, value)
+	}
+	sort.Strings(ask)
+	permissions["ask"] = ask
 	settings["permissions"] = permissions
 
 	pluginConfigs := objectAt(settings, "pluginConfigs")
@@ -377,6 +400,11 @@ func mergeClaudeSettings(readFile func(string) ([]byte, error), config ClaudeSet
 	options["channel"] = config.Channel
 	options["socket"] = config.Socket
 	options["attention_mode"] = config.AttentionMode
+	if config.NameMode != "" {
+		options["name_mode"] = config.NameMode
+	} else {
+		delete(options, "name_mode")
+	}
 	options["binary"] = config.HollerBinary
 	plugin["options"] = options
 	pluginConfigs[config.PluginID] = plugin

@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS registrations (
     session_id TEXT NOT NULL,
     delivery_handle TEXT NOT NULL,
     project_id TEXT NOT NULL,
+    working_directory TEXT NOT NULL DEFAULT '',
     epoch INTEGER NOT NULL,
     registered_at_ns INTEGER,
     updated_at_ns INTEGER NOT NULL,
@@ -77,6 +78,52 @@ CREATE TABLE IF NOT EXISTS registrations (
 
 CREATE INDEX IF NOT EXISTS registrations_live_actor
     ON registrations(actor, lease_expires_at_ns, updated_at_ns);
+
+CREATE TABLE IF NOT EXISTS actor_profiles (
+    actor TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    role_text TEXT NOT NULL,
+    accepts_json BLOB NOT NULL,
+    updated_by_run TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    updated_at_ns INTEGER NOT NULL,
+    PRIMARY KEY (actor, revision)
+);
+
+CREATE INDEX IF NOT EXISTS actor_profiles_current
+    ON actor_profiles(actor, revision DESC);
+
+CREATE TABLE IF NOT EXISTS actor_allocations (
+    actor TEXT PRIMARY KEY,
+    base_actor TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    allocated_at_ns INTEGER NOT NULL,
+    provisional INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (base_actor, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS continuity_bindings (
+    handle TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    base_actor TEXT NOT NULL,
+    created_at_ns INTEGER NOT NULL,
+    updated_at_ns INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS continuity_bindings_actor
+    ON continuity_bindings(actor);
+
+CREATE TABLE IF NOT EXISTS actor_adoptions (
+    source_actor TEXT PRIMARY KEY,
+    adopting_actor TEXT NOT NULL,
+    adopting_run TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    transferred_count INTEGER NOT NULL,
+    deduplicated_count INTEGER NOT NULL,
+    adopted_at_ns INTEGER NOT NULL,
+    UNIQUE (adopting_actor, idempotency_key)
+);
 
 CREATE TABLE IF NOT EXISTS partition_counters (
     partition_id TEXT NOT NULL,

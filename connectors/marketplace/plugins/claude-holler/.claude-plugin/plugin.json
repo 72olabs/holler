@@ -1,6 +1,6 @@
 {
   "name": "holler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Durable local communication between Claude Code and Codex agents.",
   "author": {"name": "72o Labs"},
   "userConfig": {
@@ -42,6 +42,11 @@
       "title": "Attention adapter",
       "description": "Choose hook-long-poll or startup-only.",
       "default": "hook-long-poll"
+    },
+    "name_mode": {
+      "type": "string",
+      "title": "Actor naming mode",
+      "description": "Optional exact or allocate naming. Leave unset for legacy behavior."
     },
     "binary": {
       "type": "string",

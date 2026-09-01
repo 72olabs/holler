@@ -123,6 +123,67 @@ func TestServerAcceptsLegacyHelloWithoutBuild(t *testing.T) {
 	}
 }
 
+func TestActorAllocationNeverDowngradesToLegacyHello(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "holler-allocation-compat-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	listener, err := net.Listen("unix", filepath.Join(directory, "legacy.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	done := make(chan error, 1)
+	go func() {
+		for attempt := 0; attempt < 2; attempt++ {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			request, readErr := readRequest(connection)
+			if readErr != nil {
+				_ = connection.Close()
+				done <- readErr
+				return
+			}
+			var hello map[string]interface{}
+			if unmarshalErr := json.Unmarshal(request.Args, &hello); unmarshalErr != nil {
+				_ = connection.Close()
+				done <- unmarshalErr
+				return
+			}
+			if _, ok := hello["name_mode"]; !ok {
+				_ = connection.Close()
+				done <- &testError{"feature hello silently downgraded to legacy exact identity"}
+				return
+			}
+			unknown := "build"
+			if attempt == 1 {
+				unknown = "capabilities"
+			}
+			_ = writeResponse(connection, failure(request.ID, "bad_request", `json: unknown field "`+unknown+`"`, false))
+			_ = connection.Close()
+		}
+		done <- nil
+	}()
+
+	client, dialErr := Dial(context.Background(), listener.Addr().String(), Identity{
+		Actor: "worker", RunID: "run-1", Client: "test", NameMode: "allocate",
+		ContinuityHandles: []string{"launch:test:one"},
+	})
+	if client != nil {
+		_ = client.Close()
+	}
+	if dialErr == nil {
+		t.Fatal("actor allocation connected to a daemon without negotiated support")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 type testError struct{ message string }
 
 func (e *testError) Error() string { return e.message }

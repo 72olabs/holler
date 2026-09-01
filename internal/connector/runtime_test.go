@@ -23,6 +23,7 @@ func TestSessionStartRegistersAndHydratesWithoutConsuming(t *testing.T) {
 	input := bytes.NewBufferString(`{"session_id":"codex-thread-1"}`)
 	output, err := runtime.SessionStart(ctx, connector.SessionConfig{
 		Actor: "codex", RunID: "codex-run-1", Harness: "codex", ProjectID: "experiment",
+		WorkingDir: "/workspace/coupon",
 	}, input)
 	if err != nil {
 		t.Fatalf("session start: %v", err)
@@ -40,7 +41,8 @@ func TestSessionStartRegistersAndHydratesWithoutConsuming(t *testing.T) {
 		t.Fatalf("live registrations: %v", err)
 	}
 	if len(registrations) != 1 || registrations[0].DeliveryHandle != "codex-thread-1" ||
-		registrations[0].AttentionMode != connector.AttentionNativeQueue || registrations[0].Epoch != 1 {
+		registrations[0].AttentionMode != connector.AttentionNativeQueue || registrations[0].Epoch != 1 ||
+		registrations[0].WorkingDir != "/workspace/coupon" {
 		t.Fatalf("registrations = %+v", registrations)
 	}
 	claim, err := db.Claim(ctx, "codex", sent.Message.ID, time.Minute)
@@ -54,6 +56,7 @@ func TestSessionStartRegistersAndHydratesWithoutConsuming(t *testing.T) {
 	input = bytes.NewBufferString(`{"sessionId":"codex-thread-1"}`)
 	if _, err := runtime.SessionStart(ctx, connector.SessionConfig{
 		Actor: "codex", RunID: "codex-run-1", Harness: "codex", ProjectID: "experiment",
+		WorkingDir: "/workspace/coupon",
 	}, input); err != nil {
 		t.Fatalf("refresh session: %v", err)
 	}

@@ -7,7 +7,7 @@ preserve the protocol and trust boundaries are easiest to review.
 
 Requirements:
 
-- Go 1.19 or newer;
+- Go 1.26 or newer;
 - macOS or Linux;
 - Claude Code or Codex only for live connector canaries.
 

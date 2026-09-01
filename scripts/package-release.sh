@@ -18,19 +18,33 @@ platform=$(go env GOOS)-$(go env GOARCH)
 stage=$(mktemp -d "${TMPDIR:-/tmp}/holler-release.XXXXXX")
 trap 'rm -rf -- "$stage"' EXIT HUP INT TERM
 package_root="${stage}/holler-${version}-${platform}"
+build_root="${stage}/build"
 
-HOLLER_VERSION="$version" "${script_dir}/build.sh"
+BUILD_ROOT="$build_root" HOLLER_VERSION="$version" "${script_dir}/build.sh"
 mkdir -p "${package_root}/bin" "${package_root}/share/holler/marketplace/plugins" "$artifact_root"
-install -m 0755 "${repo_dir}/.build/holler" "${package_root}/bin/holler"
-install -m 0755 "${repo_dir}/.build/hollerd" "${package_root}/bin/hollerd"
+install -m 0755 "${build_root}/holler" "${package_root}/bin/holler"
+install -m 0755 "${build_root}/hollerd" "${package_root}/bin/hollerd"
 cp -R "${repo_dir}/connectors/marketplace/.agents" "${package_root}/share/holler/marketplace/"
 cp -R "${repo_dir}/connectors/marketplace/.claude-plugin" "${package_root}/share/holler/marketplace/"
 cp -R "${repo_dir}/connectors/marketplace/plugins/holler" "${package_root}/share/holler/marketplace/plugins/"
 cp -R "${repo_dir}/connectors/marketplace/plugins/claude-holler" "${package_root}/share/holler/marketplace/plugins/"
+cp -R "${repo_dir}/connectors/marketplace/plugins/opencode-holler" "${package_root}/share/holler/marketplace/plugins/"
 cp "${repo_dir}/README.md" "${package_root}/"
 cp "${repo_dir}/RELEASE-NOTES.md" "${package_root}/"
 cp "${repo_dir}/SECURITY.md" "${package_root}/"
 cp "${repo_dir}/LICENSE" "${package_root}/"
+
+version_output=$("${package_root}/bin/holler" version)
+if ! printf '%s\n' "$version_output" | grep -Fq "\"version\": \"${version}\""; then
+  echo "packaged holler build identity does not match release version ${version}" >&2
+  printf '%s\n' "$version_output" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$version_output" | grep -Fq '"dirty": false'; then
+  echo "packaged holler build is dirty" >&2
+  printf '%s\n' "$version_output" >&2
+  exit 1
+fi
 
 archive="${artifact_root}/holler-${version}-${platform}.tar.gz"
 tar -C "$stage" -czf "$archive" "$(basename "$package_root")"

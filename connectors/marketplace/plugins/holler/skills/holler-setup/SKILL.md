@@ -36,6 +36,8 @@ holler connector launch --harness codex --actor <actor> -- [additional codex arg
 
 The launcher supplies a fresh random run, the reviewed named profile, working tree, connector identity, and attention selection. Explicit launcher values always override persisted plain-session defaults.
 
+Naming is opt-in so existing installations retain their current behavior. Use `--name-mode exact` when one durable actor must refuse a second live run; add launcher-only `--takeover` to supersede that run deliberately. Use `--name-mode allocate` when concurrent sessions should receive `actor`, `actor-2`, and so on. Add `--launch-tag <stable-tag>` when a supervisor needs a restarted process to reclaim its previous allocation. Never generate takeover from an agent tool call.
+
 Run the doctor command reported by setup when diagnosis or certification is requested. `CONFIGURED` proves static setup only. A `live-review` connector is `READY` only after a real post-registration native-queue wake is fetched, claimed, and acknowledged. `startup-only` can satisfy only `async-peer`.
 
-Treat actor identity as an inbox identity, not a display name. Concurrent sessions using one actor are competing consumers; use distinct actors when each session must be independently addressable.
+Treat actor identity as an inbox identity, not a display name. In legacy mode concurrent sessions using one actor are competing consumers. Prefer allocate mode when each session must be independently addressable.

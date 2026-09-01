@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/72olabs/holler/internal/bus"
 	"github.com/72olabs/holler/internal/connector"
 )
 
@@ -34,6 +35,25 @@ func TestRuntimeBindingHydratesPlainClaudeSessionAndKeepsStableProcessRun(t *tes
 	if first.Actor != "claude-plain" || first.Peer != "codex-plain" || first.Project != "holler" ||
 		first.Socket != "/tmp/holler-test.sock" || first.RunID == "" || first.RunID != second.RunID {
 		t.Fatalf("first=%+v second=%+v", first, second)
+	}
+}
+
+func TestRuntimeBindingBuildsProcessSessionAndLaunchContinuity(t *testing.T) {
+	binding := connector.RuntimeBinding{
+		Actor: "reviewer", RunID: "run-7", NameMode: bus.NameModeAllocate, LaunchTag: "tab-7",
+	}
+	handles := binding.ContinuityHandles("codex", "session-7")
+	want := []string{"process:codex:run-7", "session:codex:session-7", "launch:codex:tab-7"}
+	if len(handles) != len(want) {
+		t.Fatalf("handles = %v", handles)
+	}
+	for index := range want {
+		if handles[index] != want[index] {
+			t.Fatalf("handles = %v, want %v", handles, want)
+		}
+	}
+	if got := (connector.RuntimeBinding{NameMode: bus.NameModeExact}).ContinuityHandles("codex", "session-7"); got != nil {
+		t.Fatalf("exact handles = %v", got)
 	}
 }
 

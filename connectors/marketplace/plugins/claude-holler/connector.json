@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "connector": "holler",
-  "connector_version": "0.1.0",
+  "connector_version": "0.2.0",
   "protocol_version": 1,
   "harness": "claude",
   "plugin_name": "holler",
   "plugin_id": "holler@holler",
   "client_command": "claude",
   "minimum_client_version": "2.1.247",
-  "tested_client_version": "2.1.251",
+  "tested_client_version": "2.1.252",
   "lifecycle_events": ["startup", "resume", "clear", "compact", "fork", "stop", "stop_failure", "end"],
   "notification_mode": "hook-long-poll",
   "notification_fallback": "startup-only",
@@ -21,8 +21,8 @@
     "skills/holler/SKILL.md",
     "skills/holler-setup/SKILL.md"
   ],
-  "package_hash": "sha256:09aed4f241b7ed1d963f116f99771f0b8f2395928400273eb4a0ada94b229c86",
-  "tool_surface_hash": "sha256:c48e757d1d1ef53b4448b98ec435927465faebb3a2171609c22b140ae70defe4",
+  "package_hash": "sha256:953f4e9def3ca39e4719dbb9ceb56357a79f53f62da23640c696d2133bdfc828",
+  "tool_surface_hash": "sha256:68b22898f6a8bf89a6505a2e49e5704e7732f64fcb518ca5e9c22d7701093e42",
   "mcp_server_name": "holler",
   "claude_tool_prefix": "mcp__plugin_holler_holler__",
   "tools": [
@@ -33,7 +33,10 @@
     {"name": "bus_ack", "class": "idempotent-write"},
     {"name": "bus_extend", "class": "idempotent-write"},
     {"name": "bus_nack", "class": "leased-write"},
-    {"name": "bus_status", "class": "read-only"}
+    {"name": "bus_status", "class": "read-only"},
+    {"name": "holler_profile", "class": "idempotent-write"},
+    {"name": "holler_who", "class": "read-only"},
+    {"name": "holler_adopt", "class": "idempotent-write", "requires_explicit_approval": true}
   ],
   "profiles": [
     {"name": "async-peer", "requires_wake": false, "description": "Durable messaging with visible polling fallback."},

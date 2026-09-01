@@ -20,6 +20,7 @@ type CodexConnectorConfig struct {
 	PluginID      string `json:"plugin_id,omitempty"`
 	Profile       string `json:"profile"`
 	Actor         string `json:"actor,omitempty"`
+	NameMode      string `json:"name_mode,omitempty"`
 	Role          string `json:"role,omitempty"`
 	Peer          string `json:"peer,omitempty"`
 	Project       string `json:"project,omitempty"`
@@ -73,6 +74,10 @@ func LoadCodexConnectorConfig(path string) (CodexConnectorConfig, error) {
 	if strings.TrimSpace(config.Profile) == "" {
 		return CodexConnectorConfig{}, fmt.Errorf("Codex connector profile is required")
 	}
+	if err := ValidateNameMode(config.NameMode); err != nil {
+		return CodexConnectorConfig{}, err
+	}
+	config.NameMode = strings.TrimSpace(config.NameMode)
 	return config, nil
 }
 

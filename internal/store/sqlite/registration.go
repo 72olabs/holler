@@ -20,6 +20,7 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 	req.SessionID = strings.TrimSpace(req.SessionID)
 	req.DeliveryHandle = strings.TrimSpace(req.DeliveryHandle)
 	req.ProjectID = strings.TrimSpace(req.ProjectID)
+	req.WorkingDir = strings.TrimSpace(req.WorkingDir)
 	if req.DeliveryHandle == "" {
 		req.DeliveryHandle = req.SessionID
 	}
@@ -50,6 +51,9 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 	if req.Harness != "codex" && req.Harness != "claude" && req.Harness != "opencode" && req.Harness != "test" {
 		return bus.Registration{}, &bus.ValidationError{Field: "registration.harness", Problem: "must be codex, claude, opencode, or test"}
 	}
+	if err := bus.ValidateTextIdentifier("registration.working_directory", req.WorkingDir, 4096); err != nil {
+		return bus.Registration{}, err
+	}
 	switch req.Harness {
 	case "codex":
 		if req.AttentionMode != "native-queue" && req.AttentionMode != "startup-only" {
@@ -72,16 +76,20 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 		return bus.Registration{}, fmt.Errorf("begin registration: %w", err)
 	}
 	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, req.Actor); err != nil {
+		return bus.Registration{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO registrations(
-			actor, run_id, harness, attention_mode, session_id, delivery_handle, project_id,
+			actor, run_id, harness, attention_mode, session_id, delivery_handle, project_id, working_directory,
 			epoch, registered_at_ns, updated_at_ns, lease_expires_at_ns
-		) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
 		ON CONFLICT(actor, run_id, session_id) DO UPDATE SET
 			harness = excluded.harness,
 			attention_mode = excluded.attention_mode,
 			delivery_handle = excluded.delivery_handle,
 			project_id = excluded.project_id,
+			working_directory = excluded.working_directory,
 			epoch = registrations.epoch + 1,
 			registered_at_ns = excluded.registered_at_ns,
 			updated_at_ns = excluded.updated_at_ns,
@@ -89,7 +97,7 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 			ended_at_ns = NULL,
 			attention_superseded_at_ns = NULL`,
 		req.Actor, req.RunID, req.Harness, req.AttentionMode, req.SessionID, req.DeliveryHandle,
-		req.ProjectID, now.UnixNano(), now.UnixNano(), expires.UnixNano()); err != nil {
+		req.ProjectID, req.WorkingDir, now.UnixNano(), now.UnixNano(), expires.UnixNano()); err != nil {
 		return bus.Registration{}, fmt.Errorf("register session: %w", err)
 	}
 	registration, err := getRegistrationTx(ctx, tx, req.Actor, req.RunID, req.SessionID)
@@ -101,6 +109,9 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 	payload["attention_mode"] = req.AttentionMode
 	payload["session_id"] = req.SessionID
 	payload["epoch"] = registration.Epoch
+	if req.WorkingDir != "" {
+		payload["working_directory"] = req.WorkingDir
+	}
 	if err := s.appendEventTx(ctx, tx, req.ProjectID, "operational", "session.registered",
 		"", req.Actor, payload, now); err != nil {
 		return bus.Registration{}, err
@@ -117,7 +128,7 @@ func (s *Store) LiveRegistrations(ctx context.Context, actor string) ([]bus.Regi
 		return nil, &bus.ValidationError{Field: "actor", Problem: "is required"}
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT actor, run_id, harness, attention_mode, session_id, delivery_handle, project_id,
+		SELECT actor, run_id, harness, attention_mode, session_id, delivery_handle, project_id, working_directory,
 		       epoch, updated_at_ns, lease_expires_at_ns
 		FROM registrations
 		WHERE actor = ? AND ended_at_ns IS NULL AND attention_superseded_at_ns IS NULL
@@ -151,7 +162,15 @@ func (s *Store) HeartbeatRegistrations(ctx context.Context, actor, runID string,
 		return 0, &bus.ValidationError{Field: "registration.lease", Problem: "must be between 0 and 24h"}
 	}
 	now := s.now().UTC()
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin registration heartbeat: %w", err)
+	}
+	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, actor); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `
 		UPDATE registrations SET updated_at_ns = ?, lease_expires_at_ns = ?
 		WHERE rowid = (
 			SELECT rowid FROM registrations
@@ -163,7 +182,13 @@ func (s *Store) HeartbeatRegistrations(ctx context.Context, actor, runID string,
 		return 0, err
 	}
 	changed, err := result.RowsAffected()
-	return int(changed), err
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit registration heartbeat: %w", err)
+	}
+	return int(changed), nil
 }
 
 // AttachMonitor renews the exact passive registration used by a live Claude
@@ -190,6 +215,9 @@ func (s *Store) AttachMonitor(ctx context.Context, actor, runID, sessionID, harn
 		return bus.Registration{}, fmt.Errorf("begin monitor attach: %w", err)
 	}
 	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, actor); err != nil {
+		return bus.Registration{}, err
+	}
 	var storedHarness, storedMode string
 	var rowID, registeredNS int64
 	var endedNS, supersededNS sql.NullInt64
@@ -339,6 +367,9 @@ func (s *Store) RecordHydration(ctx context.Context, projectID, actor, runID, ha
 		return fmt.Errorf("begin hydration event: %w", err)
 	}
 	defer tx.Rollback()
+	if err := assertActorNotAdoptedTx(ctx, tx, actor); err != nil {
+		return err
+	}
 	payload := bus.EventProvenance(ctx, runID)
 	payload["harness"] = harness
 	payload["session_id"] = sessionID
@@ -396,7 +427,7 @@ func (s *Store) ExpireRegistration(ctx context.Context, actor, runID, sessionID,
 
 func getRegistrationTx(ctx context.Context, tx *sql.Tx, actor, runID, sessionID string) (bus.Registration, error) {
 	row := tx.QueryRowContext(ctx, `
-		SELECT actor, run_id, harness, attention_mode, session_id, delivery_handle, project_id,
+		SELECT actor, run_id, harness, attention_mode, session_id, delivery_handle, project_id, working_directory,
 		       epoch, updated_at_ns, lease_expires_at_ns
 		FROM registrations WHERE actor = ? AND run_id = ? AND session_id = ?`, actor, runID, sessionID)
 	return scanRegistration(row)
@@ -412,6 +443,7 @@ func scanRegistration(scanner registrationScanner) (bus.Registration, error) {
 	if err := scanner.Scan(
 		&registration.Actor, &registration.RunID, &registration.Harness, &registration.AttentionMode,
 		&registration.SessionID, &registration.DeliveryHandle, &registration.ProjectID,
+		&registration.WorkingDir,
 		&registration.Epoch, &updatedNS, &leaseExpiresNS,
 	); err != nil {
 		return bus.Registration{}, fmt.Errorf("scan registration: %w", err)

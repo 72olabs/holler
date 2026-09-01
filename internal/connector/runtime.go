@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -117,6 +118,7 @@ type SessionConfig struct {
 	ProjectID      string
 	AttentionMode  string
 	DeliveryHandle string
+	WorkingDir     string
 }
 
 type HookOutput struct {
@@ -140,11 +142,16 @@ func (r *Runtime) SessionStart(ctx context.Context, config SessionConfig, input 
 			return HookOutput{}, err
 		}
 	}
+	workingDir := strings.TrimSpace(config.WorkingDir)
+	if workingDir == "" {
+		workingDir, _ = os.Getwd()
+	}
 	registration, err := r.store.RegisterSession(ctx, bus.RegistrationRequest{
 		Actor: config.Actor, RunID: config.RunID, Harness: config.Harness,
 		AttentionMode: config.AttentionMode,
 		SessionID:     sessionID, DeliveryHandle: deliveryHandle, ProjectID: config.ProjectID,
-		Lease: r.sessionTTL,
+		WorkingDir: workingDir,
+		Lease:      r.sessionTTL,
 	})
 	if err != nil {
 		return HookOutput{}, err

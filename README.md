@@ -75,6 +75,39 @@ The result identifies the client, daemon, protocol, and socket. Connector
 diagnostics can then distinguish a daemon problem from plugin discovery, MCP
 permission, project discovery, or attention failure.
 
+Agents can describe themselves and discover specialized peers without the user
+memorizing actor IDs:
+
+```sh
+holler profile --actor codex-reviewer --run reviewer-run --role "Reviews coupon correctness" --accepts REVIEW_REQUEST
+holler who
+```
+
+The participation skill uses the same `holler_profile` and `holler_who` MCP
+tools when the user assigns a role or says “holler at the coupon reviewer.”
+Profiles are untrusted descriptive hints, never permissions.
+
+When an allocated actor ends without a continuity tag, a user can explicitly
+hand its inbox to one live replacement:
+
+```sh
+holler adopt --actor codex-reviewer-3 --run replacement-run \
+  --from codex-reviewer-2 --project coupon \
+  --idempotency-key recover-reviewer-2
+```
+
+Holler refuses a live source, a replacement run without its own live presence,
+or an active source claim. The decision is durable, actor-global, and
+one-winner; `--project` selects the audit-event partition rather than limiting
+routing. Old and future mail addressed to the source reaches the replacement
+while still reporting the original recipient. The source actor name is
+permanently retired: an old session continuity handle receives a fresh suffixed
+identity instead of silently reclaiming the transferred inbox, and a stale
+connection cannot renew presence or author new messages or profile metadata
+under the retired name. Plain protocol connections retain only read-only
+diagnostics and session cleanup. Reusing the adopter's own name inherits its
+adopted inboxes. Adoption is never automatic and does not support chains.
+
 ## What works today
 
 - Claude Code and Codex talk in either direction after one-time setup.
@@ -87,11 +120,31 @@ permission, project discovery, or attention failure.
 - The daemon, CLI, MCP shim, and hooks share one versioned local API.
 - Sender identity is bound to the connector connection rather than accepted on
   each model-controlled send.
+- Agents can publish advisory role profiles and discover live, ended, or lapsed
+  peers, their recent sessions, and orphaned inbox counts.
+- Optional `exact` naming refuses accidental duplicate live actors; optional
+  `allocate` naming creates parallel `actor`, `actor-2`, ... identities and
+  reclaims them after restart from a session or supervisor launch tag.
+- An explicitly authorized live actor can adopt one inactive actor's orphaned
+  inbox without rewriting message recipients or losing provenance.
 
-The release suite has exercised both Claude-to-Codex and Codex-to-Claude
-conversations, two concurrent threads, a three-agent review handoff, daemon
-restart, abrupt Claude exit, lease recovery, and zero orphan Holler monitors.
-The current macOS rehearsal used Claude Code 2.1.251 and Codex CLI 0.150.1.
+The naming, continuity, and adoption behaviors were validated separately in an
+isolated two-Codex lab at commit `71611fb` with Codex CLI 0.151.0. That lab did
+not include Claude. A later packaged `0.2.0` release-candidate canary used
+Claude Code 2.1.252 to exercise the native `holler_adopt` confirmation prompt,
+transfer one inactive inbox with original-recipient provenance intact, and
+claim and acknowledge the message. A fresh idle Claude session in the same
+isolated lab also accepted a real `hook-long-poll` wake, claimed and
+acknowledged it, exited normally, and left no artifact monitor behind.
+
+The 2026-08-28 pre-extraction release suite exercised both Claude-to-Codex and
+Codex-to-Claude conversations, two concurrent threads, a three-agent review
+handoff, daemon restart, abrupt Claude exit, lease recovery, and zero orphan
+Holler monitors.
+It used Claude Code 2.1.251 and Codex CLI 0.150.1. Those behavioral artifacts
+identify build `0.1.0-alpha.1@2cc800b`, whose commit is not present in this
+repository's post-extraction history; they are behavioral evidence, not
+certification of the current commit.
 
 ## How it works
 
@@ -146,9 +199,34 @@ The claim and acknowledgement are the durable evidence.
 | OpenCode | Package available; live certification pending | `native-prompt` or startup-only | Advanced connector setup only |
 | Other agents | Use the CLI or local protocol; no bundled connector yet | Connector-defined | See the API and connector docs |
 
+The experimental OpenCode package is included in release archives and Homebrew
+installs, but is not yet a supported connector. Advanced testers must provide
+its installed package path explicitly. For Homebrew:
+
+```sh
+holler connector setup --harness opencode --actor opencode \
+  --package-source "$(brew --prefix holler)/share/holler/marketplace/plugins/opencode-holler" \
+  --apply
+```
+
+For an extracted release archive, use
+`./share/holler/marketplace/plugins/opencode-holler` as `--package-source`.
+
 Holler exposes the same message semantics through MCP, CLI, and its framed
 local protocol. A client does not need MCP if it can invoke the CLI or use a
 future SDK.
+
+Existing installations retain legacy actor behavior. For independently
+addressable parallel sessions, opt in during setup:
+
+```sh
+holler setup codex --name-mode allocate
+holler setup claude --name-mode allocate
+```
+
+Supervisors can launch with `--launch-tag <stable-tag>` so a replacement
+process reclaims its allocation. Use `--name-mode exact` when duplicates must
+be rejected and add launcher-only `--takeover` only for a deliberate handoff.
 
 ## Current boundaries
 

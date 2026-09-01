@@ -36,12 +36,13 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 		return fmt.Errorf("setup supports claude or codex, got %q", harness)
 	}
 
-	existingAttention, existingActor, existingRole, existingPeer := "", "", "", ""
+	existingAttention, existingNameMode, existingActor, existingRole, existingPeer := "", "", "", "", ""
 	existingProject, existingRoot, existingChannel, existingSocket := "", "", "", ""
 	existingPluginID, existingProfile, existingClient := "", "", ""
 	if harness == "claude" {
 		if configured, err := connector.LoadClaudeConnectorConfig(""); err == nil {
 			existingAttention, existingActor, existingRole, existingPeer = configured.AttentionMode, configured.Actor, configured.Role, configured.Peer
+			existingNameMode = configured.NameMode
 			existingProject, existingChannel, existingSocket = configured.Project, configured.Channel, configured.Socket
 			existingPluginID = configured.PluginID
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -52,6 +53,7 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 		}
 	} else if configured, err := connector.LoadCodexConnectorConfig(""); err == nil {
 		existingAttention, existingActor, existingRole, existingPeer = configured.AttentionMode, configured.Actor, configured.Role, configured.Peer
+		existingNameMode = configured.NameMode
 		existingProject, existingRoot, existingChannel, existingSocket = configured.Project, configured.ProjectRoot, configured.Channel, configured.Socket
 		existingPluginID, existingProfile, existingClient = configured.PluginID, configured.Profile, configured.ClientBinary
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -70,6 +72,7 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 
 	flags := commandFlags("setup "+harness, stderr)
 	attention := flags.String("attention", firstNonEmptyString(existingAttention, defaultAttention), "harness attention mode")
+	nameMode := flags.String("name-mode", existingNameMode, "actor naming: exact or allocate; omitted preserves legacy behavior")
 	actor := flags.String("actor", firstNonEmptyString(existingActor, defaultActor), "durable inbox identity")
 	role := flags.String("role", firstNonEmptyString(existingRole, "assistant"), "actor role")
 	peer := flags.String("peer", firstNonEmptyString(existingPeer, defaultPeer), "default peer actor")
@@ -103,7 +106,7 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 	}
 	executable = invokedExecutable(executable)
 	input := harnessSetupInput{
-		Attention: *attention, Actor: *actor, Role: *role, Peer: *peer, Project: *project,
+		Attention: *attention, NameMode: *nameMode, Actor: *actor, Role: *role, Peer: *peer, Project: *project,
 		ProjectRoot: *projectRoot, Channel: *channel, Socket: *socket,
 		PluginID: *pluginID, Profile: *profile, ClientBinary: *clientBinary, ConnectorConfig: *connectorConfig,
 		ClaudeSettings: *claudeSettings, CodexHome: *codexHome, CodexUserConfig: *codexUserConfig,
@@ -241,16 +244,16 @@ func runProductRemoval(ctx context.Context, harness string, input harnessSetupIn
 }
 
 type harnessSetupInput struct {
-	Attention, Actor, Role, Peer, Project, ProjectRoot, Channel, Socket string
-	Marketplace, PluginID, Profile, ClientBinary, ConnectorConfig       string
-	ClaudeSettings, CodexHome, CodexUserConfig, Scope, HollerBinary     string
-	Apply                                                               bool
+	Attention, NameMode, Actor, Role, Peer, Project, ProjectRoot, Channel, Socket string
+	Marketplace, PluginID, Profile, ClientBinary, ConnectorConfig                 string
+	ClaudeSettings, CodexHome, CodexUserConfig, Scope, HollerBinary               string
+	Apply                                                                         bool
 }
 
 func buildHarnessSetupPlan(ctx context.Context, harness string, input harnessSetupInput) (connector.SetupPlan, error) {
 	if harness == "claude" {
 		return connector.SetupClaude(ctx, connector.ClaudeSetupConfig{
-			AttentionMode: input.Attention, Actor: input.Actor, Role: input.Role, Peer: input.Peer,
+			AttentionMode: input.Attention, NameMode: input.NameMode, Actor: input.Actor, Role: input.Role, Peer: input.Peer,
 			Project: input.Project, Channel: input.Channel, Socket: input.Socket, PluginID: input.PluginID,
 			Marketplace: input.Marketplace, Scope: input.Scope, ConnectorConfig: input.ConnectorConfig,
 			ClaudeSettings: input.ClaudeSettings, ClaudeBinary: input.ClientBinary,
@@ -258,7 +261,7 @@ func buildHarnessSetupPlan(ctx context.Context, harness string, input harnessSet
 		})
 	}
 	return connector.SetupCodex(ctx, connector.CodexSetupConfig{
-		AttentionMode: input.Attention, Actor: input.Actor, Role: input.Role, Peer: input.Peer,
+		AttentionMode: input.Attention, NameMode: input.NameMode, Actor: input.Actor, Role: input.Role, Peer: input.Peer,
 		Project: input.Project, ProjectRoot: input.ProjectRoot, Channel: input.Channel, Socket: input.Socket,
 		PluginID: input.PluginID, Marketplace: input.Marketplace, Profile: input.Profile,
 		ConnectorConfig: input.ConnectorConfig, CodexHome: input.CodexHome, UserConfigPath: input.CodexUserConfig,
@@ -295,6 +298,9 @@ func printProductSetupSummary(writer io.Writer, result productSetupResult, marke
 	fmt.Fprintf(writer, "Holler will configure %s for normal `%s` launches:\n", result.Harness, result.Harness)
 	fmt.Fprintf(writer, "  - install or refresh %s\n", result.Connector.PluginID)
 	fmt.Fprintf(writer, "  - write connector identity %s with %s attention\n", result.Connector.ConnectorConfigPath, result.Connector.AttentionMode)
+	if result.Connector.NameMode != "" {
+		fmt.Fprintf(writer, "  - use %s actor naming\n", result.Connector.NameMode)
+	}
 	if result.Connector.UserConfigPath != "" {
 		fmt.Fprintf(writer, "  - merge the frozen Holler MCP allowlist into %s\n", result.Connector.UserConfigPath)
 	} else if result.Connector.ClaudeSettingsPath != "" {

@@ -6,13 +6,13 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing the alpha. Remove message bodies, credentials, absolute private paths, and other sensitive data before submitting.
+        Thanks for testing Holler. Remove message bodies, credentials, absolute private paths, and other sensitive data before submitting.
   - type: input
     id: version
     attributes:
       label: Holler version
       description: Include the tag and clean build identity reported by the binary or daemon.
-      placeholder: v0.1.0-alpha.1
+      placeholder: v0.2.0
     validations:
       required: true
   - type: dropdown

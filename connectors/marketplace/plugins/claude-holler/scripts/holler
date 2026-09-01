@@ -1,6 +1,17 @@
 #!/bin/sh
 set -eu
 
+# Claude Code's noninteractive SDK entrypoints wait for SessionStart/Stop async
+# hooks before exiting. A live long-poll can therefore deadlock a one-shot
+# command: Claude waits for Holler while Holler waits for Claude's result
+# channel to close. Startup hydration still runs through the ordinary hook, so
+# skip only the live monitor for the SDK entrypoint family.
+if [ "${1:-}" = "monitor" ]; then
+  case "${CLAUDE_CODE_ENTRYPOINT:-}" in
+    sdk-cli|sdk-ts|sdk-py) exit 0 ;;
+  esac
+fi
+
 if [ -z "${HOLLER_ACTOR:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_ACTOR:-}" ]; then
   export HOLLER_ACTOR="${CLAUDE_PLUGIN_OPTION_ACTOR}"
 fi
@@ -21,6 +32,9 @@ if [ -z "${HOLLER_SOCKET:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_SOCKET:-}" ]; the
 fi
 if [ -z "${HOLLER_CLAUDE_ATTENTION:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_ATTENTION_MODE:-}" ]; then
   export HOLLER_CLAUDE_ATTENTION="${CLAUDE_PLUGIN_OPTION_ATTENTION_MODE}"
+fi
+if [ -z "${HOLLER_NAME_MODE:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_NAME_MODE:-}" ]; then
+  export HOLLER_NAME_MODE="${CLAUDE_PLUGIN_OPTION_NAME_MODE}"
 fi
 if [ -z "${HOLLER_BIN:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_BINARY:-}" ]; then
   export HOLLER_BIN="${CLAUDE_PLUGIN_OPTION_BINARY}"

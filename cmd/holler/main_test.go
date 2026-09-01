@@ -18,11 +18,26 @@ import (
 
 	"github.com/72olabs/holler/internal/api"
 	"github.com/72olabs/holler/internal/attention"
+	"github.com/72olabs/holler/internal/buildinfo"
 	"github.com/72olabs/holler/internal/bus"
 	"github.com/72olabs/holler/internal/connector"
 	"github.com/72olabs/holler/internal/daemon"
 	store "github.com/72olabs/holler/internal/store/sqlite"
 )
+
+func TestCLIVersionDoesNotRequireDaemon(t *testing.T) {
+	t.Setenv("HOLLER_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"version"}, strings.NewReader(""), &stdout, &stderr)
+	if exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr.String())
+	}
+	var info buildinfo.Info
+	decode(t, stdout.Bytes(), &info)
+	if info.Version == "" || info.Commit == "" {
+		t.Fatalf("version output = %+v", info)
+	}
+}
 
 func TestCLISendInboxClaimAck(t *testing.T) {
 	ctx := context.Background()
@@ -70,6 +85,77 @@ func TestCLISendInboxClaimAck(t *testing.T) {
 	}
 }
 
+func TestCLIProfileAndWho(t *testing.T) {
+	ctx := context.Background()
+	socket := startAPIServer(t)
+	profileRaw := invoke(t, ctx, "profile",
+		"--socket", socket,
+		"--actor", "coupon-reviewer",
+		"--run", "review-run-1",
+		"--project", "coupon",
+		"--role", "Reviews coupon correctness",
+		"--accepts", "REVIEW_REQUEST,QUESTION",
+	)
+	var profile bus.ActorProfileResult
+	decode(t, profileRaw, &profile)
+	if !profile.Updated || profile.Profile.Actor != "coupon-reviewer" {
+		t.Fatalf("profile = %+v", profile)
+	}
+	whoRaw := invoke(t, ctx, "who", "--socket", socket)
+	var directory bus.ActorDirectory
+	decode(t, whoRaw, &directory)
+	if len(directory.Actors) != 1 || directory.Actors[0].Actor != "coupon-reviewer" || directory.Actors[0].Profile == nil {
+		t.Fatalf("directory = %+v", directory)
+	}
+}
+
+func TestCLIAdoptInactiveInbox(t *testing.T) {
+	ctx := context.Background()
+	socket := startAPIServer(t)
+	live, err := api.Dial(ctx, socket, api.Identity{Actor: "replacement", RunID: "replacement-run", Client: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	if _, err := live.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "replacement", RunID: "replacement-run", Harness: "test", SessionID: "replacement-session",
+		ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sendRaw := invoke(t, ctx, "send", "--socket", socket, "--actor", "sender", "--run", "sender-run",
+		"--to", "reviewer-old", "--project", "coupon", "--idempotency-key", "cli-orphan", "--body", `{"text":"review"}`)
+	var sent bus.SendResult
+	decode(t, sendRaw, &sent)
+	adoptRaw := invoke(t, ctx, "adopt", "--socket", socket, "--actor", "replacement", "--run", "replacement-run",
+		"--from", "reviewer-old", "--project", "coupon", "--idempotency-key", "cli-adopt-once")
+	var adopted bus.AdoptResult
+	decode(t, adoptRaw, &adopted)
+	if adopted.AdoptingActor != "replacement" || adopted.Transferred != 1 {
+		t.Fatalf("adoption = %+v", adopted)
+	}
+	inboxRaw := invoke(t, ctx, "inbox", "--socket", socket, "--actor", "replacement")
+	var items []bus.InboxItem
+	decode(t, inboxRaw, &items)
+	if len(items) != 1 || items[0].MessageID != sent.Message.ID || items[0].OriginalRecipientActor != "reviewer-old" {
+		t.Fatalf("adopted inbox = %+v", items)
+	}
+	t.Setenv("HOLLER_ACTOR", "reviewer-old")
+	t.Setenv("HOLLER_RUN", "retired-run")
+	statusRaw := invoke(t, ctx, "status", "--socket", socket)
+	var status map[string]interface{}
+	decode(t, statusRaw, &status)
+	if status["ok"] != true {
+		t.Fatalf("status under retired actor environment = %+v", status)
+	}
+	whoRaw := invoke(t, ctx, "who", "--socket", socket)
+	var directory bus.ActorDirectory
+	decode(t, whoRaw, &directory)
+	if len(directory.Actors) == 0 {
+		t.Fatal("who returned no actors under retired actor environment")
+	}
+}
+
 func TestCLIMCPUsesConnectorBoundEnvironment(t *testing.T) {
 	socket := startAPIServer(t)
 	t.Setenv("HOLLER_SOCKET", socket)
@@ -96,6 +182,71 @@ func TestCLIMCPUsesConnectorBoundEnvironment(t *testing.T) {
 	if structured["actor"] != "codex" || structured["peer"] != "claude" {
 		t.Fatalf("connector identity = %+v", structured)
 	}
+}
+
+func TestMCPFollowsLifecycleReconciliationWhenItConnectsFirstOnResume(t *testing.T) {
+	ctx := context.Background()
+	socket := startAPIServer(t)
+	old, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "old-run", Client: "hook", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:old-run", "session:codex:session-1"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	t.Setenv("HOLLER_SOCKET", socket)
+	t.Setenv("HOLLER_ACTOR", "reviewer")
+	t.Setenv("HOLLER_RUN", "new-run")
+	t.Setenv("HOLLER_PROJECT", "coupon")
+	t.Setenv("HOLLER_NAME_MODE", "allocate")
+	t.Setenv("HOLLER_CODEX_CONNECTOR_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	inputReader, inputWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- runMCP(ctx, []string{"--harness", "codex"}, inputReader, outputWriter, io.Discard)
+		_ = outputWriter.Close()
+	}()
+	encoder := json.NewEncoder(inputWriter)
+	decoder := json.NewDecoder(outputReader)
+	if err := encoder.Encode(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 1, "method": "initialize",
+		"params": map[string]string{"protocolVersion": "2024-11-05"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var initialized map[string]interface{}
+	if err := decoder.Decode(&initialized); err != nil {
+		t.Fatal(err)
+	}
+	hook, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "new-run", Client: "hook", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:new-run", "session:codex:session-1"}, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hook.Close()
+	if err := encoder.Encode(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+		"params": map[string]interface{}{"name": "bus_status", "arguments": map[string]interface{}{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var status map[string]interface{}
+	if err := decoder.Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	structured := status["result"].(map[string]interface{})["structuredContent"].(map[string]interface{})
+	if structured["actor"] != "reviewer" || structured["run"] != "new-run" {
+		t.Fatalf("reconciled MCP status = %+v", structured)
+	}
+	_ = inputWriter.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	_ = outputReader.Close()
 }
 
 func TestPlainClaudePluginCommandsSharePersistedBindingAndProcessRun(t *testing.T) {
@@ -173,6 +324,20 @@ func TestCLIHookDegradesWithoutBlockingHarnessStartup(t *testing.T) {
 	decode(t, stdout.Bytes(), &output)
 	if !strings.Contains(output.HookSpecificOutput.AdditionalContext, "DEGRADED") ||
 		!strings.Contains(stderr.String(), "registration failed") && !strings.Contains(stderr.String(), "connect") {
+		t.Fatalf("stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+}
+
+func TestCLIHookExplainsStaleBindingWithoutBlockingHarnessStartup(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := writeDegradedHook(&stdout, &stderr, fmt.Errorf("hello refused: %w", bus.ErrBindingStale)); err != nil {
+		t.Fatal(err)
+	}
+	var output connector.HookOutput
+	decode(t, stdout.Bytes(), &output)
+	if !strings.Contains(stderr.String(), "relaunch") ||
+		!strings.Contains(output.HookSpecificOutput.AdditionalContext, "STALE") ||
+		!strings.Contains(output.HookSpecificOutput.AdditionalContext, "Relaunch") {
 		t.Fatalf("stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
 }
@@ -310,6 +475,24 @@ func TestCLIClaudeMonitorFailsVisiblyWithoutResultChannel(t *testing.T) {
 	}
 }
 
+func TestCLIClaudeMonitorStopsWhenAttentionIsUnavailable(t *testing.T) {
+	socket := startAPIServerWithOptions(t)
+	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
+	t.Setenv("HOLLER_SOCKET", socket)
+	t.Setenv("HOLLER_ACTOR", "claude")
+	t.Setenv("HOLLER_RUN", "claude-run")
+	var stdout bytes.Buffer
+	stderrWriter, finishStderr := startPipeCapture(t)
+	exit := run(context.Background(), []string{"monitor", "--harness", "claude", "--startup-grace", "50ms"},
+		strings.NewReader(`{"session_id":"session-1"}`), &stdout, stderrWriter)
+	_ = stderrWriter.Close()
+	stderr := finishStderr()
+	want := "holler monitor degraded: " + bus.ErrAttentionUnavailable.Error() + "\n"
+	if exit != 1 || stderr != want {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr)
+	}
+}
+
 func TestCLIClaudeMonitorReportsTerminalPresenceOutcomes(t *testing.T) {
 	for _, test := range []struct {
 		name, want string
@@ -366,6 +549,60 @@ func TestCLIClaudeMonitorReportsTerminalPresenceOutcomes(t *testing.T) {
 	}
 }
 
+func TestCLIClaudeMonitorStopsOnStaleBindingWithoutRetrying(t *testing.T) {
+	socket := startAPIServerWithOptions(t, api.WithAttentionBroker(attention.NewBroker()))
+	continuity := []string{"process:claude:run-a", "session:claude:session-a"}
+	first, err := api.Dial(context.Background(), socket, api.Identity{
+		Actor: "reviewer", RunID: "run-a", Client: "test", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: continuity, ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := first.RegisterSession(context.Background(), bus.RegistrationRequest{
+		Actor: "reviewer", RunID: "run-a", Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
+		SessionID: "session-a", ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	winner, err := api.Dial(context.Background(), socket, api.Identity{
+		Actor: "reviewer", RunID: "run-b", Client: "test", NameMode: bus.NameModeExact,
+		ProjectID: "coupon", Takeover: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer winner.Close()
+	if _, err := winner.RegisterSession(context.Background(), bus.RegistrationRequest{
+		Actor: "reviewer", RunID: "run-b", Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
+		SessionID: "session-b", ProjectID: "coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
+	t.Setenv("HOLLER_SOCKET", socket)
+	t.Setenv("HOLLER_ACTOR", "reviewer")
+	t.Setenv("HOLLER_RUN", "run-a")
+	t.Setenv("HOLLER_PROJECT", "coupon")
+	t.Setenv("HOLLER_NAME_MODE", "allocate")
+	t.Setenv("HOLLER_CONNECTOR_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	var stdout bytes.Buffer
+	stderrWriter, finishStderr := startPipeCapture(t)
+	exit := run(context.Background(), []string{"monitor", "--harness", "claude"},
+		strings.NewReader(`{"session_id":"session-a"}`), &stdout, stderrWriter)
+	_ = stderrWriter.Close()
+	stderr := finishStderr()
+	if exit != 0 || !strings.Contains(stderr, "lost actor") || !strings.Contains(stderr, "relaunch") {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr)
+	}
+	live, err := winner.LiveRegistrations(context.Background(), "reviewer")
+	if err != nil || len(live) != 1 || live[0].RunID != "run-b" {
+		t.Fatalf("winner registrations after stale monitor = %+v, err = %v", live, err)
+	}
+}
+
 func TestClaudeMonitorReconnectsAcrossShortAndLongDaemonOutages(t *testing.T) {
 	for _, outage := range []time.Duration{4 * time.Minute, 6 * time.Minute} {
 		t.Run(outage.String(), func(t *testing.T) {
@@ -388,8 +625,13 @@ func TestClaudeMonitorReconnectsAcrossShortAndLongDaemonOutages(t *testing.T) {
 				go func() {
 					done <- daemon.Run(ctx, daemon.Config{DatabasePath: database, SocketPath: socket, Clock: clock.Now}, nil)
 				}()
-				deadline := time.Now().Add(3 * time.Second)
+				deadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(deadline) {
+					select {
+					case err := <-done:
+						t.Fatalf("daemon failed before becoming ready: %v", err)
+					default:
+					}
 					client, err := api.Dial(context.Background(), socket, api.Identity{Actor: "probe", RunID: "probe-run", Client: "test"})
 					if err == nil {
 						_ = client.Close()
@@ -407,7 +649,7 @@ func TestClaudeMonitorReconnectsAcrossShortAndLongDaemonOutages(t *testing.T) {
 					if err != nil {
 						t.Fatalf("daemon stop: %v", err)
 					}
-				case <-time.After(3 * time.Second):
+				case <-time.After(10 * time.Second):
 					t.Fatal("daemon did not stop")
 				}
 			}

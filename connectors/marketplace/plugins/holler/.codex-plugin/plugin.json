@@ -1,6 +1,6 @@
 {
   "name": "holler",
-  "version": "0.1.0+codex.20260830042014",
+  "version": "0.2.0+codex.20260901144156",
   "description": "Durable local communication between terminal agents.",
   "author": {
     "name": "72o Labs"

@@ -8,7 +8,7 @@ class Holler < Formula
   depends_on "go" => :build
 
   def install
-    commit = "v#{version}"
+    commit = "@COMMIT@"
     built_at = Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     ldflags = %W[
       -s -w
@@ -24,6 +24,7 @@ class Holler < Formula
     marketplace.install "connectors/marketplace/.agents", "connectors/marketplace/.claude-plugin"
     (marketplace/"plugins").install "connectors/marketplace/plugins/holler"
     (marketplace/"plugins").install "connectors/marketplace/plugins/claude-holler"
+    (marketplace/"plugins").install "connectors/marketplace/plugins/opencode-holler"
     doc.install "README.md", "RELEASE-NOTES.md", "SECURITY.md"
   end
 
@@ -41,6 +42,8 @@ class Holler < Formula
 
   test do
     assert_match "local agent communication CLI", shell_output("#{bin}/holler help")
+    assert_match version.to_s, shell_output("#{bin}/holler version")
     assert_predicate bin/"hollerd", :executable?
+    assert_predicate pkgshare/"marketplace/plugins/opencode-holler/connector.json", :file?
   end
 end

@@ -18,11 +18,13 @@ rm -rf -- \
   "${marketplace_dir}/.agents" \
   "${marketplace_dir}/.claude-plugin" \
   "${marketplace_dir}/plugins/holler" \
-  "${marketplace_dir}/plugins/claude-holler"
+  "${marketplace_dir}/plugins/claude-holler" \
+  "${marketplace_dir}/plugins/opencode-holler"
 cp -R "${repo_dir}/connectors/marketplace/.agents" "${marketplace_dir}/"
 cp -R "${repo_dir}/connectors/marketplace/.claude-plugin" "${marketplace_dir}/"
 cp -R "${repo_dir}/connectors/marketplace/plugins/holler" "${marketplace_dir}/plugins/"
 cp -R "${repo_dir}/connectors/marketplace/plugins/claude-holler" "${marketplace_dir}/plugins/"
+cp -R "${repo_dir}/connectors/marketplace/plugins/opencode-holler" "${marketplace_dir}/plugins/"
 
 echo "Installed Holler binaries to ${bin_dir}"
 echo "Installed connector marketplace to ${marketplace_dir}"

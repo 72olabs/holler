@@ -400,6 +400,39 @@ func TestNotificationOutboxRecordsAbandonmentAfterBoundedRetries(t *testing.T) {
 	}
 }
 
+func TestOpenRetriesTransientExclusiveLockDuringDaemonRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "restart.sqlite3")
+	first, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type openResult struct {
+		store *store.Store
+		err   error
+	}
+	done := make(chan openResult, 1)
+	go func() {
+		second, openErr := store.Open(ctx, path)
+		done <- openResult{store: second, err: openErr}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("restart open did not recover from transient lock: %v", result.err)
+		}
+		if err := result.store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("restart open did not complete after lock release")
+	}
+}
+
 func TestRecipientClaimCompletesNotificationOutbox(t *testing.T) {
 	db, _ := openTestStore(t)
 	ctx := context.Background()
@@ -607,7 +640,7 @@ func TestMigrationV5AddsSupersessionWithoutLosingRegistration(t *testing.T) {
 	if _, err := raw.Exec(`ALTER TABLE registrations DROP COLUMN attention_superseded_at_ns`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`DELETE FROM schema_migrations WHERE version = 6`); err != nil {
+	if _, err := raw.Exec(`DELETE FROM schema_migrations`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at_ns) VALUES (5, 1)`); err != nil {
@@ -626,8 +659,163 @@ func TestMigrationV5AddsSupersessionWithoutLosingRegistration(t *testing.T) {
 	}
 }
 
+func TestMigrationV6AddsDiscoverySchemaWithoutLosingRegistration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "codex", RunID: "run-1", Harness: "codex", SessionID: "session-1",
+		ProjectID: "migration", WorkingDir: "/workspace/coupon", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE actor_profiles`,
+		`ALTER TABLE registrations DROP COLUMN working_directory`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (6, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	registrations, err := db.LiveRegistrations(ctx, "codex")
+	if err != nil || len(registrations) != 1 || registrations[0].WorkingDir != "" {
+		t.Fatalf("migrated registrations = %+v, err = %v", registrations, err)
+	}
+	profile, err := db.SetActorProfile(ctx, "codex", "run-1", "migration", bus.ActorProfileRequest{RoleText: "Migration reviewer"})
+	if err != nil || !profile.Updated {
+		t.Fatalf("profile after migration = %+v, err = %v", profile, err)
+	}
+}
+
+func TestMigrationV7AddsActorBindingsWithoutLosingProfiles(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetActorProfile(ctx, "codex", "run-1", "migration", bus.ActorProfileRequest{RoleText: "Migration reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE continuity_bindings`,
+		`DROP TABLE actor_allocations`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (7, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	binding, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "codex", RunID: "run-2", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"launch:codex:migration"}, ProjectID: "migration",
+	})
+	if err != nil || binding.Actor != "codex-2" {
+		t.Fatalf("binding after migration = %+v, err = %v", binding, err)
+	}
+	directory, err := db.Who(ctx, 10)
+	if err != nil || len(directory.Actors) != 2 {
+		t.Fatalf("directory after migration = %+v, err = %v", directory, err)
+	}
+}
+
+func TestMigrationV8AddsActorAdoptionsWithoutLosingMessages(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, err := db.Send(ctx, testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE actor_adoptions`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (8, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "replacement", RunID: "replacement-run", Harness: "test", SessionID: "replacement-session",
+		ProjectID: "migration", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdoptActor(ctx, bus.AdoptRequest{
+		SourceActor: "reviewer", AdoptingActor: "replacement", AdoptingRun: "replacement-run",
+		ProjectID: "migration", IdempotencyKey: "migration-adopt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := db.CheckInbox(ctx, "replacement", 10)
+	if err != nil || len(items) != 1 || items[0].MessageID != sent.Message.ID || items[0].OriginalRecipientActor != "reviewer" {
+		t.Fatalf("migrated adopted inbox = %+v, err = %v", items, err)
+	}
+}
+
 func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 	db, path := openTestStore(t)
+	if _, err := db.RegisterSession(context.Background(), bus.RegistrationRequest{
+		Actor: "legacy", RunID: "legacy-run", Harness: "claude", SessionID: "legacy-session",
+		ProjectID: "migration", WorkingDir: "/workspace/legacy", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -641,6 +829,7 @@ func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 		`ALTER TABLE registrations DROP COLUMN ended_at_ns`,
 		`ALTER TABLE registrations DROP COLUMN registered_at_ns`,
 		`ALTER TABLE registrations DROP COLUMN attention_mode`,
+		`ALTER TABLE registrations DROP COLUMN working_directory`,
 	} {
 		if _, err := raw.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -652,6 +841,14 @@ func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 		t.Fatalf("repair unversioned schema: %v", err)
 	}
 	defer reopened.Close()
+	directory, err := reopened.Who(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("read directory after schema repair: %v", err)
+	}
+	legacy := directoryActor(t, directory, "legacy")
+	if len(legacy.Sessions) != 1 || legacy.Sessions[0].StartedAt.IsZero() || legacy.Sessions[0].WorkingDir != "" {
+		t.Fatalf("legacy directory entry after schema repair = %+v", legacy)
+	}
 }
 
 func openTestStore(t *testing.T, options ...store.Option) (*store.Store, string) {

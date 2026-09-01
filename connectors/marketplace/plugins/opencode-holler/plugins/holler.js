@@ -1,6 +1,14 @@
 export const HollerPlugin = async ({ client, serverUrl }) => {
   const registrations = new Map()
   const pendingContext = new Map()
+  const maxErrorDetail = 512
+
+  const errorDetail = (error) => {
+    const detail = error instanceof Error ? error.message : String(error)
+    return detail.length > maxErrorDetail
+      ? `${detail.slice(0, maxErrorDetail - 3)}...`
+      : detail
+  }
 
   const log = async (level, message, extra = {}) => {
     try {
@@ -50,7 +58,7 @@ export const HollerPlugin = async ({ client, serverUrl }) => {
         registrations.delete(sessionID)
         await log("warn", "Holler registration degraded", {
           sessionID,
-          detail: error instanceof Error ? error.message : String(error),
+          detail: errorDetail(error),
         })
         const degraded = "Holler connector state is DEGRADED because OpenCode lifecycle registration failed. Continue independent work where safe and ask the operator to run holler connector doctor."
         pendingContext.set(sessionID, degraded)
@@ -68,7 +76,7 @@ export const HollerPlugin = async ({ client, serverUrl }) => {
     } catch (error) {
       await log("warn", "Holler session expiry degraded", {
         sessionID,
-        detail: error instanceof Error ? error.message : String(error),
+        detail: errorDetail(error),
       })
     }
   }

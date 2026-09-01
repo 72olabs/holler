@@ -15,17 +15,34 @@ const SchemaVersion = 1
 const MaxBodyBytes = 1 << 20
 
 var (
-	ErrInvalid             = errors.New("invalid request")
-	ErrNotFound            = errors.New("not found")
-	ErrNoMessage           = errors.New("no claimable message")
-	ErrAttentionWaiterBusy = errors.New("attention waiter already active")
-	ErrSessionEnded        = errors.New("session ended")
-	ErrPresenceSuperseded  = errors.New("attention presence superseded")
-	ErrRegistrationExpired = errors.New("registration expired")
-	ErrIdempotencyConflict = errors.New("idempotency key reused for different message")
-	ErrLeaseTokenMismatch  = errors.New("lease token mismatch")
-	ErrLeaseExpired        = errors.New("lease expired")
-	ErrDeliveryTerminal    = errors.New("delivery is already terminal")
+	ErrInvalid              = errors.New("invalid request")
+	ErrNotFound             = errors.New("not found")
+	ErrNoMessage            = errors.New("no claimable message")
+	ErrAttentionWaiterBusy  = errors.New("attention waiter already active")
+	ErrAttentionUnavailable = errors.New("attention waiting is unavailable")
+	ErrSessionEnded         = errors.New("session ended")
+	ErrPresenceSuperseded   = errors.New("attention presence superseded")
+	ErrRegistrationExpired  = errors.New("registration expired")
+	ErrIdempotencyConflict  = errors.New("idempotency key reused for different message")
+	ErrLeaseTokenMismatch   = errors.New("lease token mismatch")
+	ErrLeaseExpired         = errors.New("lease expired")
+	ErrDeliveryTerminal     = errors.New("delivery is already terminal")
+	ErrActorLive            = errors.New("actor already has a live presence")
+	ErrBindingStale         = errors.New("actor binding is stale: this run was superseded and cannot reclaim the actor")
+	ErrContinuityConflict   = errors.New("continuity handles resolve to different actors")
+	ErrBindingReassigned    = errors.New("provisional actor binding was reassigned")
+	ErrAdoptionConflict     = errors.New("actor inbox was already adopted by another actor")
+	ErrAdoptionBusy         = errors.New("actor inbox has an active claim")
+	ErrActorNotLive         = errors.New("adopting actor has no live presence")
+	ErrRunNotLive           = errors.New("adopting run has no live presence")
+	ErrActorAdopted         = errors.New("actor identity was permanently adopted")
+)
+
+type NameMode string
+
+const (
+	NameModeExact    NameMode = "exact"
+	NameModeAllocate NameMode = "allocate"
 )
 
 type DeliveryRequest string
@@ -107,27 +124,49 @@ const (
 )
 
 type InboxItem struct {
-	MessageID       string          `json:"message_id"`
-	ProjectID       string          `json:"project_id"`
-	ChannelID       string          `json:"channel_id"`
-	ThreadID        string          `json:"thread_id,omitempty"`
-	FromActor       string          `json:"from_actor"`
-	FromRole        string          `json:"from_role,omitempty"`
-	Type            string          `json:"type"`
-	DeliveryRequest DeliveryRequest `json:"delivery_request"`
-	State           DeliveryState   `json:"state"`
-	Attempt         int             `json:"attempt"`
-	Available       bool            `json:"available"`
-	CreatedAt       time.Time       `json:"created_at"`
-	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+	MessageID              string          `json:"message_id"`
+	ProjectID              string          `json:"project_id"`
+	ChannelID              string          `json:"channel_id"`
+	ThreadID               string          `json:"thread_id,omitempty"`
+	FromActor              string          `json:"from_actor"`
+	FromRole               string          `json:"from_role,omitempty"`
+	Type                   string          `json:"type"`
+	DeliveryRequest        DeliveryRequest `json:"delivery_request"`
+	State                  DeliveryState   `json:"state"`
+	Attempt                int             `json:"attempt"`
+	Available              bool            `json:"available"`
+	CreatedAt              time.Time       `json:"created_at"`
+	ExpiresAt              *time.Time      `json:"expires_at,omitempty"`
+	RecipientActor         string          `json:"recipient_actor"`
+	OriginalRecipientActor string          `json:"original_recipient_actor,omitempty"`
 }
 
 type Claim struct {
-	Message        Message   `json:"message"`
-	RecipientActor string    `json:"recipient_actor"`
-	Attempt        int       `json:"attempt"`
-	LeaseToken     string    `json:"lease_token"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	Message                Message   `json:"message"`
+	RecipientActor         string    `json:"recipient_actor"`
+	OriginalRecipientActor string    `json:"original_recipient_actor,omitempty"`
+	Attempt                int       `json:"attempt"`
+	LeaseToken             string    `json:"lease_token"`
+	LeaseExpiresAt         time.Time `json:"lease_expires_at"`
+}
+
+type AdoptRequest struct {
+	SourceActor    string `json:"source_actor"`
+	AdoptingActor  string `json:"adopting_actor,omitempty"`
+	AdoptingRun    string `json:"adopting_run,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type AdoptResult struct {
+	SourceActor      string    `json:"source_actor"`
+	AdoptingActor    string    `json:"adopting_actor"`
+	AdoptingRun      string    `json:"adopting_run"`
+	Transferred      int       `json:"transferred"`
+	Deduplicated     int       `json:"deduplicated"`
+	DuplicateRequest bool      `json:"duplicate_request"`
+	AdoptedAt        time.Time `json:"adopted_at"`
+	IdempotencyKey   string    `json:"-"`
 }
 
 type Registration struct {
@@ -138,6 +177,7 @@ type Registration struct {
 	SessionID      string    `json:"session_id"`
 	DeliveryHandle string    `json:"delivery_handle"`
 	ProjectID      string    `json:"project_id"`
+	WorkingDir     string    `json:"working_directory,omitempty"`
 	Epoch          int64     `json:"epoch"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
@@ -151,7 +191,79 @@ type RegistrationRequest struct {
 	SessionID      string        `json:"session_id"`
 	DeliveryHandle string        `json:"delivery_handle"`
 	ProjectID      string        `json:"project_id"`
+	WorkingDir     string        `json:"working_directory,omitempty"`
 	Lease          time.Duration `json:"lease"`
+}
+
+// ActorProfile is model-authored discovery metadata. It is descriptive only:
+// no field in a profile changes delivery, authorization, or attention policy.
+type ActorProfile struct {
+	Actor        string    `json:"actor"`
+	RoleText     string    `json:"role_text"`
+	Accepts      []string  `json:"accepts,omitempty"`
+	Revision     int64     `json:"revision"`
+	UpdatedByRun string    `json:"updated_by_run"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type ActorProfileRequest struct {
+	RoleText string   `json:"role_text"`
+	Accepts  []string `json:"accepts,omitempty"`
+}
+
+type ActorProfileResult struct {
+	Profile ActorProfile `json:"profile"`
+	Updated bool         `json:"updated"`
+}
+
+type ActorSession struct {
+	RunID          string     `json:"run_id"`
+	Harness        string     `json:"harness"`
+	AttentionMode  string     `json:"attention_mode,omitempty"`
+	ProjectID      string     `json:"project_id"`
+	WorkingDir     string     `json:"working_directory,omitempty"`
+	State          string     `json:"state"`
+	StartedAt      time.Time  `json:"started_at"`
+	LastSeenAt     time.Time  `json:"last_seen_at"`
+	LeaseExpiresAt time.Time  `json:"lease_expires_at"`
+	EndedAt        *time.Time `json:"ended_at,omitempty"`
+}
+
+type ActorDirectoryEntry struct {
+	Actor             string         `json:"actor"`
+	State             string         `json:"state"`
+	LastSeenAt        time.Time      `json:"last_seen_at"`
+	Profile           *ActorProfile  `json:"profile,omitempty"`
+	Sessions          []ActorSession `json:"sessions"`
+	SessionsTruncated bool           `json:"sessions_truncated,omitempty"`
+	UnclaimedMessages int            `json:"unclaimed_messages"`
+}
+
+type ActorDirectory struct {
+	Actors        []ActorDirectoryEntry `json:"actors"`
+	GeneratedAt   time.Time             `json:"generated_at"`
+	Truncated     bool                  `json:"truncated"`
+	MetadataTrust string                `json:"metadata_trust"`
+}
+
+type ActorBindRequest struct {
+	RequestedActor    string   `json:"requested_actor"`
+	RunID             string   `json:"run_id"`
+	NameMode          NameMode `json:"name_mode"`
+	ContinuityHandles []string `json:"continuity_handles,omitempty"`
+	ProjectID         string   `json:"project_id,omitempty"`
+	Takeover          bool     `json:"takeover,omitempty"`
+}
+
+type ActorBindResult struct {
+	Actor               string         `json:"actor"`
+	RequestedActor      string         `json:"requested_actor"`
+	NameMode            NameMode       `json:"name_mode"`
+	Minted              bool           `json:"minted"`
+	Provisional         bool           `json:"provisional"`
+	ContinuityReclaimed bool           `json:"continuity_reclaimed"`
+	AdoptedPredecessor  string         `json:"adopted_predecessor,omitempty"`
+	SupersededPresences []Registration `json:"-"`
 }
 
 type NotificationAttempt struct {
