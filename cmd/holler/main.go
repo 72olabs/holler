@@ -40,6 +40,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	var err error
 	switch args[0] {
+	case "version", "--version":
+		err = runVersion(args[1:], stdout, stderr)
 	case "status":
 		err = runStatus(ctx, args[1:], stdout, stderr)
 	case "who":
@@ -90,6 +92,17 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 1
 	}
 	return 0
+}
+
+func runVersion(args []string, stdout, stderr io.Writer) error {
+	flags := commandFlags("version", stderr)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return &bus.ValidationError{Field: "version", Problem: "does not accept positional arguments"}
+	}
+	return writeJSON(stdout, buildinfo.Current())
 }
 
 func runMonitor(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -1215,6 +1228,7 @@ func usage(writer io.Writer) {
 	fmt.Fprintln(writer, `holler: local agent communication CLI
 
 Usage:
+  holler version
   holler setup claude [--yes|--remove]
   holler setup codex [--yes|--remove]
   holler status [--socket PATH]

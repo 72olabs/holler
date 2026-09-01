@@ -18,11 +18,26 @@ import (
 
 	"github.com/72olabs/holler/internal/api"
 	"github.com/72olabs/holler/internal/attention"
+	"github.com/72olabs/holler/internal/buildinfo"
 	"github.com/72olabs/holler/internal/bus"
 	"github.com/72olabs/holler/internal/connector"
 	"github.com/72olabs/holler/internal/daemon"
 	store "github.com/72olabs/holler/internal/store/sqlite"
 )
+
+func TestCLIVersionDoesNotRequireDaemon(t *testing.T) {
+	t.Setenv("HOLLER_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"version"}, strings.NewReader(""), &stdout, &stderr)
+	if exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr.String())
+	}
+	var info buildinfo.Info
+	decode(t, stdout.Bytes(), &info)
+	if info.Version == "" || info.Commit == "" {
+		t.Fatalf("version output = %+v", info)
+	}
+}
 
 func TestCLISendInboxClaimAck(t *testing.T) {
 	ctx := context.Background()

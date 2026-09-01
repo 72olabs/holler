@@ -186,6 +186,19 @@ The claim and acknowledgement are the durable evidence.
 | OpenCode | Package available; live certification pending | `native-prompt` or startup-only | Advanced connector setup only |
 | Other agents | Use the CLI or local protocol; no bundled connector yet | Connector-defined | See the API and connector docs |
 
+The experimental OpenCode package is included in release archives and Homebrew
+installs, but is not yet a supported connector. Advanced testers must provide
+its installed package path explicitly. For Homebrew:
+
+```sh
+holler connector setup --harness opencode --actor opencode \
+  --package-source "$(brew --prefix holler)/share/holler/marketplace/plugins/opencode-holler" \
+  --apply
+```
+
+For an extracted release archive, use
+`./share/holler/marketplace/plugins/opencode-holler` as `--package-source`.
+
 Holler exposes the same message semantics through MCP, CLI, and its framed
 local protocol. A client does not need MCP if it can invoke the CLI or use a
 future SDK.

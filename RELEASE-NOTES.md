@@ -65,6 +65,9 @@ holler-<version>-<os>-<arch>/
   share/holler/marketplace/
 ```
 
+The hosted release workflow currently publishes `linux-amd64` and
+`darwin-arm64` archives. Homebrew builds from source for the host architecture.
+
 Keep `bin/` and `share/` under the same extracted prefix, then run:
 
 ```sh
@@ -84,7 +87,8 @@ the version-matched connector marketplace under Homebrew's stable prefix.
 - Direct actor routing only. `channel_id` labels messages, but membership,
   broadcast, channel history, and channel replay are V2 work.
 - Claude Channels are excluded from the release; Claude uses hook-long-poll.
-- OpenCode remains experimental until it passes a live installed-client canary.
+- The OpenCode package is included for advanced testing, but remains
+  experimental until it passes a live installed-client canary.
 - Linux builds and deterministic tests are covered by CI, but Linux setup and
   user-service lifecycle support must pass a clean-machine rehearsal before it
   is advertised for this release.

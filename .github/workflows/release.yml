@@ -8,7 +8,21 @@ permissions:
   contents: read
 
 jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release notes match tag
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! grep -Fqx "# Holler ${version}" RELEASE-NOTES.md; then
+            echo "RELEASE-NOTES.md does not match tag ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
   build:
+    needs: metadata
     strategy:
       fail-fast: false
       matrix:
@@ -27,6 +41,7 @@ jobs:
           node-version: 22
       - run: HOLLER_REQUIRE_OPENCODE_PLUGIN_TEST=1 go test ./...
       - run: go vet ./...
+      - run: HOLLER_REQUIRE_OPENCODE_PLUGIN_TEST=1 go test -race ./...
       - run: scripts/package-release.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -44,6 +59,14 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Holler $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md
+      - name: Create or update release
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Holler $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Holler $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
