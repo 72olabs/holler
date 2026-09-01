@@ -25,10 +25,11 @@ if [ -z "$version" ]; then
   version=dev
 fi
 ldflags="-X github.com/72olabs/holler/internal/buildinfo.Version=$version -X github.com/72olabs/holler/internal/buildinfo.Commit=$commit -X github.com/72olabs/holler/internal/buildinfo.Dirty=$dirty -X github.com/72olabs/holler/internal/buildinfo.BuiltAt=$built_at"
+build_root=${BUILD_ROOT:-"$repo_root/.build"}
 
-mkdir -p "$repo_root/.build"
+mkdir -p "$build_root"
 (
   cd "$repo_root"
-  go build -trimpath -ldflags "$ldflags" -o .build/holler ./cmd/holler
-  go build -trimpath -ldflags "$ldflags" -o .build/hollerd ./cmd/hollerd
+  go build -trimpath -ldflags "$ldflags" -o "$build_root/holler" ./cmd/holler
+  go build -trimpath -ldflags "$ldflags" -o "$build_root/hollerd" ./cmd/hollerd
 )
