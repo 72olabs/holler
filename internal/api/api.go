@@ -154,6 +154,13 @@ type Server struct {
 	capabilities           map[string]registeredCapability
 	capabilityErr          error
 	resolveHarnessInstance HarnessInstanceResolver
+	connectionsMu          sync.Mutex
+	identityConnections    map[authenticatedIdentity]map[net.Conn]struct{}
+}
+
+type authenticatedIdentity struct {
+	actor string
+	runID string
 }
 
 type ServerOption func(*Server)
@@ -168,6 +175,7 @@ func NewServer(store Store, options ...ServerOption) *Server {
 	server := &Server{
 		store: store, build: buildinfo.Current(),
 		capabilities: make(map[string]registeredCapability), resolveHarnessInstance: localHarnessInstance,
+		identityConnections: make(map[authenticatedIdentity]map[net.Conn]struct{}),
 	}
 	server.installDefaultCapabilities()
 	for _, option := range options {
@@ -426,6 +434,9 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 				s.attention.Cancel(presence.Actor, presence.RunID, presence.SessionID, bus.ErrPresenceSuperseded)
 			}
 		}
+		for _, presence := range binding.SupersededPresences {
+			s.fenceIdentityConnections(presence.Actor, presence.RunID, connection)
+		}
 	} else if err := s.store.ReserveActorName(connectionCtx, assignedActor); err != nil {
 		_ = writeResponse(connection, Response{ID: request.ID, OK: false, Error: rpcError(err)})
 		return
@@ -472,6 +483,8 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		AdoptedPredecessor: binding.AdoptedPredecessor,
 		PendingPredecessor: binding.PendingPredecessor,
 	}
+	s.trackIdentityConnection(connection, identity.Actor, identity.RunID)
+	defer s.untrackIdentityConnection(connection, identity.Actor, identity.RunID)
 	defer func() {
 		if identity.Provisional {
 			_ = s.store.ReleaseProvisionalActor(context.Background(), identity.Actor)
@@ -514,6 +527,44 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		if err := writeResponse(connection, response); err != nil {
 			return
 		}
+	}
+}
+
+func (s *Server) trackIdentityConnection(connection net.Conn, actor, runID string) {
+	key := authenticatedIdentity{actor: actor, runID: runID}
+	s.connectionsMu.Lock()
+	defer s.connectionsMu.Unlock()
+	connections := s.identityConnections[key]
+	if connections == nil {
+		connections = make(map[net.Conn]struct{})
+		s.identityConnections[key] = connections
+	}
+	connections[connection] = struct{}{}
+}
+
+func (s *Server) untrackIdentityConnection(connection net.Conn, actor, runID string) {
+	key := authenticatedIdentity{actor: actor, runID: runID}
+	s.connectionsMu.Lock()
+	defer s.connectionsMu.Unlock()
+	connections := s.identityConnections[key]
+	delete(connections, connection)
+	if len(connections) == 0 {
+		delete(s.identityConnections, key)
+	}
+}
+
+func (s *Server) fenceIdentityConnections(actor, runID string, except net.Conn) {
+	key := authenticatedIdentity{actor: actor, runID: runID}
+	s.connectionsMu.Lock()
+	connections := make([]net.Conn, 0, len(s.identityConnections[key]))
+	for connection := range s.identityConnections[key] {
+		if connection != except {
+			connections = append(connections, connection)
+		}
+	}
+	s.connectionsMu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
 	}
 }
 

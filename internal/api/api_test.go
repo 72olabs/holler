@@ -1191,6 +1191,9 @@ func TestUnixAPIHarnessResumeRequiresTakeoverWhilePredecessorIsLive(t *testing.T
 		t.Fatalf("takeover condition not resolved: %+v, err=%v", conditions, err)
 	}
 	instance.Store("hin_live_old")
+	if err := old.Ping(ctx); !errors.Is(err, bus.ErrBindingStale) {
+		t.Fatalf("already-open predecessor connection was not fenced: %v", err)
+	}
 	if stale, err := api.Dial(ctx, socket, api.Identity{
 		Actor: "reviewer", RunID: "old-run", Client: "old-reconnect", Harness: "claude", NameMode: bus.NameModeAllocate,
 		ContinuityHandles: []string{"process:claude:old-run", "session:claude:resume-id"}, ProjectID: "test",
