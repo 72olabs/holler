@@ -109,6 +109,49 @@ func TestCLIProfileAndWho(t *testing.T) {
 	}
 }
 
+func TestCLIAliasLifecycleAndSendResolution(t *testing.T) {
+	ctx := context.Background()
+	socket := startAPIServer(t)
+	target, err := api.Dial(ctx, socket, api.Identity{Actor: "claude-2", RunID: "claude-run", Client: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	if _, err := target.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "claude-2", RunID: "claude-run", Harness: "test", SessionID: "claude-session",
+		ProjectID: "default", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setRaw := invoke(t, ctx, "alias", "set", "--socket", socket, "--idempotency-key", "cli-alias-set",
+		"skillbank", "claude-2")
+	var set bus.AliasMutationResult
+	decode(t, setRaw, &set)
+	if set.Alias.Alias != "skillbank" || set.Alias.Actor != "claude-2" {
+		t.Fatalf("set alias = %+v", set)
+	}
+	resolveRaw := invoke(t, ctx, "alias", "resolve", "--socket", socket, "skillbank")
+	var resolved bus.ActorAlias
+	decode(t, resolveRaw, &resolved)
+	if resolved.Actor != "claude-2" {
+		t.Fatalf("resolved alias = %+v", resolved)
+	}
+	sendRaw := invoke(t, ctx, "send", "--socket", socket, "--actor", "codex", "--run", "codex-run",
+		"--to", "skillbank", "--idempotency-key", "cli-alias-send", "--body", `{"text":"review"}`)
+	var sent bus.SendResult
+	decode(t, sendRaw, &sent)
+	if len(sent.Message.ToActors) != 1 || sent.Message.ToActors[0] != "claude-2" {
+		t.Fatalf("canonical recipients = %v", sent.Message.ToActors)
+	}
+	removeRaw := invoke(t, ctx, "alias", "remove", "--socket", socket,
+		"--idempotency-key", "cli-alias-remove", "skillbank")
+	var removed bus.AliasMutationResult
+	decode(t, removeRaw, &removed)
+	if !removed.Removed {
+		t.Fatalf("remove alias = %+v", removed)
+	}
+}
+
 func TestCLIAdoptInactiveInbox(t *testing.T) {
 	ctx := context.Background()
 	socket := startAPIServer(t)
@@ -803,7 +846,7 @@ func TestCLIProductSetupDryRunUsesHarnessDefaults(t *testing.T) {
 				wantService = "systemd-user"
 			}
 			if result.Applied || result.Harness != test.harness || result.Connector.AttentionMode != test.attention ||
-				result.Daemon.Kind != wantService {
+				result.Connector.NameMode != string(bus.NameModeAllocate) || result.Daemon.Kind != wantService {
 				t.Fatalf("result=%+v", result)
 			}
 			selection, err := os.ReadFile(result.Connector.ConnectorConfigPath)
@@ -811,6 +854,36 @@ func TestCLIProductSetupDryRunUsesHarnessDefaults(t *testing.T) {
 				t.Fatalf("dry run wrote connector selection %s: %s", selection, err)
 			}
 		})
+	}
+}
+
+func TestCLIProductSetupPreservesExistingLegacyNameMode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	configPath := filepath.Join(home, ".holler", "connectors", "claude.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{
+		"schema_version":1,"attention_mode":"hook-long-poll","actor":"claude",
+		"peer":"codex","project":"default","channel":"direct"
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marketplace := filepath.Join(filepath.Clean(filepath.Join("..", "..")), "connectors", "marketplace")
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{
+		"setup", "claude", "--dry-run", "--marketplace", marketplace,
+		"--client-binary", "/usr/bin/true", "--daemon-binary", "/usr/bin/true",
+	}, strings.NewReader(""), &stdout, &stderr)
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+	var result productSetupResult
+	decode(t, stdout.Bytes(), &result)
+	if result.Connector.NameMode != "" {
+		t.Fatalf("legacy name mode changed to %q", result.Connector.NameMode)
 	}
 }
 

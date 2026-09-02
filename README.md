@@ -44,8 +44,9 @@ claude
 codex
 ```
 
-No Holler launcher is required. The default actors are `claude` and `codex`,
-configured as peers.
+No Holler launcher is required. New installations use the actor bases `claude`
+and `codex`, configured as peers, and allocate a distinct suffixed identity when
+another session is already using the base.
 
 ## Try it
 
@@ -87,6 +88,20 @@ The participation skill uses the same `holler_profile` and `holler_who` MCP
 tools when the user assigns a role or says “holler at the coupon reviewer.”
 Profiles are untrusted descriptive hints, never permissions.
 
+Give stable human names to particular sessions without changing their durable
+actor identity:
+
+```sh
+holler alias set skillbank claude-2
+holler alias list
+holler alias resolve skillbank
+```
+
+After that, “holler at skillbank” routes to `claude-2`. Aliases are durable
+operator-controlled pointers. Agents may suggest a mapping, but creating,
+repointing, or removing one requires explicit user approval. Messages are
+stamped with the resolved actor, so a later repoint never changes old mail.
+
 When an allocated actor ends without a continuity tag, a user can explicitly
 hand its inbox to one live replacement:
 
@@ -122,9 +137,12 @@ adopted inboxes. Adoption is never automatic and does not support chains.
   each model-controlled send.
 - Agents can publish advisory role profiles and discover live, ended, or lapsed
   peers, their recent sessions, and orphaned inbox counts.
-- Optional `exact` naming refuses accidental duplicate live actors; optional
-  `allocate` naming creates parallel `actor`, `actor-2`, ... identities and
-  reclaims them after restart from a session or supervisor launch tag.
+- New setups use `allocate` naming to create parallel `actor`, `actor-2`, ...
+  identities and reclaim them after restart from a session or supervisor launch
+  tag. Existing setup selections remain unchanged; `exact` remains available
+  when duplicates must be refused.
+- Durable aliases provide human-friendly routing to one canonical actor, with
+  append-only mutation history and explicit approval for changes.
 - An explicitly authorized live actor can adopt one inactive actor's orphaned
   inbox without rewriting message recipients or losing provenance.
 
@@ -216,8 +234,9 @@ Holler exposes the same message semantics through MCP, CLI, and its framed
 local protocol. A client does not need MCP if it can invoke the CLI or use a
 future SDK.
 
-Existing installations retain legacy actor behavior. For independently
-addressable parallel sessions, opt in during setup:
+New installations default to independently addressable allocated sessions.
+Existing installations retain their configured behavior; migrate explicitly if
+desired:
 
 ```sh
 holler setup codex --name-mode allocate

@@ -24,7 +24,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const migrationVersion = 9
+const migrationVersion = 10
 
 const (
 	migrationRetryWindow = 5 * time.Second
@@ -254,6 +254,7 @@ func (s *Store) applyMigrations(ctx context.Context, conn *sql.Conn) error {
 		{"registrations", "attention_superseded_at_ns", "attention_superseded_at_ns INTEGER"},
 		{"registrations", "working_directory", "working_directory TEXT NOT NULL DEFAULT ''"},
 		{"actor_allocations", "provisional", "provisional INTEGER NOT NULL DEFAULT 0"},
+		{"messages", "requested_recipients_json", "requested_recipients_json BLOB"},
 	} {
 		hasColumn, err := columnExists(ctx, conn, addition.table, addition.column)
 		if err != nil {
@@ -268,6 +269,24 @@ func (s *Store) applyMigrations(ctx context.Context, conn *sql.Conn) error {
 	}
 	if _, err := conn.ExecContext(ctx, `UPDATE registrations SET registered_at_ns = updated_at_ns WHERE registered_at_ns IS NULL`); err != nil {
 		return fmt.Errorf("backfill registration timestamps: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+		INSERT OR IGNORE INTO actor_names(actor, first_seen_at_ns)
+		SELECT actor, ? FROM (
+			SELECT actor FROM actor_allocations WHERE provisional = 0
+			UNION SELECT actor FROM actor_profiles
+			UNION SELECT actor FROM registrations
+			UNION SELECT from_actor AS actor FROM messages
+			UNION SELECT recipient_actor AS actor FROM deliveries
+			UNION SELECT source_actor AS actor FROM actor_adoptions
+			UNION SELECT adopting_actor AS actor FROM actor_adoptions
+		) WHERE actor <> ''`, s.now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("backfill canonical actor names: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT OR IGNORE INTO actor_names(actor, first_seen_at_ns) VALUES ('operator', ?)`,
+		s.now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("reserve operator actor name: %w", err)
 	}
 	// Process-only actor reservations belong to live API connections. No such
 	// connection survives a daemon restart, so carrying them forward would leak
@@ -333,6 +352,12 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 	if err := assertActorNotAdoptedTx(ctx, tx, req.FromActor); err != nil {
 		return bus.SendResult{}, err
 	}
+	req.RequestedToActors = append([]string(nil), req.ToActors...)
+	resolved, resolutions, err := resolveRecipientsTx(ctx, tx, req.ToActors)
+	if err != nil {
+		return bus.SendResult{}, err
+	}
+	req.ToActors = resolved
 
 	if req.InReplyTo != "" {
 		parent, err := getMessageByIDTx(ctx, tx, req.InReplyTo)
@@ -367,38 +392,43 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 		return bus.SendResult{}, fmt.Errorf("generate message id: %w", err)
 	}
 	message := bus.Message{
-		ID:              messageID,
-		SchemaVersion:   bus.SchemaVersion,
-		IdempotencyKey:  req.IdempotencyKey,
-		ProjectID:       req.ProjectID,
-		ChannelID:       req.ChannelID,
-		ThreadID:        req.ThreadID,
-		FromActor:       req.FromActor,
-		FromRun:         req.FromRun,
-		FromRole:        req.FromRole,
-		ToActors:        append([]string(nil), req.ToActors...),
-		Type:            req.Type,
-		DeliveryRequest: req.DeliveryRequest,
-		InReplyTo:       req.InReplyTo,
-		Body:            append(json.RawMessage(nil), req.Body...),
-		CreatedAt:       now,
-		ExpiresAt:       req.ExpiresAt,
+		ID:                messageID,
+		SchemaVersion:     bus.SchemaVersion,
+		IdempotencyKey:    req.IdempotencyKey,
+		ProjectID:         req.ProjectID,
+		ChannelID:         req.ChannelID,
+		ThreadID:          req.ThreadID,
+		FromActor:         req.FromActor,
+		FromRun:           req.FromRun,
+		FromRole:          req.FromRole,
+		ToActors:          append([]string(nil), req.ToActors...),
+		Type:              req.Type,
+		DeliveryRequest:   req.DeliveryRequest,
+		InReplyTo:         req.InReplyTo,
+		Body:              append(json.RawMessage(nil), req.Body...),
+		CreatedAt:         now,
+		ExpiresAt:         req.ExpiresAt,
+		RequestedToActors: append([]string(nil), req.RequestedToActors...),
 	}
 
 	var expires interface{}
 	if req.ExpiresAt != nil {
 		expires = req.ExpiresAt.UnixNano()
 	}
+	requestedRecipients, err := json.Marshal(req.RequestedToActors)
+	if err != nil {
+		return bus.SendResult{}, fmt.Errorf("encode requested recipients: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO messages(
 			message_id, schema_version, idempotency_key, project_id, channel_id, thread_id,
 			from_actor, from_run, from_role, message_type, delivery_request, in_reply_to, body,
-			created_at_ns, expires_at_ns
-		) VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?, ?, ?)`,
+			created_at_ns, expires_at_ns, requested_recipients_json
+		) VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?, ?, ?, ?)`,
 		message.ID, message.SchemaVersion, message.IdempotencyKey, message.ProjectID,
 		message.ChannelID, message.ThreadID, message.FromActor, message.FromRun,
 		message.FromRole, message.Type, message.DeliveryRequest, message.InReplyTo, []byte(message.Body),
-		message.CreatedAt.UnixNano(), expires); err != nil {
+		message.CreatedAt.UnixNano(), expires, requestedRecipients); err != nil {
 		return bus.SendResult{}, fmt.Errorf("insert message: %w", err)
 	}
 	for _, recipient := range message.ToActors {
@@ -425,6 +455,9 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 	provenance["from_run"] = message.FromRun
 	provenance["type"] = message.Type
 	provenance["recipients"] = message.ToActors
+	if len(resolutions) > 0 {
+		provenance["alias_resolution"] = resolutions
+	}
 	if err := s.appendEventTx(ctx, tx, message.ProjectID, "durable", "message.sent",
 		message.ID, message.FromActor, provenance, now); err != nil {
 		return bus.SendResult{}, err
@@ -903,14 +936,17 @@ func getMessageByIDTx(ctx context.Context, tx *sql.Tx, messageID string) (bus.Me
 	var threadID, fromRole sql.NullString
 	var createdNS int64
 	var expiresNS sql.NullInt64
+	var requestedRecipients []byte
 	if err := tx.QueryRowContext(ctx, `
 		SELECT message_id, schema_version, idempotency_key, project_id, channel_id,
 		       thread_id, from_actor, from_run, from_role, message_type,
-		       delivery_request, COALESCE(in_reply_to, ''), body, created_at_ns, expires_at_ns
+		       delivery_request, COALESCE(in_reply_to, ''), body, created_at_ns, expires_at_ns,
+		       requested_recipients_json
 		FROM messages WHERE message_id = ?`, messageID).Scan(
 		&message.ID, &message.SchemaVersion, &message.IdempotencyKey, &message.ProjectID,
 		&message.ChannelID, &threadID, &message.FromActor, &message.FromRun, &fromRole,
-		&message.Type, &message.DeliveryRequest, &message.InReplyTo, &body, &createdNS, &expiresNS); err != nil {
+		&message.Type, &message.DeliveryRequest, &message.InReplyTo, &body, &createdNS, &expiresNS,
+		&requestedRecipients); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return bus.Message{}, bus.ErrNotFound
 		}
@@ -937,6 +973,11 @@ func getMessageByIDTx(ctx context.Context, tx *sql.Tx, messageID string) (bus.Me
 	}
 	if err := rows.Err(); err != nil {
 		return bus.Message{}, fmt.Errorf("iterate recipients: %w", err)
+	}
+	if len(requestedRecipients) > 0 {
+		if err := json.Unmarshal(requestedRecipients, &message.RequestedToActors); err != nil {
+			return bus.Message{}, fmt.Errorf("decode requested recipients: %w", err)
+		}
 	}
 	return message, nil
 }

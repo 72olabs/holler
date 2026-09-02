@@ -11,7 +11,7 @@ For ordinary first-time setup, use the opinionated product command:
 holler setup claude
 ```
 
-It defaults to actor `claude`, peer `codex`, project `default`, and live `hook-long-poll` attention. It discovers the installed Holler marketplace, installs or refreshes the plugin, merges only the frozen Holler MCP allowlist and plugin options into Claude user settings, records the absolute Holler executable and connector identity, installs the per-user `hollerd` service, starts it, and verifies the socket. Existing connector identity wins on a rerun. The command previews exact paths and actions and asks for confirmation; use `--dry-run` for a non-mutating plan or `--yes` only when the user explicitly authorizes unattended application.
+It defaults to allocated actor base `claude`, peer `codex`, project `default`, and live `hook-long-poll` attention. It discovers the installed Holler marketplace, installs or refreshes the plugin, merges only the frozen Holler MCP allowlist and plugin options into Claude user settings, records the absolute Holler executable and connector identity, installs the per-user `hollerd` service, starts it, and verifies the socket. Existing connector identity—including legacy naming mode—wins on a rerun. The command previews exact paths and actions and asks for confirmation; use `--dry-run` for a non-mutating plan or `--yes` only when the user explicitly authorizes unattended application.
 
 Rerun setup after upgrading Holler. Before uninstalling the package, use `holler setup claude --remove`; the command removes only Holler-managed Claude state and leaves the durable database intact.
 
@@ -36,6 +36,6 @@ holler connector launch --harness claude --actor <actor> -- [additional claude a
 
 The launcher creates a fresh random run identity and supplies the selected adapter. Explicit launcher values always override persisted plain-session defaults.
 
-Naming is opt-in so existing installations retain their current behavior. Use `--name-mode exact` when one durable actor must refuse a second live run; add launcher-only `--takeover` to supersede that run deliberately. Use `--name-mode allocate` when concurrent sessions should receive `actor`, `actor-2`, and so on. Add `--launch-tag <stable-tag>` when a supervisor needs a restarted process to reclaim its previous allocation. Never generate takeover from an agent tool call.
+New product installations use allocated naming so concurrent sessions receive `actor`, `actor-2`, and so on; rerunning setup preserves an existing legacy selection. Use `--name-mode exact` when one durable actor must refuse a second live run and add launcher-only `--takeover` only for a deliberate supersession. Add `--launch-tag <stable-tag>` when a supervisor needs a restarted process to reclaim its previous allocation. Never generate takeover from an agent tool call.
 
 Treat actor identity as an inbox identity, not a display name. In legacy mode concurrent sessions using one actor are competing consumers and the first successful claim owns each message. Prefer allocate mode when the user expects each session to be independently addressable.

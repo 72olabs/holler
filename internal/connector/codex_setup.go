@@ -357,7 +357,11 @@ func codexPolicy(pluginID string) string {
 	}
 	builder.WriteString("]\n\n")
 	for _, tool := range manifest.Tools {
-		fmt.Fprintf(&builder, "[plugins.%q.mcp_servers.%s.tools.%s]\napproval_mode = \"approve\"\n", pluginID, manifest.MCPServerName, tool.Name)
+		approval := "approve"
+		if tool.RequiresExplicitApproval {
+			approval = "prompt"
+		}
+		fmt.Fprintf(&builder, "[plugins.%q.mcp_servers.%s.tools.%s]\napproval_mode = %q\n", pluginID, manifest.MCPServerName, tool.Name, approval)
 	}
 	return builder.String()
 }
@@ -483,7 +487,11 @@ func codexPluginPolicyAuthorizes(settings map[string]interface{}, pluginID strin
 				approval = value
 			}
 		}
-		if approval != "approve" {
+		expected := "approve"
+		if tool.RequiresExplicitApproval {
+			expected = "prompt"
+		}
+		if approval != expected {
 			return false
 		}
 	}

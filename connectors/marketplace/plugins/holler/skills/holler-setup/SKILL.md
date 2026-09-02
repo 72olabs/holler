@@ -11,7 +11,7 @@ For ordinary first-time setup, use the opinionated product command:
 holler setup codex
 ```
 
-It defaults to actor `codex`, peer `claude`, project `default`, and live `native-queue` attention. It discovers the installed Holler marketplace, installs or refreshes the plugin, preserves and extends Codex user configuration with only the frozen Holler MCP allowlist, records absolute executable paths and connector identity, installs the per-user `hollerd` service, starts it, and verifies the socket. Existing connector identity wins on a rerun. The command previews exact paths and actions and asks for confirmation; use `--dry-run` for a non-mutating plan or `--yes` only when the user explicitly authorizes unattended application.
+It defaults to allocated actor base `codex`, peer `claude`, project `default`, and live `native-queue` attention. It discovers the installed Holler marketplace, installs or refreshes the plugin, preserves and extends Codex user configuration with only the frozen Holler MCP allowlist, records absolute executable paths and connector identity, installs the per-user `hollerd` service, starts it, and verifies the socket. Existing connector identity—including legacy naming mode—wins on a rerun. The command previews exact paths and actions and asks for confirmation; use `--dry-run` for a non-mutating plan or `--yes` only when the user explicitly authorizes unattended application.
 
 Codex owns executable-hook trust. On the first turn after installation or a package update, have the user inspect and trust the exact packaged `SessionStart` and `SessionEnd` commands and content hash when Codex prompts. Do not manipulate an internal trust store or recommend `--dangerously-bypass-hook-trust` for a normal session. Once trusted, normal `codex` launches reuse the connector automatically. Codex runs `SessionStart` on the first submitted turn, so native-queue addressability begins after that turn rather than when an untouched TUI opens.
 
@@ -36,7 +36,7 @@ holler connector launch --harness codex --actor <actor> -- [additional codex arg
 
 The launcher supplies a fresh random run, the reviewed named profile, working tree, connector identity, and attention selection. Explicit launcher values always override persisted plain-session defaults.
 
-Naming is opt-in so existing installations retain their current behavior. Use `--name-mode exact` when one durable actor must refuse a second live run; add launcher-only `--takeover` to supersede that run deliberately. Use `--name-mode allocate` when concurrent sessions should receive `actor`, `actor-2`, and so on. Add `--launch-tag <stable-tag>` when a supervisor needs a restarted process to reclaim its previous allocation. Never generate takeover from an agent tool call.
+New product installations use allocated naming so concurrent sessions receive `actor`, `actor-2`, and so on; rerunning setup preserves an existing legacy selection. Use `--name-mode exact` when one durable actor must refuse a second live run and add launcher-only `--takeover` only for a deliberate supersession. Add `--launch-tag <stable-tag>` when a supervisor needs a restarted process to reclaim its previous allocation. Never generate takeover from an agent tool call.
 
 Run the doctor command reported by setup when diagnosis or certification is requested. `CONFIGURED` proves static setup only. A `live-review` connector is `READY` only after a real post-registration native-queue wake is fetched, claimed, and acknowledged. `startup-only` can satisfy only `async-peer`.
 

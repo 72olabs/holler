@@ -44,6 +44,9 @@ func TestClaudeSetupApplyPreservesSettingsAndWritesSelection(t *testing.T) {
 	configPath := filepath.Join(directory, "claude.json")
 	manifest, _ := connector.Manifest("claude")
 	adoptTool := manifest.ClaudeToolPrefix + "holler_adopt"
+	aliasSetTool := manifest.ClaudeToolPrefix + "holler_alias_set"
+	aliasRemoveTool := manifest.ClaudeToolPrefix + "holler_alias_remove"
+	aliasListTool := manifest.ClaudeToolPrefix + "holler_aliases"
 	if err := os.WriteFile(settings, []byte(`{"theme":"dark","permissions":{"allow":["Read",`+strconv.Quote(adoptTool)+`]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +87,11 @@ func TestClaudeSetupApplyPreservesSettingsAndWritesSelection(t *testing.T) {
 	asked, _ := json.Marshal(permissions["ask"])
 	if strings.Contains(string(allowed), adoptTool) || !strings.Contains(string(asked), adoptTool) {
 		t.Fatalf("adoption must require explicit approval: allow=%s ask=%s", allowed, asked)
+	}
+	if !strings.Contains(string(allowed), aliasListTool) || strings.Contains(string(allowed), aliasSetTool) ||
+		strings.Contains(string(allowed), aliasRemoveTool) || !strings.Contains(string(asked), aliasSetTool) ||
+		!strings.Contains(string(asked), aliasRemoveTool) {
+		t.Fatalf("alias permissions: allow=%s ask=%s", allowed, asked)
 	}
 	loaded, err := connector.LoadClaudeConnectorConfig(configPath)
 	if err != nil || loaded.AttentionMode != connector.AttentionHookLongPoll || loaded.NameMode != "allocate" || loaded.Actor != "claude-review" {
@@ -410,7 +418,9 @@ func TestCodexSetupDryRunAndApplyWriteDedicatedProfile(t *testing.T) {
 	}
 	if len(commands) != 1 || commands[0] != "/usr/bin/true plugin add "+connector.DefaultCodexPluginID ||
 		!strings.Contains(string(raw), "default_tools_approval_mode = \"approve\"") ||
-		!strings.Contains(string(raw), "bus_inbox") {
+		!strings.Contains(string(raw), "bus_inbox") ||
+		!strings.Contains(string(raw), "tools.holler_adopt]\napproval_mode = \"prompt\"") ||
+		!strings.Contains(string(raw), "tools.holler_alias_set]\napproval_mode = \"prompt\"") {
 		t.Fatalf("commands=%v policy=%s", commands, raw)
 	}
 	var parsed map[string]interface{}
@@ -917,6 +927,9 @@ func TestOpenCodeSetupDryRunAndApplyInstallIsolatedPackage(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"holler_bus_inbox": "allow"`) ||
 		!strings.Contains(string(raw), `"holler_holler_adopt": "ask"`) ||
+		!strings.Contains(string(raw), `"holler_holler_aliases": "allow"`) ||
+		!strings.Contains(string(raw), `"holler_holler_alias_set": "ask"`) ||
+		!strings.Contains(string(raw), `"holler_holler_alias_remove": "ask"`) ||
 		!strings.Contains(string(raw), filepath.Join(installRoot, "scripts", "holler")) {
 		t.Fatalf("profile=%s", raw)
 	}

@@ -8,7 +8,7 @@
       "name": "holler",
       "displayName": "Holler",
       "description": "Durable local communication with hook-based live attention for terminal agents.",
-      "version": "0.5.1",
+      "version": "0.6.0",
       "source": "./plugins/claude-holler"
     }
   ]

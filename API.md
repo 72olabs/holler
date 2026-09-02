@@ -91,8 +91,9 @@ The daemon binds the connection to that actor and run, and returns its own build
 
 Build metadata is an additive protocol-v1 hello field. A new client first sends it, then falls back once to the legacy hello only when an older strict daemon explicitly rejects the unknown `build` field. This keeps ordinary operations available during a daemon-first rolling upgrade, but the legacy connection has no daemon build identity and cannot produce a `READY` certificate. Restart `hollerd` before expecting certification from updated clients.
 
-Holler 0.2 clients may explicitly negotiate actor allocation by adding capability
-`actor-allocation-v1`, `name_mode`, and continuity metadata to `hello`:
+Holler clients may explicitly negotiate actor allocation by adding capability
+`actor-allocation-v1`, `name_mode`, and continuity metadata to `hello`. Current
+clients also advertise `actor-alias-v1`:
 
 ```json
 {
@@ -100,7 +101,7 @@ Holler 0.2 clients may explicitly negotiate actor allocation by adding capabilit
   "client": "codex-connector/0.2",
   "actor": "codex-reviewer",
   "run_id": "run-07",
-  "capabilities": ["actor-allocation-v1"],
+  "capabilities": ["actor-allocation-v1", "actor-alias-v1"],
   "name_mode": "allocate",
   "continuity_handles": ["session:codex:thread-07", "launch:codex:tab-07"],
   "project_id": "coupon"
@@ -118,6 +119,11 @@ capability. Once a run has been superseded, the daemon permanently refuses that
 run from reclaiming the superseded actor through continuity, returning the
 non-retryable `binding_stale` error. Ended or lapsed runs may still be resumed
 by a successor run.
+
+An active alias reserves its name in the same namespace as canonical actors.
+Allocation skips a reserved alias, and any handshake that tries to bind an
+alias as an actor fails with `alias_conflict`. This prevents an alias from
+silently turning into a second inbox.
 
 Adoption is a terminal transfer of the source actor name. An `exact` hello for
 an adopted source returns `actor_adopted`. A plain protocol connection may
@@ -153,6 +159,10 @@ This implemented slice does not yet perform the Ed25519 challenge-response speci
 - `set_actor_profile {project_id, role_text, accepts}`
 - `who {limit}`
 - `adopt_actor {source_actor, project_id, idempotency_key}`
+- `set_alias {alias, actor, project_id, idempotency_key}`
+- `remove_alias {alias, project_id, idempotency_key}`
+- `list_aliases {}`
+- `resolve_alias {alias}`
 - `register_session <RegistrationRequest>`
 - `heartbeat_registrations {lease_ns}`
 - `live_registrations {actor}`
@@ -194,6 +204,21 @@ targets both the adopter and an adopted source, the adopter's direct delivery
 wins. The source delivery remains an immutable audit row but is not separately
 claimable.
 
+`set_alias` creates or repoints one durable human-friendly name to an existing
+canonical actor. `remove_alias` retires the pointer; both operations stamp the
+connection-bound actor and run as the updater, require a stable idempotency key,
+append immutable history and an audit event, and are exposed by packaged agent
+connectors only behind explicit user approval. `list_aliases` and
+`resolve_alias` are read-only. Alias targets may be offline because their inbox
+is durable. Alias names cannot shadow any known actor, and actor allocation
+cannot mint a reserved alias.
+
+`send` resolves every alias inside its transaction before creating the message
+and delivery rows. The public message records only canonical `to_actors`.
+Holler privately retains the original recipient expression for idempotency
+comparison, so retrying the same send after an alias is repointed returns the
+original message rather than retargeting it.
+
 For every new send whose delivery request asks for attention, the same transaction creates a durable notification-outbox row. `hollerd` dispatches it asynchronously after commit and retries transient failures without delaying the send response. The response reports `notification_state: "pending"`; outcomes are operational events, including `delivery.notification_abandoned` after five failed attempts. A wake failure does not convert a committed send into an RPC error, and an idempotent duplicate does not create a second outbox job. If no session is registered, startup hydration—not a delayed notification job—remains the durable fallback.
 
 The reference Go client reconnects and repeats the handshake after a daemon
@@ -207,6 +232,8 @@ operation deadlines.
 - `holler who` lists known actors; `holler profile` publishes the caller's
   advisory role metadata.
 - `holler adopt` performs an explicitly authorized inactive-inbox handoff.
+- `holler alias set|list|resolve|remove` manages durable actor aliases through
+  the daemon API.
 - `holler mcp` translates MCP stdio calls into this API.
 - `holler hook` and `holler session-end` use this API for lifecycle integration.
 - `holler connector manifest|doctor|certify` expose package identity, deterministic diagnostics, and real-client readiness evidence.

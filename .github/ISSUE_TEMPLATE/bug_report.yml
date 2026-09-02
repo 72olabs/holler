@@ -12,7 +12,7 @@ body:
     attributes:
       label: Holler version
       description: Include the tag and clean build identity reported by the binary or daemon.
-      placeholder: v0.5.1
+      placeholder: v0.6.0
     validations:
       required: true
   - type: dropdown

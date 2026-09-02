@@ -945,6 +945,56 @@ func TestMigrationV8AddsActorAdoptionsWithoutLosingMessages(t *testing.T) {
 	}
 }
 
+func TestMigrationV9AddsAliasesWithoutLosingMessages(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, err := db.Send(ctx, testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE actor_alias_history`,
+		`DROP TABLE actor_aliases`,
+		`DROP TABLE actor_names`,
+		`ALTER TABLE messages DROP COLUMN requested_recipients_json`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (9, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	retry, err := db.Send(ctx, testRequest())
+	if err != nil || !retry.Duplicate || retry.Message.ID != sent.Message.ID {
+		t.Fatalf("legacy send retry = %+v, err = %v", retry, err)
+	}
+	if _, err := db.SetAlias(ctx, bus.AliasSetRequest{
+		Alias: "review", Actor: "reviewer", UpdatedByActor: "operator", UpdatedByRun: "operator-run",
+		ProjectID: "migration", IdempotencyKey: "migration-alias",
+	}); err != nil {
+		t.Fatalf("set alias after migration: %v", err)
+	}
+}
+
 func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 	db, path := openTestStore(t)
 	if _, err := db.RegisterSession(context.Background(), bus.RegistrationRequest{

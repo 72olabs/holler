@@ -36,6 +36,9 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 	}
 	switch req.NameMode {
 	case bus.NameModeExact:
+		if err := assertActorNameNotAliasTx(ctx, tx, req.RequestedActor); err != nil {
+			return bus.ActorBindResult{}, err
+		}
 		if err := assertActorNotAdoptedTx(ctx, tx, req.RequestedActor); err != nil {
 			return bus.ActorBindResult{}, err
 		}
@@ -158,10 +161,46 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			}
 		}
 	}
+	if !result.Provisional {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO actor_names(actor, first_seen_at_ns) VALUES (?, ?)`,
+			result.Actor, now.UnixNano()); err != nil {
+			return bus.ActorBindResult{}, fmt.Errorf("reserve bound actor name: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return bus.ActorBindResult{}, fmt.Errorf("commit actor binding: %w", err)
 	}
 	return result, nil
+}
+
+// ReserveActorName makes a legacy connection's canonical actor visible to the
+// alias namespace without adding it to discovery or fabricating presence.
+func (s *Store) ReserveActorName(ctx context.Context, actor string) error {
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return &bus.ValidationError{Field: "actor", Problem: "is required"}
+	}
+	if err := bus.ValidateTextIdentifier("actor", actor, 128); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin actor name reservation: %w", err)
+	}
+	defer tx.Rollback()
+	if err := assertActorNameNotAliasTx(ctx, tx, actor); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO actor_names(actor, first_seen_at_ns) VALUES (?, ?)`,
+		actor, s.now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("reserve actor name: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit actor name reservation: %w", err)
+	}
+	return nil
 }
 
 // FinalizeActorAllocation turns a process-only reservation into a visible,
@@ -196,6 +235,10 @@ func (s *Store) finalizeActorAllocationTx(ctx context.Context, tx *sql.Tx, actor
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE actor_allocations SET provisional = 0 WHERE actor = ? AND provisional = 1`, actor); err != nil {
 		return false, fmt.Errorf("finalize actor allocation: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO actor_names(actor, first_seen_at_ns) VALUES (?, ?)`, actor, now.UnixNano()); err != nil {
+		return false, fmt.Errorf("reserve finalized actor name: %w", err)
 	}
 	if err := s.appendEventTx(ctx, tx, projectID, "durable", "actor.minted", "", actor,
 		map[string]interface{}{
@@ -482,6 +525,10 @@ func boolInt(value bool) int {
 }
 
 func actorExistsTx(ctx context.Context, tx *sql.Tx, actor string) (bool, error) {
+	return actorNameReservedTx(ctx, tx, actor)
+}
+
+func actorNameReservedTx(ctx context.Context, tx *sql.Tx, actor string) (bool, error) {
 	var exists int
 	err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS(
@@ -490,11 +537,44 @@ func actorExistsTx(ctx context.Context, tx *sql.Tx, actor string) (bool, error) 
 			UNION ALL SELECT 1 FROM registrations WHERE actor = ?
 			UNION ALL SELECT 1 FROM messages WHERE from_actor = ?
 			UNION ALL SELECT 1 FROM deliveries WHERE recipient_actor = ?
-		)`, actor, actor, actor, actor, actor).Scan(&exists)
+			UNION ALL SELECT 1 FROM actor_aliases WHERE alias = ?
+			UNION ALL SELECT 1 FROM actor_names WHERE actor = ?
+			UNION ALL SELECT 1 FROM actor_alias_history WHERE updated_by_actor = ?
+		)`, actor, actor, actor, actor, actor, actor, actor, actor).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("check actor allocation: %w", err)
 	}
 	return exists != 0, nil
+}
+
+func actorIdentityExistsTx(ctx context.Context, tx *sql.Tx, actor string) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM actor_allocations WHERE actor = ?
+			UNION ALL SELECT 1 FROM actor_profiles WHERE actor = ?
+			UNION ALL SELECT 1 FROM registrations WHERE actor = ?
+			UNION ALL SELECT 1 FROM messages WHERE from_actor = ?
+			UNION ALL SELECT 1 FROM deliveries WHERE recipient_actor = ?
+			UNION ALL SELECT 1 FROM actor_adoptions WHERE source_actor = ? OR adopting_actor = ?
+			UNION ALL SELECT 1 FROM actor_alias_history WHERE updated_by_actor = ?
+			UNION ALL SELECT 1 FROM actor_names WHERE actor = ?
+		)`, actor, actor, actor, actor, actor, actor, actor, actor, actor).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check actor identity: %w", err)
+	}
+	return exists != 0, nil
+}
+
+func assertActorNameNotAliasTx(ctx context.Context, tx *sql.Tx, actor string) error {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_aliases WHERE alias = ?)`, actor).Scan(&exists); err != nil {
+		return fmt.Errorf("check alias reservation: %w", err)
+	}
+	if exists != 0 {
+		return fmt.Errorf("%s: %w", actor, bus.ErrAliasConflict)
+	}
+	return nil
 }
 
 func runSupersededForActorTx(ctx context.Context, tx *sql.Tx, actor, runID string) (bool, error) {

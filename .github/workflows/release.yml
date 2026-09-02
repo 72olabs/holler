@@ -20,6 +20,30 @@ jobs:
             echo "RELEASE-NOTES.md does not match tag ${GITHUB_REF_NAME}" >&2
             exit 1
           fi
+          if ! grep -Fqx "const ConnectorVersion = \"${version}\"" internal/connector/manifest.go; then
+            echo "binary connector version does not match tag ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          for manifest in connectors/marketplace/plugins/*/connector.json; do
+            if ! jq -e --arg version "$version" '.connector_version == $version' "$manifest" >/dev/null; then
+              echo "$manifest does not match tag ${GITHUB_REF_NAME}" >&2
+              exit 1
+            fi
+          done
+          for plugin in \
+            connectors/marketplace/plugins/holler/.codex-plugin/plugin.json \
+            connectors/marketplace/plugins/claude-holler/.claude-plugin/plugin.json; do
+            if ! jq -e --arg version "$version" '.version == $version' "$plugin" >/dev/null; then
+              echo "$plugin does not match tag ${GITHUB_REF_NAME}" >&2
+              exit 1
+            fi
+          done
+          if ! jq -e --arg version "$version" \
+            '.plugins[] | select(.name == "holler") | .version == $version' \
+            connectors/marketplace/.claude-plugin/marketplace.json >/dev/null; then
+            echo "Claude marketplace version does not match tag ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
 
   build:
     needs: metadata
