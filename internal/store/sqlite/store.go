@@ -419,6 +419,12 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 		}
 	}
 	req.ToActors = resolved
+	for _, actor := range append([]string{req.FromActor}, req.ToActors...) {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO actor_names(actor, first_seen_at_ns) VALUES (?, ?)`, actor, now.UnixNano()); err != nil {
+			return bus.SendResult{}, fmt.Errorf("reserve message actor name %s: %w", actor, err)
+		}
+	}
 	for _, recipient := range req.ToActors {
 		archived, archiveErr := s.actorArchivedTx(ctx, tx, recipient)
 		if archiveErr != nil {

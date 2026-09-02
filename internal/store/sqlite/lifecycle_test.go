@@ -101,6 +101,22 @@ func TestActorArchiveRequiresPreflightPreservesUnreadAndRestores(t *testing.T) {
 	}
 }
 
+func TestDirectSendRegistersRecipientForLifecycle(t *testing.T) {
+	db, _ := openTestStore(t)
+	ctx := context.Background()
+	request := testRequest()
+	request.ToActors = []string{"mailbox-only"}
+	request.IdempotencyKey = "mailbox-only-send"
+	result, err := db.Send(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight, err := db.ArchivePreflight(ctx, "mailbox-only", 10)
+	if err != nil || len(preflight.Unread) != 1 || preflight.Unread[0].MessageID != result.Message.ID {
+		t.Fatalf("mailbox lifecycle preflight = %+v, err=%v", preflight, err)
+	}
+}
+
 func TestOperatorLeaseRevocationRequeuesAndFencesLateAck(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)}
 	db, _ := openTestStore(t, store.WithClock(clock.Now))
