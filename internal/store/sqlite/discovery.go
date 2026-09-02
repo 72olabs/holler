@@ -166,6 +166,14 @@ func currentActorProfileTx(ctx context.Context, tx *sql.Tx, actor string) (bus.A
 // Profile text and all other actor-authored metadata must be treated as
 // untrusted descriptive input by callers.
 func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) {
+	return s.who(ctx, limit, false)
+}
+
+func (s *Store) WhoIncludingArchived(ctx context.Context, limit int) (bus.ActorDirectory, error) {
+	return s.who(ctx, limit, true)
+}
+
+func (s *Store) who(ctx context.Context, limit int, includeArchived bool) (bus.ActorDirectory, error) {
 	if limit <= 0 {
 		limit = defaultWhoLimit
 	}
@@ -341,7 +349,7 @@ func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) 
 			FROM deliveries d
 			LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
 		)
-		SELECT c.effective_actor, COUNT(*)
+		SELECT c.effective_actor, COUNT(*), MIN(m.created_at_ns)
 		FROM candidates c JOIN messages m ON m.message_id = c.message_id
 		WHERE c.preference = 1
 		  AND (c.state = ? OR (c.state = ? AND c.lease_expires_at_ns <= ?))
@@ -353,18 +361,111 @@ func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) 
 	for unclaimedRows.Next() {
 		var actor string
 		var count int
-		if err := unclaimedRows.Scan(&actor, &count); err != nil {
+		var oldestNS int64
+		if err := unclaimedRows.Scan(&actor, &count, &oldestNS); err != nil {
 			unclaimedRows.Close()
 			return bus.ActorDirectory{}, fmt.Errorf("scan actor unclaimed messages: %w", err)
 		}
-		entryFor(actor).UnclaimedMessages = count
+		entry := entryFor(actor)
+		oldest := time.Unix(0, oldestNS).UTC()
+		age := now.Sub(oldest) / time.Second
+		if age < 0 {
+			age = 0
+		}
+		entry.UnclaimedMessages = count
+		entry.OldestUnreadAt = &oldest
+		ageSeconds := int64(age)
+		entry.OldestUnreadAgeSeconds = &ageSeconds
 	}
 	if err := unclaimedRows.Close(); err != nil {
 		return bus.ActorDirectory{}, fmt.Errorf("close actor unclaimed rows: %w", err)
 	}
 
+	claimRows, err := tx.QueryContext(ctx, `
+		WITH candidates AS (
+			SELECT d.message_id, d.state, d.lease_expires_at_ns,
+			       COALESCE(a.adopting_actor, d.recipient_actor) AS effective_actor,
+			       ROW_NUMBER() OVER (
+				   PARTITION BY d.message_id, COALESCE(a.adopting_actor, d.recipient_actor)
+				   ORDER BY CASE WHEN a.source_actor IS NULL THEN 0 ELSE 1 END, d.recipient_actor
+			       ) AS preference
+			FROM deliveries d
+			LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
+		)
+		SELECT c.effective_actor, COUNT(*), MIN(c.lease_expires_at_ns)
+		FROM candidates c JOIN messages m ON m.message_id = c.message_id
+		WHERE c.preference = 1
+		  AND c.state = ?
+		  AND c.lease_expires_at_ns > ?
+		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)
+		GROUP BY c.effective_actor`, bus.DeliveryClaimed, now.UnixNano(), now.UnixNano())
+	if err != nil {
+		return bus.ActorDirectory{}, fmt.Errorf("query actor active claims: %w", err)
+	}
+	for claimRows.Next() {
+		var actor string
+		var count int
+		var earliestNS int64
+		if err := claimRows.Scan(&actor, &count, &earliestNS); err != nil {
+			claimRows.Close()
+			return bus.ActorDirectory{}, fmt.Errorf("scan actor active claims: %w", err)
+		}
+		entry := entryFor(actor)
+		earliest := time.Unix(0, earliestNS).UTC()
+		entry.ActiveClaims = count
+		entry.EarliestLeaseExpiryAt = &earliest
+	}
+	if err := claimRows.Close(); err != nil {
+		return bus.ActorDirectory{}, fmt.Errorf("close actor active claim rows: %w", err)
+	}
+
+	conditionRows, err := tx.QueryContext(ctx, `
+		SELECT subject,
+		       CASE WHEN state = ? AND snoozed_until_ns IS NOT NULL AND snoozed_until_ns <= ?
+		            THEN ? ELSE state END
+		FROM operator_conditions
+		WHERE condition_kind = 'stale_unread' AND state <> ?`,
+		bus.ConditionActiveSnoozed, now.UnixNano(), bus.ConditionActiveVisible, bus.ConditionResolved)
+	if err != nil {
+		return bus.ActorDirectory{}, fmt.Errorf("query actor stale unread conditions: %w", err)
+	}
+	for conditionRows.Next() {
+		var actor string
+		var state bus.ConditionState
+		if err := conditionRows.Scan(&actor, &state); err != nil {
+			conditionRows.Close()
+			return bus.ActorDirectory{}, fmt.Errorf("scan actor stale unread condition: %w", err)
+		}
+		entryFor(actor).StaleUnreadCondition = state
+	}
+	if err := conditionRows.Close(); err != nil {
+		return bus.ActorDirectory{}, fmt.Errorf("close actor stale unread condition rows: %w", err)
+	}
+	archived := make(map[string]struct{})
+	lifecycleRows, err := tx.QueryContext(ctx, `SELECT actor FROM actor_lifecycle WHERE state = 'archived'`)
+	if err != nil {
+		return bus.ActorDirectory{}, fmt.Errorf("query archived actors: %w", err)
+	}
+	for lifecycleRows.Next() {
+		var actor string
+		if err := lifecycleRows.Scan(&actor); err != nil {
+			_ = lifecycleRows.Close()
+			return bus.ActorDirectory{}, err
+		}
+		archived[actor] = struct{}{}
+		if includeArchived {
+			entryFor(actor).State = "archived"
+		}
+	}
+	if err := lifecycleRows.Close(); err != nil {
+		return bus.ActorDirectory{}, err
+	}
+
 	actors := make([]bus.ActorDirectoryEntry, 0, len(entries))
-	for _, entry := range entries {
+	for actor, entry := range entries {
+		if _, isArchived := archived[actor]; isArchived && !includeArchived {
+			continue
+		}
 		actors = append(actors, *entry)
 	}
 	sort.Slice(actors, func(i, j int) bool {
@@ -393,6 +494,8 @@ func actorStateRank(state string) int {
 		return 1
 	case "lapsed":
 		return 2
+	case "archived":
+		return 4
 	default:
 		return 3
 	}

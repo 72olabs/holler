@@ -119,6 +119,17 @@ CREATE TABLE IF NOT EXISTS continuity_bindings (
 CREATE INDEX IF NOT EXISTS continuity_bindings_actor
     ON continuity_bindings(actor);
 
+CREATE TABLE IF NOT EXISTS harness_instance_bindings (
+    handle TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    created_at_ns INTEGER NOT NULL,
+    updated_at_ns INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS harness_instance_bindings_actor
+    ON harness_instance_bindings(actor);
+
 CREATE TABLE IF NOT EXISTS actor_adoptions (
     source_actor TEXT PRIMARY KEY,
     adopting_actor TEXT NOT NULL,
@@ -159,6 +170,19 @@ CREATE TABLE IF NOT EXISTS actor_alias_history (
 CREATE INDEX IF NOT EXISTS actor_alias_history_updated
     ON actor_alias_history(updated_at_ns, alias, revision);
 
+CREATE TABLE IF NOT EXISTS actor_alias_claim_requests (
+    updated_by_actor TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    result_json BLOB NOT NULL,
+    created_at_ns INTEGER NOT NULL,
+    PRIMARY KEY (updated_by_actor, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS partition_counters (
     partition_id TEXT NOT NULL,
     stream TEXT NOT NULL,
@@ -181,3 +205,35 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS events_message
     ON events(message_id, created_at_ns);
+
+CREATE TABLE IF NOT EXISTS operator_conditions (
+    condition_kind TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    details_json BLOB,
+    first_seen_at_ns INTEGER NOT NULL,
+    last_seen_at_ns INTEGER NOT NULL,
+    resolved_at_ns INTEGER,
+    snoozed_until_ns INTEGER,
+    acknowledged_at_ns INTEGER,
+    presentation_owner TEXT,
+    presentation_lease_until_ns INTEGER,
+    PRIMARY KEY (condition_kind, subject)
+);
+
+CREATE INDEX IF NOT EXISTS operator_conditions_state
+    ON operator_conditions(state, last_seen_at_ns);
+
+CREATE TABLE IF NOT EXISTS actor_lifecycle (
+    actor TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    archived_with_unread INTEGER NOT NULL DEFAULT 0,
+    changed_by_actor TEXT NOT NULL,
+    changed_at_ns INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS actor_lifecycle_state
+    ON actor_lifecycle(state, changed_at_ns);

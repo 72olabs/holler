@@ -1,3 +1,67 @@
+# Holler 0.7.0
+
+Holler 0.7.0 makes session routing explicit and failure states visible while
+preserving the protocol-v1 socket and 0.6.1 capability bridge.
+
+## Highlights
+
+- Typed alias, actor, and immutable reply routes retain requested-route
+  provenance; alias repoints cannot redirect old replies or idempotent retries.
+- Daemon-proven harness-instance binding reconciles MCP, hooks, and monitors.
+  Unproven connectors keep durable messaging but cannot claim live wake.
+- Concurrent resume never steals a live predecessor. Holler gives the successor
+  a usable identity and records a pending-takeover condition for an explicit
+  operator decision.
+- Per-recipient send receipts separate durable commit, control presence,
+  attention capability, attachment, reason, and required sender action.
+- Durable coalesced operator conditions appear in `holler status`, startup
+  hydration, the CLI, MCP status, and the restart-free read bridge.
+- `holler who` reports unread count and age, active claims and earliest lease
+  expiry, and the current stale-unread condition state for each actor.
+- Alias preflight exposes repoint and whole-actor impact before approval.
+- Guarded reversible actor archival preserves names and unread mail, blocks on
+  aliases/presence/claims, and fences late acknowledgements after an explicit
+  crash-grace lease revocation.
+- `holler migrate bare-harnesses` produces a read-only plan for legacy `claude`,
+  `codex`, and `opencode` identities; it changes nothing automatically.
+
+## Compatibility
+
+The wire protocol remains version 1 and the database migrates forward to schema
+14. A 0.6.1 MCP child can discover typed send, alias preflight, conditions, and
+archive preflight through its existing capability bridge. Fresh connectors add
+daemon-attested harness-instance binding and the new startup behavior.
+
+## Validation
+
+The local release candidate passed:
+
+- the full Go test suite, `go vet`, and the race detector;
+- the required executable OpenCode plugin test and a Linux amd64 cross-build;
+- schema-11 to schema-14 migration with queued-mail preservation;
+- all seven isolated certification-lab scenarios, including daemon restart,
+  alias resume, immutable reply routing, and a three-agent/two-thread handoff,
+  with zero orphan processes;
+- checksum, clean build identity, extracted-layout setup discovery, and the same
+  seven scenarios from the packaged release artifact; and
+- packaged CLI smoke coverage for alias preflight, conditions, guarded archival
+  with unread mail, archived discovery, and the read-only bare-harness migration
+  plan;
+- a packaged-artifact Codex CLI 0.151.0 canary covering native-queue wake,
+  claim, acknowledgement, and MCP reply with a `READY` certificate;
+- a packaged-artifact Claude Code 2.1.258 interactive canary covering an idle
+  hook-long-poll wake, automatic follow-up turn, claim, acknowledgement, and
+  MCP reply with a `READY` certificate and zero orphan release processes; and
+- an independent release-gate review that migrated a copy of the live database
+  without losing any of its 23 actors, 3 aliases, 243 messages, or unacknowledged
+  deliveries, then behaviorally verified routing, identity, lifecycle, and
+  operator-condition invariants.
+
+The final release artifact must be built from the exact `v0.7.0` tag so every
+binary and connector reports the public release version.
+
+---
+
 # Holler 0.6.1
 
 Holler 0.6.1 makes 0.6.0's MCP upgrade boundary a one-time event. It adds a

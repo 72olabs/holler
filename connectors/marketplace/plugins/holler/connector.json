@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "connector": "holler",
-  "connector_version": "0.6.1",
+  "connector_version": "0.7.0",
   "protocol_version": 1,
   "harness": "codex",
   "plugin_name": "holler",
@@ -21,8 +21,8 @@
     "skills/holler/SKILL.md",
     "skills/holler-setup/SKILL.md"
   ],
-  "package_hash": "sha256:c3f7fbe457f34b340fff28dd555ae16d078594be7d4a21487a75611d4a32b1e4",
-  "tool_surface_hash": "sha256:e1eae352b2d6000bd8ad564424b3d3b7d25ebf4c24eb5f88add5e380d6973b23",
+  "package_hash": "sha256:f3391c0bd0b7952354d499eada53bc6f0b3cedfcec064ec6d5afbbef3f56d754",
+  "tool_surface_hash": "sha256:b0514237f023357701db6274a7597aa227fa0f1b9890abc890dbccea9055982a",
   "mcp_server_name": "holler",
   "tools": [
     {"name": "bus_send", "class": "idempotent-write"},

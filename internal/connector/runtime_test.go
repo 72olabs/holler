@@ -90,6 +90,37 @@ func TestSessionStartRegistersAndHydratesWithoutConsuming(t *testing.T) {
 	}
 }
 
+func TestSessionStartClaimsDefaultAliasOnceWithoutBlockingLoser(t *testing.T) {
+	ctx := context.Background()
+	db := openStore(t)
+	runtime := connector.New(db)
+	first, err := runtime.SessionStart(ctx, connector.SessionConfig{
+		Actor: "claude-a7f3c2", RunID: "run-a", Harness: "claude", ProjectID: "coupon",
+		NameMode: bus.NameModeAllocate,
+	}, bytes.NewBufferString(`{"session_id":"session-a"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.HookSpecificOutput.AdditionalContext, `default route alias is "coupon-claude"`) {
+		t.Fatalf("first startup context = %q", first.HookSpecificOutput.AdditionalContext)
+	}
+	second, err := runtime.SessionStart(ctx, connector.SessionConfig{
+		Actor: "claude-b81d90", RunID: "run-b", Harness: "claude", ProjectID: "coupon",
+		NameMode: bus.NameModeAllocate,
+	}, bytes.NewBufferString(`{"session_id":"session-b"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(second.HookSpecificOutput.AdditionalContext, "already points to actor:claude-a7f3c2") ||
+		!strings.Contains(second.HookSpecificOutput.AdditionalContext, "actor:claude-b81d90") {
+		t.Fatalf("losing startup context = %q", second.HookSpecificOutput.AdditionalContext)
+	}
+	resolved, err := db.ResolveAlias(ctx, "coupon-claude")
+	if err != nil || resolved.Actor != "claude-a7f3c2" {
+		t.Fatalf("default alias = %+v, err = %v", resolved, err)
+	}
+}
+
 func TestCodexWakeupUsesReferenceOnlyQueueNotice(t *testing.T) {
 	ctx := context.Background()
 	db := openStore(t)

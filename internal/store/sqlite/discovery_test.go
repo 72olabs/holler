@@ -177,6 +177,87 @@ func TestWhoDistinguishesLiveAndLapsedSessions(t *testing.T) {
 	}
 }
 
+func TestWhoExposesUnreadAgeClaimsAndStaleConditionState(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	db, _ := openTestStore(t, store.WithClock(func() time.Time { return now }))
+
+	queued := testRequest()
+	queued.IdempotencyKey = "who-queued"
+	queued.ToActors = []string{"reviewer"}
+	if _, err := db.Send(ctx, queued); err != nil {
+		t.Fatal(err)
+	}
+	oldestAt := now
+	now = now.Add(2 * time.Minute)
+	claimed := testRequest()
+	claimed.IdempotencyKey = "who-claimed"
+	claimed.ToActors = []string{"reviewer"}
+	result, err := db.Send(ctx, claimed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := db.Claim(ctx, "reviewer", result.Message.ID, 3*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReconcileStaleUnreadConditions(ctx, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	directory, err := db.Who(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer := directoryActor(t, directory, "reviewer")
+	if reviewer.UnclaimedMessages != 1 || reviewer.OldestUnreadAt == nil || !reviewer.OldestUnreadAt.Equal(oldestAt) ||
+		reviewer.OldestUnreadAgeSeconds == nil || *reviewer.OldestUnreadAgeSeconds != 120 {
+		t.Fatalf("unread observation = %+v", reviewer)
+	}
+	wantExpiry := claim.LeaseExpiresAt
+	if reviewer.ActiveClaims != 1 || reviewer.EarliestLeaseExpiryAt == nil ||
+		!reviewer.EarliestLeaseExpiryAt.Equal(wantExpiry) {
+		t.Fatalf("claim observation = %+v", reviewer)
+	}
+	if reviewer.StaleUnreadCondition != bus.ConditionActiveVisible {
+		t.Fatalf("stale condition = %q, want %q", reviewer.StaleUnreadCondition, bus.ConditionActiveVisible)
+	}
+	sender := directoryActor(t, directory, "implementer")
+	encodedSender, err := json.Marshal(sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sender.OldestUnreadAgeSeconds != nil || strings.Contains(string(encodedSender), "oldest_unread_age_seconds") {
+		t.Fatalf("actor without unread mail exposed an age: %s", encodedSender)
+	}
+
+	condition, err := db.ListConditions(ctx, false, 10)
+	if err != nil || len(condition) != 1 {
+		t.Fatalf("conditions = %+v, err = %v", condition, err)
+	}
+	if _, err := db.SnoozeCondition(ctx, "stale_unread", "reviewer", condition[0].Generation, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	reviewer = directoryActor(t, mustWho(t, db, ctx), "reviewer")
+	if reviewer.StaleUnreadCondition != bus.ConditionActiveSnoozed {
+		t.Fatalf("snoozed condition = %q", reviewer.StaleUnreadCondition)
+	}
+	now = now.Add(2 * time.Minute)
+	reviewer = directoryActor(t, mustWho(t, db, ctx), "reviewer")
+	if reviewer.StaleUnreadCondition != bus.ConditionActiveVisible {
+		t.Fatalf("expired snooze condition = %q", reviewer.StaleUnreadCondition)
+	}
+}
+
+func mustWho(t *testing.T, db *store.Store, ctx context.Context) bus.ActorDirectory {
+	t.Helper()
+	directory, err := db.Who(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
 func directoryActor(t *testing.T, directory bus.ActorDirectory, actor string) bus.ActorDirectoryEntry {
 	t.Helper()
 	for _, entry := range directory.Actors {

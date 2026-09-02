@@ -2,13 +2,15 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/72olabs/holler/internal/bus"
 )
@@ -29,13 +31,30 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 		return bus.ActorBindResult{}, fmt.Errorf("begin actor binding: %w", err)
 	}
 	defer tx.Rollback()
+	canonicalRun, instanceHandle, err := canonicalHarnessRunTx(ctx, tx, req.ContinuityHandles, req.RunID)
+	if err != nil {
+		return bus.ActorBindResult{}, err
+	}
+	req.RunID = canonicalRun
+	if req.NameMode == bus.NameModeExact {
+		if archived, err := s.actorArchivedTx(ctx, tx, req.RequestedActor); err != nil {
+			return bus.ActorBindResult{}, err
+		} else if archived {
+			return bus.ActorBindResult{}, fmt.Errorf("%s: %w", req.RequestedActor, bus.ErrActorArchived)
+		}
+	}
 
 	result := bus.ActorBindResult{
-		Actor: req.RequestedActor, RequestedActor: req.RequestedActor, NameMode: req.NameMode,
+		Actor: req.RequestedActor, AssignedRunID: req.RunID, RequestedActor: req.RequestedActor, NameMode: req.NameMode,
 		SupersededPresences: []bus.Registration{},
 	}
 	switch req.NameMode {
 	case bus.NameModeExact:
+		if boundActor, found, err := boundActorForHandlesTx(ctx, tx, req.ContinuityHandles); err != nil {
+			return bus.ActorBindResult{}, err
+		} else if found && boundActor != req.RequestedActor {
+			return bus.ActorBindResult{}, bus.ErrContinuityConflict
+		}
 		if err := assertActorNameNotAliasTx(ctx, tx, req.RequestedActor); err != nil {
 			return bus.ActorBindResult{}, err
 		}
@@ -59,13 +78,79 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 				return bus.ActorBindResult{}, err
 			}
 		}
+		for _, handle := range req.ContinuityHandles {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO continuity_bindings(handle, actor, base_actor, created_at_ns, updated_at_ns)
+				VALUES (?, ?, ?, ?, ?)
+				ON CONFLICT(handle) DO UPDATE SET updated_at_ns = excluded.updated_at_ns
+				WHERE continuity_bindings.actor = excluded.actor`, handle, result.Actor, result.Actor,
+				now.UnixNano(), now.UnixNano()); err != nil {
+				return bus.ActorBindResult{}, fmt.Errorf("bind exact harness instance: %w", err)
+			}
+		}
 	case bus.NameModeAllocate:
 		bindingBase := req.RequestedActor
+		pendingActor, predecessor, acceptedHandles, pending, err := pendingLivePredecessorTx(ctx, tx, req.ContinuityHandles, req.RunID, now)
+		if err != nil {
+			return bus.ActorBindResult{}, err
+		}
+		if pending && !req.Takeover {
+			if pendingActor == "" {
+				pendingActor, _, err = s.allocateActorTx(ctx, tx, req.RequestedActor, true, now)
+				if err != nil {
+					return bus.ActorBindResult{}, err
+				}
+			}
+			result.Actor = pendingActor
+			result.PendingPredecessor = predecessor
+			result.AcceptedContinuityHandles = acceptedHandles
+			for _, handle := range acceptedHandles {
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO continuity_bindings(handle, actor, base_actor, created_at_ns, updated_at_ns)
+					VALUES (?, ?, ?, ?, ?)
+					ON CONFLICT(handle) DO UPDATE SET updated_at_ns = excluded.updated_at_ns
+					WHERE continuity_bindings.actor = excluded.actor`,
+					handle, result.Actor, bindingBase, now.UnixNano(), now.UnixNano()); err != nil {
+					return bus.ActorBindResult{}, fmt.Errorf("bind pending continuity handle: %w", err)
+				}
+			}
+			if hasAuthoritativeContinuity(acceptedHandles) {
+				result.Minted, err = s.finalizeActorAllocationTx(ctx, tx, result.Actor, req.RunID, req.ProjectID,
+					continuityHandleKinds(acceptedHandles), now)
+				if err != nil {
+					return bus.ActorBindResult{}, err
+				}
+			} else {
+				result.Provisional, err = actorProvisionalTx(ctx, tx, result.Actor)
+				if err != nil {
+					return bus.ActorBindResult{}, err
+				}
+			}
+			if err := s.appendEventTx(ctx, tx, req.ProjectID, "operational", "actor.takeover_pending", "", result.Actor,
+				map[string]interface{}{"run_id": req.RunID, "predecessor": predecessor}, now); err != nil {
+				return bus.ActorBindResult{}, err
+			}
+			break
+		}
 		boundActor, found, err := resolveBoundActorTx(ctx, tx, req.ContinuityHandles)
 		if err != nil {
 			return bus.ActorBindResult{}, err
 		}
 		if found {
+			if archived, archiveErr := s.actorArchivedTx(ctx, tx, boundActor); archiveErr != nil {
+				return bus.ActorBindResult{}, archiveErr
+			} else if archived {
+				return bus.ActorBindResult{}, fmt.Errorf("%s: %w", boundActor, bus.ErrActorArchived)
+			}
+			if hasContinuityKind(req.ContinuityHandles, "instance") {
+				boundBase, baseErr := actorBaseTx(ctx, tx, boundActor, req.RequestedActor)
+				if baseErr != nil {
+					return bus.ActorBindResult{}, baseErr
+				}
+				if boundBase != req.RequestedActor {
+					return bus.ActorBindResult{}, bus.ErrContinuityConflict
+				}
+			}
 			if _, adopted, err := actorAdoptionTx(ctx, tx, boundActor); err != nil {
 				return bus.ActorBindResult{}, err
 			} else if adopted {
@@ -74,7 +159,7 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 					return bus.ActorBindResult{}, err
 				}
 				provisional := !hasAuthoritativeContinuity(req.ContinuityHandles)
-				actor, _, err := allocateActorTx(ctx, tx, bindingBase, true, now)
+				actor, _, err := s.allocateActorTx(ctx, tx, bindingBase, true, now)
 				if err != nil {
 					return bus.ActorBindResult{}, err
 				}
@@ -94,7 +179,7 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			}
 		} else {
 			provisional := !hasAuthoritativeContinuity(req.ContinuityHandles)
-			actor, _, err := allocateActorTx(ctx, tx, req.RequestedActor, true, now)
+			actor, _, err := s.allocateActorTx(ctx, tx, req.RequestedActor, true, now)
 			if err != nil {
 				return bus.ActorBindResult{}, err
 			}
@@ -167,6 +252,9 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			result.Actor, now.UnixNano()); err != nil {
 			return bus.ActorBindResult{}, fmt.Errorf("reserve bound actor name: %w", err)
 		}
+	}
+	if err := bindHarnessInstanceTx(ctx, tx, instanceHandle, result.Actor, req.RunID, now); err != nil {
+		return bus.ActorBindResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return bus.ActorBindResult{}, fmt.Errorf("commit actor binding: %w", err)
@@ -280,10 +368,73 @@ func (s *Store) ReleaseProvisionalActor(ctx context.Context, actor string) error
 	if _, err := tx.ExecContext(ctx, `DELETE FROM continuity_bindings WHERE actor = ?`, actor); err != nil {
 		return fmt.Errorf("release provisional continuity bindings: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM harness_instance_bindings WHERE actor = ?`, actor); err != nil {
+		return fmt.Errorf("release provisional harness instance binding: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM actor_allocations WHERE actor = ? AND provisional = 1`, actor); err != nil {
 		return fmt.Errorf("release provisional actor allocation: %w", err)
 	}
 	return tx.Commit()
+}
+
+func canonicalHarnessRunTx(ctx context.Context, tx *sql.Tx, handles []string, requestedRun string) (string, string, error) {
+	instanceHandle := ""
+	for _, handle := range handles {
+		if continuityHandleKind(handle) != "instance" {
+			continue
+		}
+		if instanceHandle != "" && instanceHandle != handle {
+			return "", "", &bus.ValidationError{Field: "continuity_handles", Problem: "contains more than one harness instance"}
+		}
+		instanceHandle = handle
+	}
+	if instanceHandle == "" {
+		return requestedRun, "", nil
+	}
+	var runID string
+	err := tx.QueryRowContext(ctx, `SELECT run_id FROM harness_instance_bindings WHERE handle = ?`, instanceHandle).Scan(&runID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return requestedRun, instanceHandle, nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("read harness instance run binding: %w", err)
+	}
+	return runID, instanceHandle, nil
+}
+
+func bindHarnessInstanceTx(ctx context.Context, tx *sql.Tx, handle, actor, runID string, now time.Time) error {
+	if handle == "" {
+		return nil
+	}
+	var currentActor string
+	err := tx.QueryRowContext(ctx, `SELECT actor FROM harness_instance_bindings WHERE handle = ?`, handle).Scan(&currentActor)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO harness_instance_bindings(handle, actor, run_id, created_at_ns, updated_at_ns)
+			VALUES (?, ?, ?, ?, ?)`, handle, actor, runID, now.UnixNano(), now.UnixNano())
+		if err != nil {
+			return fmt.Errorf("bind harness instance: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read harness instance actor binding: %w", err)
+	}
+	if currentActor != actor {
+		exists, err := actorIdentityExistsTx(ctx, tx, currentActor)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return bus.ErrContinuityConflict
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE harness_instance_bindings SET actor = ?, updated_at_ns = ? WHERE handle = ?`,
+		actor, now.UnixNano(), handle); err != nil {
+		return fmt.Errorf("refresh harness instance binding: %w", err)
+	}
+	return nil
 }
 
 func actorBaseTx(ctx context.Context, tx *sql.Tx, actor, fallback string) (string, error) {
@@ -329,15 +480,13 @@ func normalizeActorBindRequest(request bus.ActorBindRequest) (bus.ActorBindReque
 		return bus.ActorBindRequest{}, &bus.ValidationError{Field: "name_mode", Problem: "must be exact or allocate"}
 	}
 	if request.NameMode == bus.NameModeExact {
-		if len(request.ContinuityHandles) > 0 {
-			return bus.ActorBindRequest{}, &bus.ValidationError{Field: "continuity_handles", Problem: "are only valid with allocate mode"}
+		for _, handle := range request.ContinuityHandles {
+			if continuityHandleKind(strings.TrimSpace(handle)) != "instance" {
+				return bus.ActorBindRequest{}, &bus.ValidationError{Field: "continuity_handles", Problem: "exact mode accepts only the daemon-owned instance handle"}
+			}
 		}
-		return request, nil
 	}
-	if request.Takeover {
-		return bus.ActorBindRequest{}, &bus.ValidationError{Field: "takeover", Problem: "is only valid with exact mode"}
-	}
-	if len(request.ContinuityHandles) == 0 {
+	if request.NameMode == bus.NameModeAllocate && len(request.ContinuityHandles) == 0 {
 		return bus.ActorBindRequest{}, &bus.ValidationError{Field: "continuity_handles", Problem: "requires at least one handle in allocate mode"}
 	}
 	if len(request.ContinuityHandles) > maximumContinuityHandles {
@@ -358,9 +507,9 @@ func normalizeActorBindRequest(request bus.ActorBindRequest) (bus.ActorBindReque
 			return bus.ActorBindRequest{}, &bus.ValidationError{Field: "continuity_handles", Problem: "must contain a non-empty namespace and value"}
 		}
 		switch handle[:separator] {
-		case "process", "session", "launch":
+		case "process", "session", "launch", "instance":
 		default:
-			return bus.ActorBindRequest{}, &bus.ValidationError{Field: "continuity_handles", Problem: "namespace must be process, session, or launch"}
+			return bus.ActorBindRequest{}, &bus.ValidationError{Field: "continuity_handles", Problem: "namespace must be process, session, launch, or instance"}
 		}
 		if _, exists := seen[handle]; exists {
 			continue
@@ -371,6 +520,85 @@ func normalizeActorBindRequest(request bus.ActorBindRequest) (bus.ActorBindReque
 	sort.Strings(handles)
 	request.ContinuityHandles = handles
 	return request, nil
+}
+
+func pendingLivePredecessorTx(ctx context.Context, tx *sql.Tx, handles []string, runID string, now time.Time) (string, string, []string, bool, error) {
+	if !hasContinuityKind(handles, "instance") {
+		return "", "", nil, false, nil
+	}
+	type handleBinding struct {
+		handle string
+		actor  string
+	}
+	bindings := make([]handleBinding, 0, len(handles))
+	authoritative := make(map[string]struct{})
+	instanceActors := make(map[string]struct{})
+	for _, handle := range handles {
+		var actor string
+		err := tx.QueryRowContext(ctx, `SELECT actor FROM continuity_bindings WHERE handle = ?`, handle).Scan(&actor)
+		if errors.Is(err, sql.ErrNoRows) {
+			bindings = append(bindings, handleBinding{handle: handle})
+			continue
+		}
+		if err != nil {
+			return "", "", nil, false, fmt.Errorf("read pending continuity binding: %w", err)
+		}
+		bindings = append(bindings, handleBinding{handle: handle, actor: actor})
+		kind := continuityHandleKind(handle)
+		if kind == "instance" {
+			instanceActors[actor] = struct{}{}
+		}
+		if kind != "process" && kind != "instance" {
+			authoritative[actor] = struct{}{}
+		}
+	}
+	if len(authoritative) != 1 {
+		return "", "", nil, false, nil
+	}
+	var predecessor string
+	for actor := range authoritative {
+		predecessor = actor
+	}
+	superseded, err := runSupersededForActorTx(ctx, tx, predecessor, runID)
+	if err != nil {
+		return "", "", nil, false, err
+	}
+	if superseded {
+		return "", "", nil, false, bus.ErrBindingStale
+	}
+	if _, sameInstance := instanceActors[predecessor]; sameInstance {
+		return "", "", nil, false, nil
+	}
+	presences, err := liveOtherPresencesTx(ctx, tx, predecessor, runID, now)
+	if err != nil {
+		return "", "", nil, false, err
+	}
+	if len(presences) == 0 {
+		return "", "", nil, false, nil
+	}
+	candidates := make(map[string]struct{})
+	for actor := range instanceActors {
+		if actor != predecessor {
+			candidates[actor] = struct{}{}
+		}
+	}
+	if len(candidates) > 1 {
+		return "", "", nil, false, bus.ErrContinuityConflict
+	}
+	var pendingActor string
+	for actor := range candidates {
+		pendingActor = actor
+	}
+	accepted := make([]string, 0, len(handles))
+	for _, binding := range bindings {
+		if binding.actor == "" || binding.actor == pendingActor {
+			accepted = append(accepted, binding.handle)
+		}
+	}
+	if len(accepted) == 0 {
+		return "", "", nil, false, bus.ErrContinuityConflict
+	}
+	return pendingActor, predecessor, accepted, true, nil
 }
 
 func boundActorForHandlesTx(ctx context.Context, tx *sql.Tx, handles []string) (string, bool, error) {
@@ -405,7 +633,7 @@ func resolveBoundActorTx(ctx context.Context, tx *sql.Tx, handles []string) (str
 			return "", false, fmt.Errorf("read continuity binding: %w", err)
 		}
 		actors[actor] = struct{}{}
-		if continuityHandleKind(handle) != "process" {
+		if kind := continuityHandleKind(handle); kind != "process" && kind != "instance" {
 			authoritative[actor] = struct{}{}
 		}
 	}
@@ -451,7 +679,7 @@ func provisionalActorIdleTx(ctx context.Context, tx *sql.Tx, actor string) (bool
 		SELECT EXISTS(
 			SELECT 1 FROM actor_allocations a
 			WHERE a.actor = ? AND a.provisional = 1
-			  AND NOT EXISTS (SELECT 1 FROM continuity_bindings c WHERE c.actor = a.actor AND c.handle NOT LIKE 'process:%')
+			  AND NOT EXISTS (SELECT 1 FROM continuity_bindings c WHERE c.actor = a.actor AND c.handle NOT LIKE 'process:%' AND c.handle NOT LIKE 'instance:%')
 			  AND NOT EXISTS (SELECT 1 FROM actor_profiles p WHERE p.actor = a.actor)
 			  AND NOT EXISTS (SELECT 1 FROM registrations r WHERE r.actor = a.actor)
 			  AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.from_actor = a.actor)
@@ -475,12 +703,26 @@ func actorProvisionalTx(ctx context.Context, tx *sql.Tx, actor string) (bool, er
 	return provisional != 0, nil
 }
 
-func allocateActorTx(ctx context.Context, tx *sql.Tx, base string, provisional bool, now time.Time) (string, int, error) {
-	for ordinal := 1; ordinal <= 1_000_000; ordinal++ {
-		candidate := base
-		if ordinal > 1 {
-			candidate = base + "-" + strconv.Itoa(ordinal)
+func (s *Store) allocateActorTx(ctx context.Context, tx *sql.Tx, base string, provisional bool, now time.Time) (string, int, error) {
+	const suffixBytes = 6
+	for len(base) > 128-suffixBytes-1 {
+		_, size := utf8.DecodeLastRuneInString(base)
+		base = base[:len(base)-size]
+	}
+	var firstOrdinal int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(ordinal), 0) + 1 FROM actor_allocations WHERE base_actor = ?`, base).
+		Scan(&firstOrdinal); err != nil {
+		return "", 0, fmt.Errorf("allocate actor ordinal: %w", err)
+	}
+	for attempt := 1; attempt <= 256; attempt++ {
+		seed, err := s.newID("actor")
+		if err != nil {
+			return "", 0, fmt.Errorf("generate opaque actor id: %w", err)
 		}
+		digest := sha256.Sum256([]byte(seed))
+		candidate := base + "-" + hex.EncodeToString(digest[:suffixBytes/2])
+		ordinal := firstOrdinal + attempt - 1
 		if err := bus.ValidateTextIdentifier("allocated_actor", candidate, 128); err != nil {
 			return "", 0, err
 		}
@@ -503,7 +745,16 @@ func allocateActorTx(ctx context.Context, tx *sql.Tx, base string, provisional b
 
 func hasAuthoritativeContinuity(handles []string) bool {
 	for _, handle := range handles {
-		if continuityHandleKind(handle) != "process" {
+		if kind := continuityHandleKind(handle); kind != "process" && kind != "instance" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasContinuityKind(handles []string, wanted string) bool {
+	for _, handle := range handles {
+		if continuityHandleKind(handle) == wanted {
 			return true
 		}
 	}
@@ -537,7 +788,7 @@ func actorNameReservedTx(ctx context.Context, tx *sql.Tx, actor string) (bool, e
 			UNION ALL SELECT 1 FROM registrations WHERE actor = ?
 			UNION ALL SELECT 1 FROM messages WHERE from_actor = ?
 			UNION ALL SELECT 1 FROM deliveries WHERE recipient_actor = ?
-			UNION ALL SELECT 1 FROM actor_aliases WHERE alias = ?
+			UNION ALL SELECT 1 FROM actor_alias_history WHERE alias = ?
 			UNION ALL SELECT 1 FROM actor_names WHERE actor = ?
 			UNION ALL SELECT 1 FROM actor_alias_history WHERE updated_by_actor = ?
 		)`, actor, actor, actor, actor, actor, actor, actor, actor).Scan(&exists)
@@ -568,7 +819,7 @@ func actorIdentityExistsTx(ctx context.Context, tx *sql.Tx, actor string) (bool,
 
 func assertActorNameNotAliasTx(ctx context.Context, tx *sql.Tx, actor string) error {
 	var exists int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_aliases WHERE alias = ?)`, actor).Scan(&exists); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_alias_history WHERE alias = ?)`, actor).Scan(&exists); err != nil {
 		return fmt.Errorf("check alias reservation: %w", err)
 	}
 	if exists != 0 {

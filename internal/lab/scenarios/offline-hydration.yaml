@@ -1,0 +1,39 @@
+name: offline-hydration
+description: A message sent while the recipient is offline remains durable and is available after startup.
+participants:
+  - id: sender
+    actor: codex
+    harness: fake-codex
+    name_mode: exact
+  - id: recipient
+    actor: claude
+    harness: fake-claude
+    name_mode: exact
+steps:
+  - action: start
+    participant: sender
+  - action: send
+    from: sender
+    to: recipient
+    route: actor
+    body: Queued while offline.
+    save_as: offline_message
+  - action: start
+    participant: recipient
+  - action: assert_inbox
+    participant: recipient
+    count: 1
+  - action: claim
+    participant: recipient
+    message: offline_message
+    save_as: offline_claim
+  - action: ack
+    participant: recipient
+    message: offline_message
+    claim: offline_claim
+assert:
+  - every_message_acked
+  - durable_inboxes_empty
+  - sandbox_paths_isolated
+  - orphan_processes_zero
+  - socket_removed

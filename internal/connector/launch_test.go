@@ -57,8 +57,14 @@ func TestBuildLaunchExportsExplicitNamingLifecycle(t *testing.T) {
 	if exact.Env["HOLLER_TAKEOVER"] != "true" {
 		t.Fatalf("takeover environment = %+v", exact.Env)
 	}
+	allocatedTakeover, err := connector.BuildClaudeLaunch(connector.ClaudeLaunchConfig{
+		ConnectorConfig: connector.ClaudeConnectorConfig{AttentionMode: connector.AttentionHookLongPoll, Actor: "reviewer", NameMode: "allocate"},
+		HollerBinary:    "/bin/holler", Takeover: true,
+	})
+	if err != nil || allocatedTakeover.Env["HOLLER_TAKEOVER"] != "true" {
+		t.Fatalf("allocated takeover = %+v, err=%v", allocatedTakeover, err)
+	}
 	for _, config := range []connector.ClaudeLaunchConfig{
-		{ConnectorConfig: connector.ClaudeConnectorConfig{AttentionMode: connector.AttentionHookLongPoll, Actor: "reviewer", NameMode: "allocate"}, HollerBinary: "/bin/holler", Takeover: true},
 		{ConnectorConfig: connector.ClaudeConnectorConfig{AttentionMode: connector.AttentionHookLongPoll, Actor: "reviewer", NameMode: ""}, HollerBinary: "/bin/holler", Takeover: true},
 	} {
 		if _, err := connector.BuildClaudeLaunch(config); err == nil {

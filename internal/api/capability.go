@@ -86,7 +86,14 @@ func (s *Server) invokeCapability(ctx context.Context, identity Identity, expect
 				invocation.Name, registration.descriptor.Mode, expected),
 		}
 	}
-	return registration.handler(ctx, s.store, identity, invocation.Arguments)
+	result, err := registration.handler(ctx, s.store, identity, invocation.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if sent, ok := result.(bus.SendResult); ok {
+		return s.finalizeSend(ctx, sent)
+	}
+	return result, nil
 }
 
 func defaultCapabilities() []registeredCapability {
@@ -107,6 +114,132 @@ func defaultCapabilities() []registeredCapability {
 		return map[string]interface{}{"type": "string", "description": description}
 	}
 	return []registeredCapability{
+		{
+			descriptor: bus.CapabilityDescriptor{
+				Name: "alias.preflight", Mode: bus.CapabilityRead, Since: "0.7.0",
+				Description: "Inspect the complete impact of creating or repointing an alias before requesting operator approval.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"alias":          stringProperty("human-facing alias"),
+					"proposed_actor": stringProperty("proposed canonical actor target"),
+				}, "alias", "proposed_actor"),
+			},
+			handler: func(ctx context.Context, store Store, _ Identity, raw json.RawMessage) (interface{}, error) {
+				var args struct {
+					Alias         string `json:"alias"`
+					ProposedActor string `json:"proposed_actor"`
+				}
+				if err := decodeStrict(raw, &args); err != nil {
+					return nil, err
+				}
+				return store.AliasPreflight(ctx, args.Alias, args.ProposedActor)
+			},
+		},
+		{
+			descriptor: bus.CapabilityDescriptor{
+				Name: "operator.conditions", Mode: bus.CapabilityRead, Since: "0.7.0",
+				Description: "List durable operator-visible conditions without changing their state.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"include_resolved": map[string]interface{}{"type": "boolean"},
+					"limit":            map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100},
+				}),
+			},
+			handler: func(ctx context.Context, store Store, _ Identity, raw json.RawMessage) (interface{}, error) {
+				var args struct {
+					IncludeResolved bool `json:"include_resolved"`
+					Limit           int  `json:"limit"`
+				}
+				if err := decodeStrict(raw, &args); err != nil {
+					return nil, err
+				}
+				return store.ListConditions(ctx, args.IncludeResolved, args.Limit)
+			},
+		},
+		{
+			descriptor: bus.CapabilityDescriptor{
+				Name: "actor.archive_preflight", Mode: bus.CapabilityRead, Since: "0.7.0",
+				Description: "Show aliases, live presence, claims, continuity, and untrusted unread previews before actor archival.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"actor": stringProperty("canonical actor to inspect"),
+					"limit": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100},
+				}, "actor"),
+			},
+			handler: func(ctx context.Context, store Store, _ Identity, raw json.RawMessage) (interface{}, error) {
+				var args struct {
+					Actor string `json:"actor"`
+					Limit int    `json:"limit"`
+				}
+				if err := decodeStrict(raw, &args); err != nil {
+					return nil, err
+				}
+				return store.ArchivePreflight(ctx, args.Actor, args.Limit)
+			},
+		},
+		{
+			descriptor: bus.CapabilityDescriptor{
+				Name: "message.send.v2", Mode: bus.CapabilityWrite, Since: "0.7.0",
+				Description: "Send with one typed alias/actor route or immutable reply provenance. Use this from an already-running connector whose fixed bus_send schema predates typed routes.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"to_alias":        stringProperty("human-facing alias resolved at send time"),
+					"to_actor":        stringProperty("operator-supplied or confirmed exact actor handle"),
+					"reply_to":        stringProperty("parent message id; omit recipient fields for replies"),
+					"thread_id":       stringProperty("optional thread for a new message"),
+					"body":            stringProperty("complete message"),
+					"idempotency_key": stringProperty("stable key for safe retries"),
+				}, "body", "idempotency_key"),
+			},
+			handler: func(ctx context.Context, store Store, identity Identity, raw json.RawMessage) (interface{}, error) {
+				var args struct {
+					ToAlias        string `json:"to_alias"`
+					ToActor        string `json:"to_actor"`
+					ReplyTo        string `json:"reply_to"`
+					ThreadID       string `json:"thread_id"`
+					Body           string `json:"body"`
+					IdempotencyKey string `json:"idempotency_key"`
+				}
+				if err := decodeStrict(raw, &args); err != nil {
+					return nil, err
+				}
+				routes := 0
+				if strings.TrimSpace(args.ToAlias) != "" {
+					routes++
+				}
+				if strings.TrimSpace(args.ToActor) != "" {
+					routes++
+				}
+				if strings.TrimSpace(args.ReplyTo) != "" {
+					routes++
+				}
+				if routes != 1 {
+					return nil, &bus.ValidationError{Field: "route", Problem: "use exactly one of to_alias, to_actor, or reply_to"}
+				}
+				if strings.TrimSpace(args.Body) == "" {
+					return nil, &bus.ValidationError{Field: "body", Problem: "is required"}
+				}
+				if strings.TrimSpace(args.IdempotencyKey) == "" {
+					return nil, &bus.ValidationError{Field: "idempotency_key", Problem: "is required"}
+				}
+				body, err := json.Marshal(map[string]string{"text": strings.TrimSpace(args.Body)})
+				if err != nil {
+					return nil, err
+				}
+				projectID := strings.TrimSpace(identity.ProjectID)
+				if projectID == "" {
+					projectID = "default"
+				}
+				request := bus.SendRequest{
+					IdempotencyKey: args.IdempotencyKey, ProjectID: projectID, ChannelID: "direct",
+					ThreadID: args.ThreadID, FromActor: identity.Actor, FromRun: identity.RunID,
+					Type: "MESSAGE", DeliveryRequest: bus.DeliveryWake, InReplyTo: args.ReplyTo, Body: body,
+				}
+				switch {
+				case strings.TrimSpace(args.ToAlias) != "":
+					request.Destinations = []bus.Route{{Kind: bus.RouteAlias, Value: args.ToAlias}}
+				case strings.TrimSpace(args.ToActor) != "":
+					request.Destinations = []bus.Route{{Kind: bus.RouteActor, Value: args.ToActor}}
+				}
+				return store.Send(ctx, request)
+			},
+		},
 		{
 			descriptor: bus.CapabilityDescriptor{
 				Name: "alias.list", Mode: bus.CapabilityRead, Since: "0.6.1",

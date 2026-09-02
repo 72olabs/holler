@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/72olabs/holler/internal/buildinfo"
+	"github.com/72olabs/holler/internal/bus"
 	store "github.com/72olabs/holler/internal/store/sqlite"
 )
 
@@ -97,6 +99,14 @@ func TestClientFallsBackToLegacyHelloWithoutBuildOrProject(t *testing.T) {
 	}
 	if client.ServerBuild().Commit != "" {
 		t.Fatalf("legacy daemon unexpectedly reported a build: %+v", client.ServerBuild())
+	}
+	if _, err := client.Send(context.Background(), bus.SendRequest{
+		Destinations: []bus.Route{{Kind: bus.RouteAlias, Value: "reviewer"}},
+	}); !errors.Is(err, bus.ErrInvalid) {
+		t.Fatalf("typed route downgraded against legacy daemon: %v", err)
+	}
+	if _, err := client.ClaimAliasIfAbsent(context.Background(), bus.AliasClaimRequest{}); !errors.Is(err, bus.ErrInvalid) {
+		t.Fatalf("alias claim downgraded against legacy daemon: %v", err)
 	}
 }
 

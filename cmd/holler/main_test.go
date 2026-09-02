@@ -136,12 +136,23 @@ func TestCLIAliasLifecycleAndSendResolution(t *testing.T) {
 	if resolved.Actor != "claude-2" {
 		t.Fatalf("resolved alias = %+v", resolved)
 	}
+	claimRaw := invoke(t, ctx, "alias", "claim", "--socket", socket,
+		"--policy-id", "setup:default-workstream-alias", "--harness", "claude", "--idempotency-key", "cli-alias-claim",
+		"default-claude", "claude-2")
+	var claimed bus.AliasClaimResult
+	decode(t, claimRaw, &claimed)
+	if !claimed.Claimed || claimed.Alias.Alias != "default-claude" || claimed.Alias.Actor != "claude-2" {
+		t.Fatalf("claim alias = %+v", claimed)
+	}
 	sendRaw := invoke(t, ctx, "send", "--socket", socket, "--actor", "codex", "--run", "codex-run",
-		"--to", "skillbank", "--idempotency-key", "cli-alias-send", "--body", `{"text":"review"}`)
+		"--to-alias", "skillbank", "--idempotency-key", "cli-alias-send", "--body", `{"text":"review"}`)
 	var sent bus.SendResult
 	decode(t, sendRaw, &sent)
 	if len(sent.Message.ToActors) != 1 || sent.Message.ToActors[0] != "claude-2" {
 		t.Fatalf("canonical recipients = %v", sent.Message.ToActors)
+	}
+	if len(sent.Message.RequestedRoutes) != 1 || sent.Message.RequestedRoutes[0] != (bus.Route{Kind: bus.RouteAlias, Value: "skillbank"}) {
+		t.Fatalf("route provenance = %+v", sent.Message.RequestedRoutes)
 	}
 	removeRaw := invoke(t, ctx, "alias", "remove", "--socket", socket,
 		"--idempotency-key", "cli-alias-remove", "skillbank")
@@ -282,7 +293,7 @@ func TestMCPFollowsLifecycleReconciliationWhenItConnectsFirstOnResume(t *testing
 		t.Fatal(err)
 	}
 	structured := status["result"].(map[string]interface{})["structuredContent"].(map[string]interface{})
-	if structured["actor"] != "reviewer" || structured["run"] != "new-run" {
+	if structured["actor"] != old.Identity().Actor || structured["run"] != "new-run" {
 		t.Fatalf("reconciled MCP status = %+v", structured)
 	}
 	_ = inputWriter.Close()
@@ -608,14 +619,15 @@ func TestCLIClaudeMonitorStopsOnStaleBindingWithoutRetrying(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.Close()
+	firstActor := first.Identity().Actor
 	if _, err := first.RegisterSession(context.Background(), bus.RegistrationRequest{
-		Actor: "reviewer", RunID: "run-a", Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
+		Actor: firstActor, RunID: "run-a", Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
 		SessionID: "session-a", ProjectID: "coupon", Lease: time.Hour,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	winner, err := api.Dial(context.Background(), socket, api.Identity{
-		Actor: "reviewer", RunID: "run-b", Client: "test", NameMode: bus.NameModeExact,
+		Actor: firstActor, RunID: "run-b", Client: "test", NameMode: bus.NameModeExact,
 		ProjectID: "coupon", Takeover: true,
 	})
 	if err != nil {
@@ -623,7 +635,7 @@ func TestCLIClaudeMonitorStopsOnStaleBindingWithoutRetrying(t *testing.T) {
 	}
 	defer winner.Close()
 	if _, err := winner.RegisterSession(context.Background(), bus.RegistrationRequest{
-		Actor: "reviewer", RunID: "run-b", Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
+		Actor: firstActor, RunID: "run-b", Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
 		SessionID: "session-b", ProjectID: "coupon", Lease: time.Hour,
 	}); err != nil {
 		t.Fatal(err)
@@ -645,7 +657,7 @@ func TestCLIClaudeMonitorStopsOnStaleBindingWithoutRetrying(t *testing.T) {
 	if exit != 0 || !strings.Contains(stderr, "lost actor") || !strings.Contains(stderr, "relaunch") {
 		t.Fatalf("exit=%d stderr=%q", exit, stderr)
 	}
-	live, err := winner.LiveRegistrations(context.Background(), "reviewer")
+	live, err := winner.LiveRegistrations(context.Background(), firstActor)
 	if err != nil || len(live) != 1 || live[0].RunID != "run-b" {
 		t.Fatalf("winner registrations after stale monitor = %+v, err = %v", live, err)
 	}
@@ -672,7 +684,10 @@ func TestClaudeMonitorReconnectsAcrossShortAndLongDaemonOutages(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				done := make(chan error, 1)
 				go func() {
-					done <- daemon.Run(ctx, daemon.Config{DatabasePath: database, SocketPath: socket, Clock: clock.Now}, nil)
+					done <- daemon.Run(ctx, daemon.Config{
+						DatabasePath: database, SocketPath: socket, Clock: clock.Now,
+						HarnessInstanceResolver: func(net.Conn, string) (string, error) { return "hin_outage_test", nil },
+					}, nil)
 				}()
 				deadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(deadline) {
@@ -868,6 +883,31 @@ func TestCLIProductSetupDryRunUsesHarnessDefaults(t *testing.T) {
 	}
 }
 
+func TestCLIProductSetupDryRunUsesExplicitRuntimePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	runtimePath := filepath.Join(home, "isolated-runtime", "bin-path")
+	marketplace := filepath.Join(filepath.Clean(filepath.Join("..", "..")), "connectors", "marketplace")
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{
+		"setup", "claude", "--dry-run", "--marketplace", marketplace,
+		"--client-binary", "/usr/bin/true", "--daemon-binary", "/usr/bin/true",
+		"--runtime-path", runtimePath,
+	}, strings.NewReader(""), &stdout, &stderr)
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+	var result productSetupResult
+	decode(t, stdout.Bytes(), &result)
+	if result.Connector.RuntimeBinaryPath != runtimePath {
+		t.Fatalf("runtime path = %q, want %q", result.Connector.RuntimeBinaryPath, runtimePath)
+	}
+	if _, err := os.Stat(runtimePath); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote runtime path: %v", err)
+	}
+}
+
 func TestCLIProductSetupPreservesExistingLegacyNameMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1027,6 +1067,9 @@ func startAPIServer(t *testing.T) string {
 
 func startAPIServerWithOptions(t *testing.T, options ...api.ServerOption) string {
 	t.Helper()
+	options = append([]api.ServerOption{api.WithHarnessInstanceResolver(func(_ net.Conn, harness string) (string, error) {
+		return "hin_test_" + harness, nil
+	})}, options...)
 	ctx, cancel := context.WithCancel(context.Background())
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
 	if err != nil {

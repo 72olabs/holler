@@ -36,6 +36,13 @@ func NewBroker() *Broker {
 	}
 }
 
+func (b *Broker) Attached(actor, runID, sessionID string) bool {
+	key := sessionKey{actor: actor, runID: runID, sessionID: sessionID}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.current[actor] == key
+}
+
 // Attach makes this session the actor's one current in-memory attention
 // presence. onTransition runs exactly once when the actor has no current
 // presence or changes run/session; same-presence heartbeats do not run it.
