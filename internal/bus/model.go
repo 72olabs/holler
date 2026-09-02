@@ -36,6 +36,9 @@ var (
 	ErrActorNotLive         = errors.New("adopting actor has no live presence")
 	ErrRunNotLive           = errors.New("adopting run has no live presence")
 	ErrActorAdopted         = errors.New("actor identity was permanently adopted")
+	ErrAliasConflict        = errors.New("alias conflicts with an actor identity")
+	ErrAliasNotFound        = errors.New("actor alias not found")
+	ErrAliasTargetUnknown   = errors.New("alias target is not a known actor")
 	ErrDatabaseOwned        = errors.New("another hollerd already owns this database")
 )
 
@@ -80,6 +83,10 @@ type Message struct {
 	Body            json.RawMessage `json:"body"`
 	CreatedAt       time.Time       `json:"created_at"`
 	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+	// RequestedToActors is retained by the durable store for idempotency
+	// comparison. Public messages expose only the canonical actors stamped in
+	// ToActors, never the aliases used by the sender.
+	RequestedToActors []string `json:"-"`
 }
 
 type SendRequest struct {
@@ -96,6 +103,8 @@ type SendRequest struct {
 	InReplyTo       string          `json:"in_reply_to,omitempty"`
 	Body            json.RawMessage `json:"body"`
 	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+	// RequestedToActors is populated internally before alias resolution.
+	RequestedToActors []string `json:"-"`
 }
 
 type SendResult struct {
@@ -168,6 +177,39 @@ type AdoptResult struct {
 	DuplicateRequest bool      `json:"duplicate_request"`
 	AdoptedAt        time.Time `json:"adopted_at"`
 	IdempotencyKey   string    `json:"-"`
+}
+
+type ActorAlias struct {
+	Alias          string    `json:"alias"`
+	Actor          string    `json:"actor"`
+	Revision       int64     `json:"revision"`
+	UpdatedByActor string    `json:"updated_by_actor"`
+	UpdatedByRun   string    `json:"updated_by_run"`
+	ProjectID      string    `json:"project_id"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type AliasSetRequest struct {
+	Alias          string `json:"alias"`
+	Actor          string `json:"actor"`
+	UpdatedByActor string `json:"updated_by_actor,omitempty"`
+	UpdatedByRun   string `json:"updated_by_run,omitempty"`
+	ProjectID      string `json:"project_id"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type AliasRemoveRequest struct {
+	Alias          string `json:"alias"`
+	UpdatedByActor string `json:"updated_by_actor,omitempty"`
+	UpdatedByRun   string `json:"updated_by_run,omitempty"`
+	ProjectID      string `json:"project_id"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type AliasMutationResult struct {
+	Alias            ActorAlias `json:"alias"`
+	Removed          bool       `json:"removed"`
+	DuplicateRequest bool       `json:"duplicate_request"`
 }
 
 type Registration struct {
@@ -419,6 +461,14 @@ func ValidateTextIdentifier(name, value string, max int) error {
 }
 
 func EquivalentRequest(message Message, req SendRequest) bool {
+	messageRecipients := message.RequestedToActors
+	if len(messageRecipients) == 0 {
+		messageRecipients = message.ToActors
+	}
+	requestRecipients := req.RequestedToActors
+	if len(requestRecipients) == 0 {
+		requestRecipients = req.ToActors
+	}
 	if message.IdempotencyKey != req.IdempotencyKey ||
 		message.ProjectID != req.ProjectID ||
 		message.ChannelID != req.ChannelID ||
@@ -430,7 +480,7 @@ func EquivalentRequest(message Message, req SendRequest) bool {
 		message.DeliveryRequest != req.DeliveryRequest ||
 		message.InReplyTo != req.InReplyTo ||
 		!bytes.Equal(message.Body, req.Body) ||
-		!equalStrings(message.ToActors, req.ToActors) {
+		!equalStrings(messageRecipients, requestRecipients) {
 		return false
 	}
 	if message.ExpiresAt == nil || req.ExpiresAt == nil {

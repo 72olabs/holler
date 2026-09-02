@@ -44,13 +44,18 @@ func TestMCPQuestionClaimAckRoundTrip(t *testing.T) {
 		t.Fatalf("server name = %q", got)
 	}
 	tools := nestedSlice(t, responses[1], "result", "tools")
-	if len(tools) != 11 {
-		t.Fatalf("tool count = %d, want 11", len(tools))
+	if len(tools) != 15 {
+		t.Fatalf("tool count = %d, want 15", len(tools))
 	}
 	adoptTool := tools[10].(map[string]interface{})
 	annotations := adoptTool["annotations"].(map[string]interface{})
 	if adoptTool["name"] != "holler_adopt" || annotations["destructiveHint"] != true || annotations["idempotentHint"] != true {
 		t.Fatalf("adoption tool contract = %+v", adoptTool)
+	}
+	aliasSetTool := tools[13].(map[string]interface{})
+	aliasAnnotations := aliasSetTool["annotations"].(map[string]interface{})
+	if aliasSetTool["name"] != "holler_alias_set" || aliasAnnotations["destructiveHint"] != true || aliasAnnotations["idempotentHint"] != true {
+		t.Fatalf("alias set tool contract = %+v", aliasSetTool)
 	}
 	firstID := nestedString(t, responses[2], "result", "structuredContent", "message_id")
 	secondID := nestedString(t, responses[3], "result", "structuredContent", "message_id")
@@ -237,15 +242,68 @@ func TestMCPAdoptRequiresLiveBoundActorAndPreservesProvenance(t *testing.T) {
 	}
 }
 
+func TestMCPAliasToolsRouteToCanonicalActor(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "claude", RunID: "claude-run", Harness: "test", SessionID: "claude-session",
+		ProjectID: "default", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	operator, err := mcp.New(db, mcp.Config{Actor: "operator", RunID: "operator-run", ProjectID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses := exchange(t, operator,
+		toolCall(1, "holler_aliases", map[string]interface{}{}),
+		toolCall(2, "holler_alias_set", map[string]interface{}{
+			"alias": "skillbank", "actor": "claude", "idempotency_key": "mcp-alias-set",
+		}),
+		toolCall(3, "holler_alias_resolve", map[string]interface{}{"alias": "skillbank"}),
+		toolCall(4, "holler_aliases", map[string]interface{}{}),
+	)
+	emptyAliases := nestedSlice(t, responses[0], "result", "structuredContent", "aliases")
+	if len(emptyAliases) != 0 {
+		t.Fatalf("empty aliases = %+v", emptyAliases)
+	}
+	if got := nestedString(t, responses[1], "result", "structuredContent", "alias", "actor"); got != "claude" {
+		t.Fatalf("set alias actor = %q", got)
+	}
+	if got := nestedString(t, responses[2], "result", "structuredContent", "actor"); got != "claude" {
+		t.Fatalf("resolved actor = %q", got)
+	}
+	aliases := nestedSlice(t, responses[3], "result", "structuredContent", "aliases")
+	if len(aliases) != 1 {
+		t.Fatalf("aliases = %+v", aliases)
+	}
+	sender, err := mcp.New(db, mcp.Config{Actor: "codex", RunID: "codex-run", ProjectID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses = exchange(t, sender, toolCall(1, "bus_send", map[string]interface{}{
+		"to": "skillbank", "body": "review", "idempotency_key": "mcp-alias-send",
+	}))
+	recipients := nestedSlice(t, responses[0], "result", "structuredContent", "to")
+	if len(recipients) != 1 || recipients[0] != "claude" {
+		t.Fatalf("canonical recipients = %+v", recipients)
+	}
+}
+
 func TestToolSurfaceIdentityIsStable(t *testing.T) {
 	wantNames := []string{
 		"bus_send", "bus_check_inbox", "bus_claim", "bus_inbox", "bus_ack", "bus_extend", "bus_nack", "bus_status",
-		"holler_profile", "holler_who", "holler_adopt",
+		"holler_profile", "holler_who", "holler_adopt", "holler_aliases", "holler_alias_resolve",
+		"holler_alias_set", "holler_alias_remove",
 	}
 	if got := strings.Join(mcp.ToolNames(), ","); got != strings.Join(wantNames, ",") {
 		t.Fatalf("tool names = %q", got)
 	}
-	const wantHash = "sha256:68b22898f6a8bf89a6505a2e49e5704e7732f64fcb518ca5e9c22d7701093e42"
+	const wantHash = "sha256:d73c23c21a9d790777b78fb4e45a23473bccc0ab0d33be7270f0ff138b5e7ed1"
 	if got := mcp.ToolSurfaceHash(); got != wantHash {
 		t.Fatalf("tool surface hash = %q, want %q; connector reauthorization is required for an intentional schema change", got, wantHash)
 	}

@@ -50,6 +50,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		err = runProfile(ctx, args[1:], stdout, stderr)
 	case "adopt":
 		err = runAdopt(ctx, args[1:], stdout, stderr)
+	case "alias":
+		err = runAlias(ctx, args[1:], stdout, stderr)
 	case "send":
 		err = runSend(ctx, args[1:], stdout, stderr)
 	case "inbox":
@@ -502,6 +504,80 @@ func runAdopt(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return err
 	}
 	return writeJSON(stdout, result)
+}
+
+func runAlias(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: holler alias set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS")
+		return flag.ErrHelp
+	}
+	action := args[0]
+	flags := commandFlags("alias "+action, stderr)
+	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
+	operator := flags.String("operator", "operator", "operator identity recorded in alias history")
+	runID := flags.String("run", "operator-alias", "operator run recorded in alias history")
+	project := flags.String("project", environmentOr("HOLLER_PROJECT", "default"), "project/partition")
+	idempotencyKey := flags.String("idempotency-key", "", "stable key for this alias mutation")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	client, err := dialAPI(ctx, *socketPath, *operator, *runID, "holler-cli/0.6")
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	switch action {
+	case "set":
+		if flags.NArg() != 2 {
+			return &bus.ValidationError{Field: "alias set", Problem: "requires ALIAS and ACTOR"}
+		}
+		key := *idempotencyKey
+		if key == "" {
+			key = fmt.Sprintf("alias-set-%d", time.Now().UTC().UnixNano())
+		}
+		result, err := client.SetAlias(ctx, bus.AliasSetRequest{
+			Alias: flags.Arg(0), Actor: flags.Arg(1), ProjectID: *project, IdempotencyKey: key,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, result)
+	case "remove":
+		if flags.NArg() != 1 {
+			return &bus.ValidationError{Field: "alias remove", Problem: "requires ALIAS"}
+		}
+		key := *idempotencyKey
+		if key == "" {
+			key = fmt.Sprintf("alias-remove-%d", time.Now().UTC().UnixNano())
+		}
+		result, err := client.RemoveAlias(ctx, bus.AliasRemoveRequest{
+			Alias: flags.Arg(0), ProjectID: *project, IdempotencyKey: key,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, result)
+	case "list":
+		if flags.NArg() != 0 {
+			return &bus.ValidationError{Field: "alias list", Problem: "does not accept positional arguments"}
+		}
+		aliases, err := client.ListAliases(ctx)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, aliases)
+	case "resolve":
+		if flags.NArg() != 1 {
+			return &bus.ValidationError{Field: "alias resolve", Problem: "requires ALIAS"}
+		}
+		alias, err := client.ResolveAlias(ctx, flags.Arg(0))
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, alias)
+	default:
+		return fmt.Errorf("unknown alias command %q", action)
+	}
 }
 
 func runSend(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -1236,6 +1312,7 @@ Usage:
   holler who [--socket PATH] [--limit 100]
   holler profile --actor ACTOR --run RUN --role TEXT [--accepts KIND,KIND]
   holler adopt --actor LIVE_ACTOR --run RUN --from INACTIVE_ACTOR --idempotency-key KEY
+  holler alias set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS
   holler send   --socket PATH --actor ACTOR --run RUN --to ACTOR[,ACTOR] --idempotency-key KEY [options]
   holler inbox  --socket PATH --actor ACTOR
   holler claim  --socket PATH --actor ACTOR [--message ID] [--lease 5m]

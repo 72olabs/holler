@@ -45,7 +45,7 @@ and permits visible polling as the fallback attention path.
 advertises `READY` only when one message ID has accepted wake, MCP claim, and
 MCP acknowledgement evidence in the same certified run.
 
-The current packaged test versions are Claude Code 2.1.252 and Codex CLI
+The current packaged test versions are Claude Code 2.1.258 and Codex CLI
 0.151.0.
 
 OpenCode support targets the current 1.x plugin and configuration contract. `native-prompt` uses the local OpenCode HTTP server's asynchronous prompt endpoint to submit a message reference—not its body—to the exact registered session. `startup-only` retains durable hydration without a live wake path. The package is deterministically tested but remains marked `pending-live-certification` until it passes the bounded canary against an installed OpenCode client.
@@ -54,18 +54,19 @@ OpenCode support targets the current 1.x plugin and configuration contract. `nat
 
 The files under `policies/` are examples to review and merge into a user, profile, managed, or enterprise configuration layer. A repository or plugin must not grant itself authority.
 
-For Codex, use a real `$CODEX_HOME/<name>.config.toml` profile or managed configuration. Codex 0.149.1 passed the least-privilege canary with a profile file but ignored the equivalent repeated dotted `-c` overrides for leased/write MCP calls. The policy therefore names the exact eleven-tool allowlist and repeats `approval_mode = "approve"` for every tool instead of relying only on the server default.
+For Codex, use a real `$CODEX_HOME/<name>.config.toml` profile or managed configuration. Codex 0.149.1 passed the least-privilege canary with a profile file but ignored the equivalent repeated dotted `-c` overrides for leased/write MCP calls. The policy therefore names the exact fifteen-tool allowlist and repeats a per-tool mode instead of relying only on the server default. Routine tools use `approve`; inbox adoption and alias mutation use `prompt`.
 
 Codex plugin installation does not trust plugin hooks. A human can review the exact definition with `/hooks`, or externally vetted automation can use `--dangerously-bypass-hook-trust` for that one certification invocation. The latter proves hook functionality, not persisted operator trust.
 
-For Claude, pass the reviewed settings file using `--settings` or install equivalent operator/managed permissions. Routine Holler tools are pre-approved, while `holler_adopt` is installed as an explicit `ask` rule because it permanently transfers an inactive actor's inbox. Project settings are effective only after project trust.
+For Claude, pass the reviewed settings file using `--settings` or install equivalent operator/managed permissions. Routine Holler tools are pre-approved, while inbox adoption and alias mutation are installed as explicit `ask` rules because they permanently change routing state. Project settings are effective only after project trust.
 
-For OpenCode, setup previews and, only after the operator chooses `--apply`, generates a connector-owned `opencode.json` with one local MCP server, exact `allow` entries for routine tools, and an explicit `ask` entry for `holler_adopt`. It does not modify the user's general OpenCode config. The launcher points `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` at that isolated package for the launched process only. This is an operator-authorized installation action, not authority a plugin grants itself at runtime.
+For OpenCode, setup previews and, only after the operator chooses `--apply`, generates a connector-owned `opencode.json` with one local MCP server, exact `allow` entries for routine tools, and explicit `ask` entries for inbox adoption and alias mutation. It does not modify the user's general OpenCode config. The launcher points `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` at that isolated package for the launched process only. This is an operator-authorized installation action, not authority a plugin grants itself at runtime.
 
 ## Actor naming lifecycle
 
-Actor naming is explicit and backward compatible. Omit `--name-mode` to keep
-the original behavior. `--name-mode exact` refuses another live run for the
+New product setup defaults to `--name-mode allocate`; rerunning an existing
+setup preserves its prior choice. Advanced setup can omit `--name-mode` to keep
+the original shared-inbox behavior. `--name-mode exact` refuses another live run for the
 same actor; launcher-only `--takeover` records and supersedes the old presence.
 `--name-mode allocate` treats the configured actor as a base and atomically
 mints a suffix when necessary. A harness session ID automatically reclaims the
@@ -74,7 +75,8 @@ continuity to an external supervisor. Separately launched workers in one
 working directory remain isolated because continuity never depends on cwd.
 
 Allocation, continuity binding, and the mint event commit in one daemon
-transaction. The ready handshake returns the assigned actor before hooks or MCP
+transaction. Reserved aliases are skipped by allocation and cannot shadow an
+actor identity. The ready handshake returns the assigned actor before hooks or MCP
 operations are accepted, and every later operation uses that immutable bound
 identity. Naming flags are setup/launcher controls and are not exposed as agent
 tools.
@@ -111,7 +113,7 @@ The normal product setup is:
 holler setup claude
 ```
 
-It registers the marketplace, installs or updates the plugin, merges only the frozen eleven-tool allowlist and Holler plugin options into Claude user settings, writes `~/.holler/connectors/claude.json`, and installs and verifies the per-user daemon; changed existing files receive `.bak` backups.
+It registers the marketplace, installs or updates the plugin, merges only the frozen fifteen-tool allowlist and Holler plugin options into Claude user settings, writes `~/.holler/connectors/claude.json`, and installs and verifies the per-user daemon; changed existing files receive `.bak` backups.
 
 Plain `claude` sessions load the persisted connector binding and setup-recorded Holler executable, so hook-long-poll does not depend on shell-only environment variables. Use the connector launcher when the session needs an explicit identity override or a separately addressable actor:
 

@@ -351,8 +351,12 @@ func checkPolicy(runtime *doctorRuntime, config *DoctorConfig, manifest Capabili
 				if _, present := enabled[tool.Name]; !present {
 					missing = append(missing, tool.Name)
 				}
-				if server.Tools[tool.Name].ApprovalMode != "approve" {
-					missing = append(missing, "tools."+tool.Name+".approval_mode=approve")
+				expected := "approve"
+				if tool.RequiresExplicitApproval {
+					expected = "prompt"
+				}
+				if server.Tools[tool.Name].ApprovalMode != expected {
+					missing = append(missing, "tools."+tool.Name+".approval_mode="+expected)
 				}
 			}
 		}

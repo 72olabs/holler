@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "connector": "holler",
-  "connector_version": "0.5.1",
+  "connector_version": "0.6.0",
   "protocol_version": 1,
   "harness": "opencode",
   "plugin_name": "holler",
@@ -19,8 +19,8 @@
     "skills/holler/SKILL.md",
     "skills/holler-setup/SKILL.md"
   ],
-  "package_hash": "sha256:bc6ca4fbe65f61102555b02485643e3731910d4f39acc8df5ae4ef226e5c3eae",
-  "tool_surface_hash": "sha256:68b22898f6a8bf89a6505a2e49e5704e7732f64fcb518ca5e9c22d7701093e42",
+  "package_hash": "sha256:e94a7aaf88812ebbbc8eb1816592be6e5c9022063d1867cda3393583b79cdfb9",
+  "tool_surface_hash": "sha256:d73c23c21a9d790777b78fb4e45a23473bccc0ab0d33be7270f0ff138b5e7ed1",
   "mcp_server_name": "holler",
   "tools": [
     {"name": "bus_send", "class": "idempotent-write"},
@@ -33,7 +33,11 @@
     {"name": "bus_status", "class": "read-only"},
     {"name": "holler_profile", "class": "idempotent-write"},
     {"name": "holler_who", "class": "read-only"},
-    {"name": "holler_adopt", "class": "idempotent-write", "requires_explicit_approval": true}
+    {"name": "holler_adopt", "class": "idempotent-write", "requires_explicit_approval": true},
+    {"name": "holler_aliases", "class": "read-only"},
+    {"name": "holler_alias_resolve", "class": "read-only"},
+    {"name": "holler_alias_set", "class": "idempotent-write", "requires_explicit_approval": true},
+    {"name": "holler_alias_remove", "class": "idempotent-write", "requires_explicit_approval": true}
   ],
   "profiles": [
     {"name": "async-peer", "requires_wake": false, "description": "Durable messaging with visible polling fallback."},

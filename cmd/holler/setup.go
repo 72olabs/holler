@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/72olabs/holler/internal/api"
+	"github.com/72olabs/holler/internal/bus"
 	"github.com/72olabs/holler/internal/connector"
 )
 
@@ -39,8 +40,10 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 	existingAttention, existingNameMode, existingActor, existingRole, existingPeer := "", "", "", "", ""
 	existingProject, existingRoot, existingChannel, existingSocket := "", "", "", ""
 	existingPluginID, existingProfile, existingClient := "", "", ""
+	hasExistingConfig := false
 	if harness == "claude" {
 		if configured, err := connector.LoadClaudeConnectorConfig(""); err == nil {
+			hasExistingConfig = true
 			existingAttention, existingActor, existingRole, existingPeer = configured.AttentionMode, configured.Actor, configured.Role, configured.Peer
 			existingNameMode = configured.NameMode
 			existingProject, existingChannel, existingSocket = configured.Project, configured.Channel, configured.Socket
@@ -52,6 +55,7 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 			fmt.Fprintf(stderr, "warning: existing Claude connector selection is invalid and will be replaced only after confirmation; its first backup is preserved: %v\n", err)
 		}
 	} else if configured, err := connector.LoadCodexConnectorConfig(""); err == nil {
+		hasExistingConfig = true
 		existingAttention, existingActor, existingRole, existingPeer = configured.AttentionMode, configured.Actor, configured.Role, configured.Peer
 		existingNameMode = configured.NameMode
 		existingProject, existingRoot, existingChannel, existingSocket = configured.Project, configured.ProjectRoot, configured.Channel, configured.Socket
@@ -69,10 +73,14 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 		defaultActor, defaultPeer = "codex", "claude"
 	}
 	workingDirectory, _ := os.Getwd()
+	defaultNameMode := existingNameMode
+	if !hasExistingConfig {
+		defaultNameMode = string(bus.NameModeAllocate)
+	}
 
 	flags := commandFlags("setup "+harness, stderr)
 	attention := flags.String("attention", firstNonEmptyString(existingAttention, defaultAttention), "harness attention mode")
-	nameMode := flags.String("name-mode", existingNameMode, "actor naming: exact or allocate; omitted preserves legacy behavior")
+	nameMode := flags.String("name-mode", defaultNameMode, "actor naming: exact or allocate; new installations default to allocate")
 	actor := flags.String("actor", firstNonEmptyString(existingActor, defaultActor), "durable inbox identity")
 	role := flags.String("role", firstNonEmptyString(existingRole, "assistant"), "actor role")
 	peer := flags.String("peer", firstNonEmptyString(existingPeer, defaultPeer), "default peer actor")

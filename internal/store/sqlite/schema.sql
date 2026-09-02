@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS messages (
     body BLOB NOT NULL,
     created_at_ns INTEGER NOT NULL,
     expires_at_ns INTEGER,
+	requested_recipients_json BLOB,
     UNIQUE (from_actor, idempotency_key)
 );
 
@@ -102,6 +103,11 @@ CREATE TABLE IF NOT EXISTS actor_allocations (
     UNIQUE (base_actor, ordinal)
 );
 
+CREATE TABLE IF NOT EXISTS actor_names (
+    actor TEXT PRIMARY KEY,
+    first_seen_at_ns INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS continuity_bindings (
     handle TEXT PRIMARY KEY,
     actor TEXT NOT NULL,
@@ -124,6 +130,34 @@ CREATE TABLE IF NOT EXISTS actor_adoptions (
     adopted_at_ns INTEGER NOT NULL,
     UNIQUE (adopting_actor, idempotency_key)
 );
+
+CREATE TABLE IF NOT EXISTS actor_aliases (
+    alias TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    updated_by_actor TEXT NOT NULL,
+    updated_by_run TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    updated_at_ns INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS actor_alias_history (
+    alias TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    updated_by_actor TEXT NOT NULL,
+    updated_by_run TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    updated_at_ns INTEGER NOT NULL,
+    PRIMARY KEY (alias, revision),
+    UNIQUE (updated_by_actor, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS actor_alias_history_updated
+    ON actor_alias_history(updated_at_ns, alias, revision);
 
 CREATE TABLE IF NOT EXISTS partition_counters (
     partition_id TEXT NOT NULL,

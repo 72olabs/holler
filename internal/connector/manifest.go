@@ -9,7 +9,7 @@ import (
 	"github.com/72olabs/holler/internal/mcp"
 )
 
-const ConnectorVersion = "0.5.1"
+const ConnectorVersion = "0.6.0"
 
 type ReadinessState string
 
@@ -73,6 +73,10 @@ var commonTools = []ToolPermission{
 	{Name: "holler_profile", Class: "idempotent-write"},
 	{Name: "holler_who", Class: "read-only"},
 	{Name: "holler_adopt", Class: "idempotent-write", RequiresExplicitApproval: true},
+	{Name: "holler_aliases", Class: "read-only"},
+	{Name: "holler_alias_resolve", Class: "read-only"},
+	{Name: "holler_alias_set", Class: "idempotent-write", RequiresExplicitApproval: true},
+	{Name: "holler_alias_remove", Class: "idempotent-write", RequiresExplicitApproval: true},
 }
 
 var commonProfiles = []CapabilityProfile{
@@ -104,12 +108,12 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:1db4e2fed2b7536f95b98f57719157c0a87895a481e7d70bb77b7a6e6db3936b"
+		base.PackageHash = "sha256:5a8cb1b73d0eed347b9a55410de49e1c2c68d6c43a96eabc87fbfc5785b32bd3"
 	case "claude":
 		base.PluginID = DefaultClaudePluginID
 		base.ClientCommand = "claude"
 		base.MinimumClient = "2.1.247"
-		base.TestedClient = "2.1.252"
+		base.TestedClient = "2.1.258"
 		base.LifecycleEvents = []string{"startup", "resume", "clear", "compact", "fork", "stop", "stop_failure", "end"}
 		base.NotificationMode = AttentionHookLongPoll
 		base.NotificationFallback = "startup-only"
@@ -120,7 +124,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:7c9b45ffba0faa2e35aba715568f9b4991eaf00e084683aa7ff447fa287d624b"
+		base.PackageHash = "sha256:6827ed6f1a82267393a6eff25ddf401f154e5875f94f212a05b739f8b60d3eca"
 	case "opencode":
 		base.PluginID = DefaultOpenCodePluginID
 		base.ClientCommand = "opencode"
@@ -134,7 +138,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"plugins/holler.js", "scripts/holler",
 			"skills/holler/SKILL.md", "skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:bc6ca4fbe65f61102555b02485643e3731910d4f39acc8df5ae4ef226e5c3eae"
+		base.PackageHash = "sha256:e94a7aaf88812ebbbc8eb1816592be6e5c9022063d1867cda3393583b79cdfb9"
 	default:
 		return CapabilityManifest{}, fmt.Errorf("unsupported harness %q: %w", harness, errors.New("expected codex, claude, or opencode"))
 	}

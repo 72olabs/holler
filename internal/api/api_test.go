@@ -58,6 +58,47 @@ func TestUnixAPIMessageLifecycleAndSessionIdentity(t *testing.T) {
 	}
 }
 
+func TestUnixAPIAliasMutationResolutionAndActorCollision(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	claude := dial(t, socket, "claude", "claude-run")
+	if _, err := claude.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: "claude", RunID: "claude-run", Harness: "test", SessionID: "claude-session",
+		ProjectID: "default", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	operator := dial(t, socket, "operator", "operator-run")
+	hidden := dial(t, socket, "hidden-live-actor", "hidden-run")
+	defer hidden.Close()
+	if _, err := operator.SetAlias(ctx, bus.AliasSetRequest{
+		Alias: "hidden-live-actor", Actor: "claude", ProjectID: "default", IdempotencyKey: "hidden-collision",
+	}); !errors.Is(err, bus.ErrAliasConflict) {
+		t.Fatalf("connected actor collision error = %v", err)
+	}
+	alias, err := operator.SetAlias(ctx, bus.AliasSetRequest{
+		Alias: "skillbank", Actor: "claude", ProjectID: "default", IdempotencyKey: "api-alias-set",
+	})
+	if err != nil || alias.Alias.Actor != "claude" {
+		t.Fatalf("set alias = %+v, err = %v", alias, err)
+	}
+	resolved, err := operator.ResolveAlias(ctx, "skillbank")
+	if err != nil || resolved.Actor != "claude" {
+		t.Fatalf("resolve alias = %+v, err = %v", resolved, err)
+	}
+	sender := dial(t, socket, "codex", "codex-run")
+	sent, err := sender.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "api-alias-send", ProjectID: "default", ChannelID: "direct",
+		ToActors: []string{"skillbank"}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"review"}`),
+	})
+	if err != nil || len(sent.Message.ToActors) != 1 || sent.Message.ToActors[0] != "claude" {
+		t.Fatalf("alias send = %+v, err = %v", sent, err)
+	}
+	if _, err := api.Dial(ctx, socket, api.Identity{Actor: "skillbank", RunID: "shadow-run", Client: "test"}); !errors.Is(err, bus.ErrAliasConflict) {
+		t.Fatalf("alias actor collision error = %v", err)
+	}
+}
+
 func TestUnixAPIAdoptsInactiveInboxWithConnectionBoundIdentity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	_, socket := startServer(t, ctx, cancel)

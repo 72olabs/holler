@@ -26,6 +26,7 @@ const (
 	MaxFrameBytes             = 2 << 20
 	MaxAttentionWait          = 25 * time.Second
 	ActorAllocationCapability = "actor-allocation-v1"
+	ActorAliasCapability      = "actor-alias-v1"
 )
 
 type Identity struct {
@@ -95,6 +96,11 @@ type Store interface {
 	FinalizeActorAllocation(context.Context, string, string, string, []string) error
 	CurrentActorForContinuity(context.Context, []string) (string, error)
 	ReleaseProvisionalActor(context.Context, string) error
+	ReserveActorName(context.Context, string) error
+	SetAlias(context.Context, bus.AliasSetRequest) (bus.AliasMutationResult, error)
+	RemoveAlias(context.Context, bus.AliasRemoveRequest) (bus.AliasMutationResult, error)
+	ListAliases(context.Context) ([]bus.ActorAlias, error)
+	ResolveAlias(context.Context, string) (bus.ActorAlias, error)
 }
 
 type AttentionBroker interface {
@@ -256,11 +262,14 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 				s.attention.Cancel(presence.Actor, presence.RunID, presence.SessionID, bus.ErrPresenceSuperseded)
 			}
 		}
+	} else if err := s.store.ReserveActorName(connectionCtx, assignedActor); err != nil {
+		_ = writeResponse(connection, Response{ID: request.ID, OK: false, Error: rpcError(err)})
+		return
 	}
 	ready, _ := json.Marshal(map[string]interface{}{
 		"protocol": ProtocolVersion, "daemon": "hollerd/0.1", "actor": assignedActor,
 		"requested_actor": hello.Actor, "run_id": hello.RunID, "server_time": time.Now().UTC(), "build": s.build,
-		"capabilities": []string{ActorAllocationCapability}, "minted": binding.Minted,
+		"capabilities": []string{ActorAllocationCapability, ActorAliasCapability}, "minted": binding.Minted,
 		"continuity_reclaimed": binding.ContinuityReclaimed, "provisional": binding.Provisional,
 		"adopted_predecessor": binding.AdoptedPredecessor,
 	})
@@ -320,7 +329,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 
 func finalizesProvisionalActor(operation string) bool {
 	switch operation {
-	case "ping", "list_events", "who", "live_registrations", "heartbeat_registrations":
+	case "ping", "list_events", "who", "list_aliases", "resolve_alias", "live_registrations", "heartbeat_registrations":
 		return false
 	default:
 		return true
@@ -348,7 +357,7 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 	case "ping":
 		return DaemonInfo{
 			Protocol: ProtocolVersion, Actor: identity.Actor, PID: os.Getpid(), Build: s.build,
-			Capabilities: []string{ActorAllocationCapability},
+			Capabilities: []string{ActorAllocationCapability, ActorAliasCapability},
 		}, nil
 	case "send":
 		var request bus.SendRequest
@@ -509,6 +518,47 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 			SourceActor: args.SourceActor, AdoptingActor: identity.Actor, AdoptingRun: identity.RunID,
 			ProjectID: args.ProjectID, IdempotencyKey: args.IdempotencyKey,
 		})
+	case "set_alias":
+		var args struct {
+			Alias          string `json:"alias"`
+			Actor          string `json:"actor"`
+			ProjectID      string `json:"project_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.SetAlias(ctx, bus.AliasSetRequest{
+			Alias: args.Alias, Actor: args.Actor, UpdatedByActor: identity.Actor,
+			UpdatedByRun: identity.RunID, ProjectID: args.ProjectID, IdempotencyKey: args.IdempotencyKey,
+		})
+	case "remove_alias":
+		var args struct {
+			Alias          string `json:"alias"`
+			ProjectID      string `json:"project_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.RemoveAlias(ctx, bus.AliasRemoveRequest{
+			Alias: args.Alias, UpdatedByActor: identity.Actor, UpdatedByRun: identity.RunID,
+			ProjectID: args.ProjectID, IdempotencyKey: args.IdempotencyKey,
+		})
+	case "list_aliases":
+		var args struct{}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.ListAliases(ctx)
+	case "resolve_alias":
+		var args struct {
+			Alias string `json:"alias"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.ResolveAlias(ctx, args.Alias)
 	case "register_session":
 		var request bus.RegistrationRequest
 		if err := decodeStrict(raw, &request); err != nil {
@@ -646,7 +696,7 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild bool) er
 	}
 	featureIdentity := c.helloIdentity.NameMode != "" || len(c.helloIdentity.ContinuityHandles) > 0 || c.helloIdentity.Takeover
 	if featureIdentity {
-		hello["capabilities"] = []string{ActorAllocationCapability}
+		hello["capabilities"] = []string{ActorAllocationCapability, ActorAliasCapability}
 		hello["name_mode"] = c.helloIdentity.NameMode
 		hello["continuity_handles"] = c.helloIdentity.ContinuityHandles
 		hello["project_id"] = c.helloIdentity.ProjectID
@@ -877,6 +927,35 @@ func (c *Client) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.
 	return result, err
 }
 
+func (c *Client) SetAlias(ctx context.Context, request bus.AliasSetRequest) (bus.AliasMutationResult, error) {
+	var result bus.AliasMutationResult
+	err := c.call(ctx, "set_alias", map[string]interface{}{
+		"alias": request.Alias, "actor": request.Actor, "project_id": request.ProjectID,
+		"idempotency_key": request.IdempotencyKey,
+	}, &result)
+	return result, err
+}
+
+func (c *Client) RemoveAlias(ctx context.Context, request bus.AliasRemoveRequest) (bus.AliasMutationResult, error) {
+	var result bus.AliasMutationResult
+	err := c.call(ctx, "remove_alias", map[string]interface{}{
+		"alias": request.Alias, "project_id": request.ProjectID, "idempotency_key": request.IdempotencyKey,
+	}, &result)
+	return result, err
+}
+
+func (c *Client) ListAliases(ctx context.Context) ([]bus.ActorAlias, error) {
+	var result []bus.ActorAlias
+	err := c.call(ctx, "list_aliases", struct{}{}, &result)
+	return result, err
+}
+
+func (c *Client) ResolveAlias(ctx context.Context, alias string) (bus.ActorAlias, error) {
+	var result bus.ActorAlias
+	err := c.call(ctx, "resolve_alias", map[string]interface{}{"alias": alias}, &result)
+	return result, err
+}
+
 func (c *Client) RegisterSession(ctx context.Context, request bus.RegistrationRequest) (bus.Registration, error) {
 	if err := c.requireActor(request.Actor); err != nil {
 		return bus.Registration{}, err
@@ -1030,7 +1109,7 @@ func (c *Client) callOnceLocked(ctx context.Context, op string, args interface{}
 
 func retryAfterReconnect(op string) bool {
 	switch op {
-	case "ping", "send", "check_inbox", "ack", "extend", "list_events", "who", "live_registrations", "monitor_attach", "expire_registration", "heartbeat_registrations":
+	case "ping", "send", "check_inbox", "ack", "extend", "list_events", "who", "set_alias", "remove_alias", "list_aliases", "resolve_alias", "live_registrations", "monitor_attach", "expire_registration", "heartbeat_registrations":
 		return true
 	default:
 		return false
@@ -1170,6 +1249,12 @@ func rpcError(err error) *RPCError {
 		code = "run_not_live"
 	case errors.Is(err, bus.ErrActorAdopted):
 		code = "actor_adopted"
+	case errors.Is(err, bus.ErrAliasConflict):
+		code = "alias_conflict"
+	case errors.Is(err, bus.ErrAliasNotFound):
+		code = "alias_not_found"
+	case errors.Is(err, bus.ErrAliasTargetUnknown):
+		code = "alias_target_unknown"
 	}
 	return &RPCError{Code: code, Message: err.Error(), Retryable: false}
 }
@@ -1222,10 +1307,20 @@ func errorFromRPC(rpc *RPCError) error {
 		sentinel = bus.ErrRunNotLive
 	case "actor_adopted":
 		sentinel = bus.ErrActorAdopted
+	case "alias_conflict":
+		sentinel = bus.ErrAliasConflict
+	case "alias_not_found":
+		sentinel = bus.ErrAliasNotFound
+	case "alias_target_unknown":
+		sentinel = bus.ErrAliasTargetUnknown
 	}
 	if sentinel != nil {
-		if rpc.Message == "" || rpc.Message == sentinel.Error() {
+		text := sentinel.Error()
+		if rpc.Message == "" || rpc.Message == text {
 			return sentinel
+		}
+		if strings.HasSuffix(rpc.Message, ": "+text) {
+			return fmt.Errorf("%s: %w", strings.TrimSuffix(rpc.Message, ": "+text), sentinel)
 		}
 		return fmt.Errorf("%s: %w", rpc.Message, sentinel)
 	}
