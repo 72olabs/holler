@@ -1,3 +1,54 @@
+# Holler 0.6.1
+
+Holler 0.6.1 makes 0.6.0's MCP upgrade boundary a one-time event. It adds a
+fixed capability bridge whose implementation and catalog live in `hollerd`, so
+a running 0.6.1 MCP child can use capabilities shipped by a later daemon.
+
+## Highlights
+
+- `holler_capabilities` returns the current daemon-owned typed catalog.
+- `holler_read` invokes only catalog entries enforced as read-only by the
+  daemon.
+- `holler_write` invokes only write entries and remains `prompt`/`ask` gated in
+  every packaged connector policy.
+- Approving the generic `holler_write` bridge may also authorize write
+  capabilities introduced by later daemon versions. This broader approval is
+  the tradeoff that permits restart-free capability additions.
+- The local API adds `list_capabilities`, `invoke_read_capability`, and
+  `invoke_write_capability` without changing protocol version 1.
+- Generic capability writes are not replayed after an ambiguous transport
+  failure; each operation retains responsibility for its own idempotency key.
+
+## Upgrade boundary
+
+A process that is already running Holler 0.6.0 cannot execute code introduced
+by 0.6.1. Upgrade the package, rerun setup, and reconnect that existing harness
+once so it loads the three bridge tools:
+
+```sh
+brew update
+brew upgrade 72olabs/tap/holler
+holler setup claude
+holler setup codex
+```
+
+After that bootstrap, later daemon upgrades do not require the MCP child to be
+replaced for capabilities exposed through the bridge. The reference client
+reconnects to a restarted daemon, refreshes the catalog, and invokes the new
+operation through the same fixed tool surface.
+
+## Validation
+
+- An unchanged MCP server and API client were connected to one daemon, then the
+  daemon was replaced with a build exposing a new `future.echo` capability.
+  The same MCP server discovered and invoked it successfully.
+- The daemon rejected a read capability sent through `holler_write` and a write
+  capability sent through `holler_read`.
+- Connector manifest tests verify the frozen eighteen-tool surface and require
+  explicit approval for the generic write bridge.
+
+---
+
 # Holler 0.6.0
 
 Holler 0.6.0 makes parallel agent sessions independently addressable and adds

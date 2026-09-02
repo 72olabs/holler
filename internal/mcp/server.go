@@ -36,6 +36,12 @@ type Store interface {
 	ResolveAlias(context.Context, string) (bus.ActorAlias, error)
 }
 
+type capabilityStore interface {
+	ListCapabilities(context.Context) ([]bus.CapabilityDescriptor, error)
+	InvokeReadCapability(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	InvokeWriteCapability(context.Context, string, json.RawMessage) (json.RawMessage, error)
+}
+
 type Config struct {
 	Actor     string
 	RunID     string
@@ -458,6 +464,42 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			return nil, err
 		}
 		return s.store.ResolveAlias(ctx, args.Alias)
+	case "holler_capabilities":
+		if err := decodeStrict(raw, &struct{}{}); err != nil {
+			return nil, err
+		}
+		bridge, ok := s.store.(capabilityStore)
+		if !ok {
+			return nil, errors.New("connected Holler API does not support the capability bridge")
+		}
+		capabilities, err := bridge.ListCapabilities(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"capabilities": capabilities}, nil
+	case "holler_read", "holler_write":
+		var args struct {
+			Capability string          `json:"capability"`
+			Arguments  json.RawMessage `json:"arguments"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		args.Capability = strings.TrimSpace(args.Capability)
+		if args.Capability == "" {
+			return nil, &bus.ValidationError{Field: "capability", Problem: "is required"}
+		}
+		if len(args.Arguments) == 0 {
+			args.Arguments = json.RawMessage(`{}`)
+		}
+		bridge, ok := s.store.(capabilityStore)
+		if !ok {
+			return nil, errors.New("connected Holler API does not support the capability bridge")
+		}
+		if name == "holler_read" {
+			return bridge.InvokeReadCapability(ctx, args.Capability, args.Arguments)
+		}
+		return bridge.InvokeWriteCapability(ctx, args.Capability, args.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -669,6 +711,33 @@ func toolDefinitions() []map[string]interface{} {
 				"idempotency_key": stringProperty("stable key for this explicitly authorized removal"),
 			}, "alias", "idempotency_key"),
 			"annotations": map[string]bool{"readOnlyHint": false, "idempotentHint": true, "destructiveHint": true},
+		},
+		{
+			"name": "holler_capabilities", "description": "Discover the current daemon-owned capability catalog without restarting this MCP session. Each entry includes its enforced read/write mode and input schema.",
+			"inputSchema": object(map[string]interface{}{}),
+			"annotations": map[string]bool{"readOnlyHint": true},
+		},
+		{
+			"name": "holler_read", "description": "Invoke a read-only capability from the current daemon catalog. The daemon rejects write capabilities on this bridge.",
+			"inputSchema": object(map[string]interface{}{
+				"capability": stringProperty("read capability name from holler_capabilities"),
+				"arguments": map[string]interface{}{
+					"type": "object", "description": "arguments matching the capability input schema",
+					"additionalProperties": true,
+				},
+			}, "capability"),
+			"annotations": map[string]bool{"readOnlyHint": true},
+		},
+		{
+			"name": "holler_write", "description": "Invoke a write capability from the current daemon catalog only after explicit user authorization. Approving this generic bridge may also authorize write capabilities introduced by later daemon versions. The daemon rejects read capabilities on this bridge.",
+			"inputSchema": object(map[string]interface{}{
+				"capability": stringProperty("write capability name from holler_capabilities"),
+				"arguments": map[string]interface{}{
+					"type": "object", "description": "arguments matching the capability input schema",
+					"additionalProperties": true,
+				},
+			}, "capability"),
+			"annotations": map[string]bool{"readOnlyHint": false, "idempotentHint": false, "destructiveHint": true},
 		},
 	}
 }

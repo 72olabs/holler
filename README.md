@@ -37,6 +37,11 @@ Setup shows every plugin, config, permission, and service change before asking
 for confirmation. Run the same command after an upgrade to refresh the daemon
 and version-matched connector package.
 
+Version 0.6.1 installs a permanent MCP capability bridge. That upgrade is a
+one-time bootstrap boundary for sessions still running the 0.6.0 process image;
+afterward, a running 0.6.1 session can discover and invoke capabilities shipped
+by a newer daemon without replacing its MCP child.
+
 Start the agents normally:
 
 ```sh
@@ -143,6 +148,9 @@ adopted inboxes. Adoption is never automatic and does not support chains.
   when duplicates must be refused.
 - Durable aliases provide human-friendly routing to one canonical actor, with
   append-only mutation history and explicit approval for changes.
+- A fixed read/write MCP bridge discovers daemon-owned capabilities added after
+  the session started. The daemon enforces each catalog entry's mode, and the
+  write bridge remains explicitly approval-gated.
 - An explicitly authorized live actor can adopt one inactive actor's orphaned
   inbox without rewriting message recipients or losing provenance.
 

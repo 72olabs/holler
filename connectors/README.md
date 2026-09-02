@@ -54,13 +54,13 @@ OpenCode support targets the current 1.x plugin and configuration contract. `nat
 
 The files under `policies/` are examples to review and merge into a user, profile, managed, or enterprise configuration layer. A repository or plugin must not grant itself authority.
 
-For Codex, use a real `$CODEX_HOME/<name>.config.toml` profile or managed configuration. Codex 0.149.1 passed the least-privilege canary with a profile file but ignored the equivalent repeated dotted `-c` overrides for leased/write MCP calls. The policy therefore names the exact fifteen-tool allowlist and repeats a per-tool mode instead of relying only on the server default. Routine tools use `approve`; inbox adoption and alias mutation use `prompt`.
+For Codex, use a real `$CODEX_HOME/<name>.config.toml` profile or managed configuration. Codex 0.149.1 passed the least-privilege canary with a profile file but ignored the equivalent repeated dotted `-c` overrides for leased/write MCP calls. The policy therefore names the exact eighteen-tool allowlist and repeats a per-tool mode instead of relying only on the server default. Routine tools and the read capability bridge use `approve`; inbox adoption, alias mutation, and the generic write bridge use `prompt`.
 
 Codex plugin installation does not trust plugin hooks. A human can review the exact definition with `/hooks`, or externally vetted automation can use `--dangerously-bypass-hook-trust` for that one certification invocation. The latter proves hook functionality, not persisted operator trust.
 
-For Claude, pass the reviewed settings file using `--settings` or install equivalent operator/managed permissions. Routine Holler tools are pre-approved, while inbox adoption and alias mutation are installed as explicit `ask` rules because they permanently change routing state. Project settings are effective only after project trust.
+For Claude, pass the reviewed settings file using `--settings` or install equivalent operator/managed permissions. Routine Holler tools and the read capability bridge are pre-approved, while inbox adoption, alias mutation, and the generic write bridge are installed as explicit `ask` rules because they can change routing or other durable state. Project settings are effective only after project trust.
 
-For OpenCode, setup previews and, only after the operator chooses `--apply`, generates a connector-owned `opencode.json` with one local MCP server, exact `allow` entries for routine tools, and explicit `ask` entries for inbox adoption and alias mutation. It does not modify the user's general OpenCode config. The launcher points `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` at that isolated package for the launched process only. This is an operator-authorized installation action, not authority a plugin grants itself at runtime.
+For OpenCode, setup previews and, only after the operator chooses `--apply`, generates a connector-owned `opencode.json` with one local MCP server, exact `allow` entries for routine and read-bridge tools, and explicit `ask` entries for inbox adoption, alias mutation, and the generic write bridge. It does not modify the user's general OpenCode config. The launcher points `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR` at that isolated package for the launched process only. This is an operator-authorized installation action, not authority a plugin grants itself at runtime.
 
 ## Actor naming lifecycle
 
@@ -113,7 +113,7 @@ The normal product setup is:
 holler setup claude
 ```
 
-It registers the marketplace, installs or updates the plugin, merges only the frozen fifteen-tool allowlist and Holler plugin options into Claude user settings, writes `~/.holler/connectors/claude.json`, and installs and verifies the per-user daemon; changed existing files receive `.bak` backups.
+It registers the marketplace, installs or updates the plugin, merges only the frozen eighteen-tool allowlist and Holler plugin options into Claude user settings, writes `~/.holler/connectors/claude.json`, and installs and verifies the per-user daemon; changed existing files receive `.bak` backups.
 
 Plain `claude` sessions load the persisted connector binding and setup-recorded Holler executable, so hook-long-poll does not depend on shell-only environment variables. Use the connector launcher when the session needs an explicit identity override or a separately addressable actor:
 
@@ -194,7 +194,7 @@ Claude attention notices contain only the server-generated message ID and fixed 
 
 OpenCode treats an HTTP `204` from `prompt_async` only as acceptance by the local harness endpoint. It is not processing evidence; certification still requires the same message ID to be claimed and acknowledged through MCP.
 
-For an in-place source upgrade, build from a clean commit with `scripts/build.sh`, rerun `holler setup claude` and/or `holler setup codex`, then restart or reconnect harness clients. Package-manager installations keep service and marketplace references on the stable prefix rather than a versioned Cellar directory. Updated clients can fall back to the legacy protocol-v1 hello for ordinary operations, but certification remains unavailable until the daemon reports a clean build identity.
+For an in-place source upgrade, build from a clean commit with `scripts/build.sh`, then rerun `holler setup claude` and/or `holler setup codex`. Moving from 0.6.0 to 0.6.1 is a one-time reconnect boundary because a live 0.6.0 MCP process cannot gain the new bridge code. Once a session runs the 0.6.1 bridge, the unchanged MCP child can reconnect after later daemon upgrades, query `holler_capabilities`, and invoke new daemon-owned operations through the fixed read/write tools. Package-manager installations keep service and marketplace references on the stable prefix rather than a versioned Cellar directory. Updated clients can fall back to the legacy protocol-v1 hello for ordinary operations, but certification remains unavailable until the daemon reports a clean build identity.
 
 ## Remaining production work
 

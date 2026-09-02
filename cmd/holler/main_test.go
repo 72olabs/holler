@@ -386,6 +386,7 @@ func TestCLIHookExplainsStaleBindingWithoutBlockingHarnessStartup(t *testing.T) 
 }
 
 func TestCLIClaudeMonitorExitsTwoWithReferenceOnlyWake(t *testing.T) {
+	isolateClaudeConnectorConfig(t)
 	broker := attention.NewBroker()
 	socket := startAPIServerWithOptions(t, api.WithAttentionBroker(broker))
 	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
@@ -447,6 +448,7 @@ func TestCLIClaudeMonitorExitsTwoWithReferenceOnlyWake(t *testing.T) {
 }
 
 func TestCLIClaudeMonitorReconcilesDurableInboxBeforeParking(t *testing.T) {
+	isolateClaudeConnectorConfig(t)
 	socket := startAPIServerWithOptions(t, api.WithAttentionBroker(attention.NewBroker()))
 	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
 	t.Setenv("HOLLER_SOCKET", socket)
@@ -506,6 +508,7 @@ func TestCLIClaudeMonitorIsDisabledByAnotherSelectedAdapter(t *testing.T) {
 }
 
 func TestCLIClaudeMonitorFailsVisiblyWithoutResultChannel(t *testing.T) {
+	isolateClaudeConnectorConfig(t)
 	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
 	t.Setenv("HOLLER_SOCKET", filepath.Join(t.TempDir(), "holler.sock"))
 	t.Setenv("HOLLER_ACTOR", "claude")
@@ -519,6 +522,7 @@ func TestCLIClaudeMonitorFailsVisiblyWithoutResultChannel(t *testing.T) {
 }
 
 func TestCLIClaudeMonitorStopsWhenAttentionIsUnavailable(t *testing.T) {
+	isolateClaudeConnectorConfig(t)
 	socket := startAPIServerWithOptions(t)
 	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
 	t.Setenv("HOLLER_SOCKET", socket)
@@ -562,6 +566,7 @@ func TestCLIClaudeMonitorReportsTerminalPresenceOutcomes(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			isolateClaudeConnectorConfig(t)
 			socket := startAPIServerWithOptions(t, api.WithAttentionBroker(attention.NewBroker()))
 			client, err := api.Dial(context.Background(), socket, api.Identity{Actor: "claude", RunID: "claude-run", Client: "test"})
 			if err != nil {
@@ -649,6 +654,7 @@ func TestCLIClaudeMonitorStopsOnStaleBindingWithoutRetrying(t *testing.T) {
 func TestClaudeMonitorReconnectsAcrossShortAndLongDaemonOutages(t *testing.T) {
 	for _, outage := range []time.Duration{4 * time.Minute, 6 * time.Minute} {
 		t.Run(outage.String(), func(t *testing.T) {
+			isolateClaudeConnectorConfig(t)
 			type monitorResult struct {
 				exit   int
 				stderr string
@@ -761,6 +767,11 @@ func TestClaudeMonitorReconnectsAcrossShortAndLongDaemonOutages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func isolateClaudeConnectorConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOLLER_CONNECTOR_CONFIG", filepath.Join(t.TempDir(), "missing-claude-connector.json"))
 }
 
 func TestResultChannelContextCancelsOnSocketClosure(t *testing.T) {

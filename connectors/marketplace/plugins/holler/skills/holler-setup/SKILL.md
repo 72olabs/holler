@@ -15,7 +15,7 @@ It defaults to allocated actor base `codex`, peer `claude`, project `default`, a
 
 Codex owns executable-hook trust. On the first turn after installation or a package update, have the user inspect and trust the exact packaged `SessionStart` and `SessionEnd` commands and content hash when Codex prompts. Do not manipulate an internal trust store or recommend `--dangerously-bypass-hook-trust` for a normal session. Once trusted, normal `codex` launches reuse the connector automatically. Codex runs `SessionStart` on the first submitted turn, so native-queue addressability begins after that turn rather than when an untouched TUI opens.
 
-Rerun setup after upgrading Holler. Before uninstalling the package, use `holler setup codex --remove`; the command strips only the managed Codex policy and connector state and leaves the durable database intact.
+Rerun setup after upgrading Holler. Upgrading to 0.6.1 is the one-time bootstrap boundary for the fixed capability bridge: an MCP child that was already running 0.6.0 cannot gain those three tools, but sessions running 0.6.1 can discover later daemon capabilities without another tool-surface restart. Before uninstalling the package, use `holler setup codex --remove`; the command strips only the managed Codex policy and connector state and leaves the durable database intact.
 
 Use advanced connector setup when the user requests a custom attention mode, identity, project, policy destination, marketplace, or preview/apply split. Do not edit Codex configuration from memory:
 

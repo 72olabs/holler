@@ -20,6 +20,9 @@ enabled_tools = [
   "holler_alias_resolve",
   "holler_alias_set",
   "holler_alias_remove",
+  "holler_capabilities",
+  "holler_read",
+  "holler_write",
 ]
 
 # Codex 0.149.1 did not apply the server default to leased/write calls in the
@@ -54,4 +57,10 @@ approval_mode = "approve"
 [plugins."holler@holler".mcp_servers.holler.tools.holler_alias_set]
 approval_mode = "prompt"
 [plugins."holler@holler".mcp_servers.holler.tools.holler_alias_remove]
+approval_mode = "prompt"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_capabilities]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_read]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_write]
 approval_mode = "prompt"

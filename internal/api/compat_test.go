@@ -12,7 +12,7 @@ import (
 	store "github.com/72olabs/holler/internal/store/sqlite"
 )
 
-func TestClientFallsBackToLegacyHelloWithoutBuild(t *testing.T) {
+func TestClientFallsBackToLegacyHelloWithoutBuildOrProject(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "ab-compat-")
 	if err != nil {
 		t.Fatal(err)
@@ -25,7 +25,7 @@ func TestClientFallsBackToLegacyHelloWithoutBuild(t *testing.T) {
 	defer listener.Close()
 	done := make(chan error, 1)
 	go func() {
-		for attempt := 0; attempt < 2; attempt++ {
+		for attempt := 0; attempt < 3; attempt++ {
 			connection, err := listener.Accept()
 			if err != nil {
 				done <- err
@@ -44,6 +44,7 @@ func TestClientFallsBackToLegacyHelloWithoutBuild(t *testing.T) {
 				return
 			}
 			_, hasBuild := hello["build"]
+			_, hasProject := hello["project_id"]
 			if attempt == 0 {
 				if !hasBuild {
 					done <- &testError{"first hello did not include build metadata"}
@@ -59,6 +60,21 @@ func TestClientFallsBackToLegacyHelloWithoutBuild(t *testing.T) {
 				_ = connection.Close()
 				return
 			}
+			if attempt == 1 {
+				if !hasProject {
+					done <- &testError{"project-aware hello did not include project metadata"}
+					_ = connection.Close()
+					return
+				}
+				_ = writeResponse(connection, failure(request.ID, "bad_request", `json: unknown field "project_id"`, false))
+				_ = connection.Close()
+				continue
+			}
+			if hasProject {
+				done <- &testError{"oldest legacy fallback still included project metadata"}
+				_ = connection.Close()
+				return
+			}
 			result, _ := json.Marshal(map[string]interface{}{
 				"protocol": ProtocolVersion, "actor": "alice", "daemon": "hollerd/0.1",
 			})
@@ -69,7 +85,8 @@ func TestClientFallsBackToLegacyHelloWithoutBuild(t *testing.T) {
 	}()
 
 	client, err := Dial(context.Background(), listener.Addr().String(), Identity{
-		Actor: "alice", RunID: "run-1", Client: "test", Build: buildinfo.Info{Version: "test", Commit: "clean"},
+		Actor: "alice", RunID: "run-1", Client: "test", ProjectID: "coupon",
+		Build: buildinfo.Info{Version: "test", Commit: "clean"},
 	})
 	if err != nil {
 		t.Fatal(err)

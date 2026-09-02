@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/72olabs/holler/internal/api"
 	"github.com/72olabs/holler/internal/bus"
 	"github.com/72olabs/holler/internal/mcp"
 	store "github.com/72olabs/holler/internal/store/sqlite"
@@ -44,8 +49,8 @@ func TestMCPQuestionClaimAckRoundTrip(t *testing.T) {
 		t.Fatalf("server name = %q", got)
 	}
 	tools := nestedSlice(t, responses[1], "result", "tools")
-	if len(tools) != 15 {
-		t.Fatalf("tool count = %d, want 15", len(tools))
+	if len(tools) != 18 {
+		t.Fatalf("tool count = %d, want 18", len(tools))
 	}
 	adoptTool := tools[10].(map[string]interface{})
 	annotations := adoptTool["annotations"].(map[string]interface{})
@@ -94,6 +99,172 @@ func TestMCPQuestionClaimAckRoundTrip(t *testing.T) {
 	if got := nestedNumber(t, responses[1], "result", "structuredContent", "unread"); got != 0 {
 		t.Fatalf("unread after ack = %v", got)
 	}
+}
+
+func TestCapabilityBridgeSurvivesDaemonUpgradeWithoutReplacingMCPServer(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	db, err := store.Open(ctx, filepath.Join(directory, "holler.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	socketDirectory, err := os.MkdirTemp("/tmp", "holler-cap-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	socket := filepath.Join(socketDirectory, "holler.sock")
+
+	cancelOld, oldDone := serveCapabilityDaemon(t, socket, db)
+	client, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "operator", RunID: "operator-run", Client: "mcp-upgrade-test",
+		ProjectID: "coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server, err := mcp.New(client, mcp.Config{Actor: "operator", RunID: "operator-run", ProjectID: "coupon"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callMCP := persistentMCP(t, server)
+
+	response := callMCP(toolCall(1, "holler_capabilities", map[string]interface{}{}))
+	if capabilityNamed(t, response, "future.echo") {
+		t.Fatal("old daemon unexpectedly advertised future.echo")
+	}
+
+	cancelOld()
+	if err := <-oldDone; err != nil {
+		t.Fatalf("stop old daemon: %v", err)
+	}
+	cancelNew, newDone := serveCapabilityDaemon(t, socket, db, api.WithCapability(bus.CapabilityDescriptor{
+		Name: "future.echo", Mode: bus.CapabilityRead, Since: "future",
+		Description: "Echo a value to prove daemon-owned capability evolution.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}`),
+	}, func(_ context.Context, _ api.Store, _ api.Identity, raw json.RawMessage) (interface{}, error) {
+		var args struct {
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, err
+		}
+		return map[string]string{"echo": args.Value, "daemon": "upgraded"}, nil
+	}))
+	defer func() {
+		cancelNew()
+		if err := <-newDone; err != nil {
+			t.Errorf("stop new daemon: %v", err)
+		}
+	}()
+
+	// The MCP Server and API Client above are deliberately unchanged. The
+	// client's ordinary reconnect path reaches the replacement daemon.
+	responses := []map[string]interface{}{
+		callMCP(toolCall(2, "holler_capabilities", map[string]interface{}{})),
+		callMCP(toolCall(3, "holler_read", map[string]interface{}{
+			"capability": "future.echo", "arguments": map[string]interface{}{"value": "still here"},
+		})),
+		callMCP(toolCall(4, "holler_write", map[string]interface{}{
+			"capability": "future.echo", "arguments": map[string]interface{}{"value": "wrong lane"},
+		})),
+		callMCP(toolCall(5, "holler_read", map[string]interface{}{
+			"capability": "alias.set", "arguments": map[string]interface{}{
+				"alias": "reviewer", "actor": "operator", "idempotency_key": "wrong-lane",
+			},
+		})),
+		callMCP(toolCall(6, "holler_write", map[string]interface{}{
+			"capability": "alias.set", "arguments": map[string]interface{}{
+				"alias": "reviewer", "actor": "operator", "idempotency_key": "bridge-alias-set",
+			},
+		})),
+		callMCP(toolCall(7, "holler_read", map[string]interface{}{
+			"capability": "alias.resolve", "arguments": map[string]interface{}{"alias": "reviewer"},
+		})),
+	}
+	if !capabilityNamed(t, responses[0], "future.echo") {
+		t.Fatal("unchanged MCP server did not discover upgraded daemon capability")
+	}
+	if got := nestedString(t, responses[1], "result", "structuredContent", "echo"); got != "still here" {
+		t.Fatalf("future.echo result = %q", got)
+	}
+	for index, label := range []string{"read capability through write bridge", "write capability through read bridge"} {
+		if responses[index+2]["error"] == nil {
+			t.Fatalf("%s was accepted: %+v", label, responses[index+2])
+		}
+	}
+	if got := nestedString(t, responses[5], "result", "structuredContent", "actor"); got != "operator" {
+		t.Fatalf("alias.resolve through bridge actor = %q", got)
+	}
+	if got := nestedString(t, responses[5], "result", "structuredContent", "project_id"); got != "coupon" {
+		t.Fatalf("alias.resolve through bridge project = %q", got)
+	}
+}
+
+func persistentMCP(t *testing.T, server *mcp.Server) func(map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	inputReader, inputWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		err := server.Run(ctx, inputReader, outputWriter)
+		_ = outputWriter.Close()
+		done <- err
+	}()
+	encoder := json.NewEncoder(inputWriter)
+	decoder := json.NewDecoder(outputReader)
+	t.Cleanup(func() {
+		cancel()
+		_ = inputWriter.Close()
+		_ = outputReader.Close()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.ErrClosedPipe) {
+				t.Errorf("persistent MCP server: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("persistent MCP server did not stop")
+		}
+	})
+	return func(request map[string]interface{}) map[string]interface{} {
+		t.Helper()
+		if err := encoder.Encode(request); err != nil {
+			t.Fatalf("encode persistent MCP request: %v", err)
+		}
+		var response map[string]interface{}
+		if err := decoder.Decode(&response); err != nil {
+			t.Fatalf("decode persistent MCP response: %v", err)
+		}
+		return response
+	}
+}
+
+func serveCapabilityDaemon(t *testing.T, socket string, db *store.Store, options ...api.ServerOption) (context.CancelFunc, <-chan error) {
+	t.Helper()
+	_ = os.Remove(socket)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- api.NewServer(db, options...).Serve(ctx, listener) }()
+	return cancel, done
+}
+
+func capabilityNamed(t *testing.T, response map[string]interface{}, name string) bool {
+	t.Helper()
+	capabilities := nestedSlice(t, response, "result", "structuredContent", "capabilities")
+	for _, value := range capabilities {
+		capability, ok := value.(map[string]interface{})
+		if ok && capability["name"] == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMCPRejectsModelSuppliedSenderIdentity(t *testing.T) {
@@ -298,12 +469,12 @@ func TestToolSurfaceIdentityIsStable(t *testing.T) {
 	wantNames := []string{
 		"bus_send", "bus_check_inbox", "bus_claim", "bus_inbox", "bus_ack", "bus_extend", "bus_nack", "bus_status",
 		"holler_profile", "holler_who", "holler_adopt", "holler_aliases", "holler_alias_resolve",
-		"holler_alias_set", "holler_alias_remove",
+		"holler_alias_set", "holler_alias_remove", "holler_capabilities", "holler_read", "holler_write",
 	}
 	if got := strings.Join(mcp.ToolNames(), ","); got != strings.Join(wantNames, ",") {
 		t.Fatalf("tool names = %q", got)
 	}
-	const wantHash = "sha256:d73c23c21a9d790777b78fb4e45a23473bccc0ab0d33be7270f0ff138b5e7ed1"
+	const wantHash = "sha256:e1eae352b2d6000bd8ad564424b3d3b7d25ebf4c24eb5f88add5e380d6973b23"
 	if got := mcp.ToolSurfaceHash(); got != wantHash {
 		t.Fatalf("tool surface hash = %q, want %q; connector reauthorization is required for an intentional schema change", got, wantHash)
 	}

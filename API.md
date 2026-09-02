@@ -93,7 +93,9 @@ Build metadata is an additive protocol-v1 hello field. A new client first sends 
 
 Holler clients may explicitly negotiate actor allocation by adding capability
 `actor-allocation-v1`, `name_mode`, and continuity metadata to `hello`. Current
-clients also advertise `actor-alias-v1`:
+clients also advertise `actor-alias-v1`. The daemon ready response advertises
+`capability-bridge-v1` when it supports the stable discovery and invocation
+operations described below:
 
 ```json
 {
@@ -163,6 +165,9 @@ This implemented slice does not yet perform the Ed25519 challenge-response speci
 - `remove_alias {alias, project_id, idempotency_key}`
 - `list_aliases {}`
 - `resolve_alias {alias}`
+- `list_capabilities {}`
+- `invoke_read_capability {name, arguments}`
+- `invoke_write_capability {name, arguments}`
 - `register_session <RegistrationRequest>`
 - `heartbeat_registrations {lease_ns}`
 - `live_registrations {actor}`
@@ -219,12 +224,35 @@ Holler privately retains the original recipient expression for idempotency
 comparison, so retrying the same send after an alias is repointed returns the
 original message rather than retargeting it.
 
+`list_capabilities` returns a daemon-owned catalog whose entries contain
+`name`, enforced `mode` (`read` or `write`), `description`, `input_schema`, and
+the optional release that introduced the operation. The two invocation
+operations are deliberately separate. `hollerd` looks up the requested name
+and rejects a read capability on the write operation or a write capability on
+the read operation; callers cannot supply or override the mode. Capability
+handlers run with the connection-bound actor, run, and project identity.
+
+The 0.6.1 MCP shim exposes this protocol through three fixed tools:
+`holler_capabilities`, `holler_read`, and `holler_write`. That stable bridge lets
+an already-running 0.6.1 MCP process reconnect to an upgraded daemon, discover
+a later catalog entry, and invoke it without changing the MCP tool list. The
+write bridge remains an explicitly approved tool in every packaged connector
+policy. Persistently approving that generic bridge may also authorize write
+capabilities introduced by later daemon versions; this broader grant is the
+tradeoff for restart-free capability additions. A generic write is not
+automatically retried after transport failure; each write capability must
+define its own idempotency contract.
+
+This cannot retrofit the bridge into a 0.6.0 process image that is already
+running. Moving from 0.6.0 to 0.6.1 is therefore the one-time MCP bootstrap
+boundary; future daemon-owned capabilities can use the fixed bridge.
+
 For every new send whose delivery request asks for attention, the same transaction creates a durable notification-outbox row. `hollerd` dispatches it asynchronously after commit and retries transient failures without delaying the send response. The response reports `notification_state: "pending"`; outcomes are operational events, including `delivery.notification_abandoned` after five failed attempts. A wake failure does not convert a committed send into an RPC error, and an idempotent duplicate does not create a second outbox job. If no session is registered, startup hydration—not a delayed notification job—remains the durable fallback.
 
 The reference Go client reconnects and repeats the handshake after a daemon
 restart. It automatically retries only requests whose semantics make that
-safe; a claim is never silently repeated. Requests have bounded dial and
-operation deadlines.
+safe; neither a claim nor a generic capability write is silently repeated.
+Requests have bounded dial and operation deadlines.
 
 ## Client surfaces
 
