@@ -46,10 +46,19 @@ The local release candidate passed:
   seven scenarios from the packaged release artifact; and
 - packaged CLI smoke coverage for alias preflight, conditions, guarded archival
   with unread mail, archived discovery, and the read-only bare-harness migration
-  plan.
+  plan;
+- a packaged-artifact Codex CLI 0.151.0 canary covering native-queue wake,
+  claim, acknowledgement, and MCP reply with a `READY` certificate;
+- a packaged-artifact Claude Code 2.1.258 interactive canary covering an idle
+  hook-long-poll wake, automatic follow-up turn, claim, acknowledgement, and
+  MCP reply with a `READY` certificate and zero orphan release processes; and
+- an independent release-gate review that migrated a copy of the live database
+  without losing any of its 23 actors, 3 aliases, 243 messages, or unacknowledged
+  deliveries, then behaviorally verified routing, identity, lifecycle, and
+  operator-condition invariants.
 
-The branch and artifact remain local until the live connector canary and release
-review are complete.
+The final release artifact must be built from the exact `v0.7.0` tag so every
+binary and connector reports the public release version.
 
 ---
 
