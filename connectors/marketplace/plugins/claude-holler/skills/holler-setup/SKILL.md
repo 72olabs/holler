@@ -13,7 +13,7 @@ holler setup claude
 
 It defaults to allocated actor base `claude`, peer `codex`, project `default`, and live `hook-long-poll` attention. It discovers the installed Holler marketplace, installs or refreshes the plugin, merges only the frozen Holler MCP allowlist and plugin options into Claude user settings, records the absolute Holler executable and connector identity, installs the per-user `hollerd` service, starts it, and verifies the socket. Existing connector identity—including legacy naming mode—wins on a rerun. The command previews exact paths and actions and asks for confirmation; use `--dry-run` for a non-mutating plan or `--yes` only when the user explicitly authorizes unattended application.
 
-Rerun setup after upgrading Holler. Before uninstalling the package, use `holler setup claude --remove`; the command removes only Holler-managed Claude state and leaves the durable database intact.
+Rerun setup after upgrading Holler. Upgrading to 0.6.1 is the one-time bootstrap boundary for the fixed capability bridge: an MCP child that was already running 0.6.0 cannot gain those three tools, but sessions running 0.6.1 can discover later daemon capabilities without another tool-surface restart. Before uninstalling the package, use `holler setup claude --remove`; the command removes only Holler-managed Claude state and leaves the durable database intact.
 
 After setup, normal `claude` launches load the connector automatically; the user does not need the connector launcher. Use advanced connector setup when the user requests a custom attention mode, identity, project, scope, marketplace, or preview/apply split. Do not edit Claude settings from memory:
 

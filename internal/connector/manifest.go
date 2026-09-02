@@ -9,7 +9,7 @@ import (
 	"github.com/72olabs/holler/internal/mcp"
 )
 
-const ConnectorVersion = "0.6.0"
+const ConnectorVersion = "0.6.1"
 
 type ReadinessState string
 
@@ -77,6 +77,9 @@ var commonTools = []ToolPermission{
 	{Name: "holler_alias_resolve", Class: "read-only"},
 	{Name: "holler_alias_set", Class: "idempotent-write", RequiresExplicitApproval: true},
 	{Name: "holler_alias_remove", Class: "idempotent-write", RequiresExplicitApproval: true},
+	{Name: "holler_capabilities", Class: "read-only"},
+	{Name: "holler_read", Class: "read-only"},
+	{Name: "holler_write", Class: "dynamic-write", RequiresExplicitApproval: true},
 }
 
 var commonProfiles = []CapabilityProfile{
@@ -108,7 +111,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:5a8cb1b73d0eed347b9a55410de49e1c2c68d6c43a96eabc87fbfc5785b32bd3"
+		base.PackageHash = "sha256:c3f7fbe457f34b340fff28dd555ae16d078594be7d4a21487a75611d4a32b1e4"
 	case "claude":
 		base.PluginID = DefaultClaudePluginID
 		base.ClientCommand = "claude"
@@ -124,7 +127,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:6827ed6f1a82267393a6eff25ddf401f154e5875f94f212a05b739f8b60d3eca"
+		base.PackageHash = "sha256:c4317f1bc391aa80eab1be6ed55e8cdd55cf1b212a8675cd67f697c55e45bc2a"
 	case "opencode":
 		base.PluginID = DefaultOpenCodePluginID
 		base.ClientCommand = "opencode"
@@ -138,7 +141,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"plugins/holler.js", "scripts/holler",
 			"skills/holler/SKILL.md", "skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:e94a7aaf88812ebbbc8eb1816592be6e5c9022063d1867cda3393583b79cdfb9"
+		base.PackageHash = "sha256:66132f9a99703465189704d82ce4df7a5c97eae17f75ba32d140d30f560a68e8"
 	default:
 		return CapabilityManifest{}, fmt.Errorf("unsupported harness %q: %w", harness, errors.New("expected codex, claude, or opencode"))
 	}

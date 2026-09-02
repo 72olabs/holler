@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,6 +98,34 @@ func TestUnixAPIAliasMutationResolutionAndActorCollision(t *testing.T) {
 	}
 	if _, err := api.Dial(ctx, socket, api.Identity{Actor: "skillbank", RunID: "shadow-run", Client: "test"}); !errors.Is(err, bus.ErrAliasConflict) {
 		t.Fatalf("alias actor collision error = %v", err)
+	}
+}
+
+func TestUnixAPICapabilityModeIsEnforcedByDaemon(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var called atomic.Bool
+	_, socket := startServer(t, ctx, cancel, api.WithCapability(bus.CapabilityDescriptor{
+		Name: "test.write", Mode: bus.CapabilityWrite, Description: "Test write capability.",
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`),
+	}, func(context.Context, api.Store, api.Identity, json.RawMessage) (interface{}, error) {
+		called.Store(true)
+		return map[string]bool{"written": true}, nil
+	}))
+	client := dial(t, socket, "operator", "operator-run")
+
+	if _, err := client.InvokeReadCapability(ctx, "test.write", nil); !errors.Is(err, bus.ErrInvalid) ||
+		!strings.Contains(err.Error(), "test.write is write-only and cannot be invoked through the read bridge") {
+		t.Fatalf("read bridge error = %v", err)
+	}
+	if called.Load() {
+		t.Fatal("write capability handler ran through the read bridge")
+	}
+	result, err := client.InvokeWriteCapability(ctx, "test.write", nil)
+	if err != nil {
+		t.Fatalf("write bridge: %v", err)
+	}
+	if !called.Load() || string(result) != `{"written":true}` {
+		t.Fatalf("write result = %s, called = %v", result, called.Load())
 	}
 }
 

@@ -110,15 +110,21 @@ type AttentionBroker interface {
 }
 
 type Server struct {
-	store     Store
-	build     buildinfo.Info
-	attention AttentionBroker
+	store         Store
+	build         buildinfo.Info
+	attention     AttentionBroker
+	capabilities  map[string]registeredCapability
+	capabilityErr error
 }
 
 type ServerOption func(*Server)
 
 func NewServer(store Store, options ...ServerOption) *Server {
-	server := &Server{store: store, build: buildinfo.Current()}
+	server := &Server{
+		store: store, build: buildinfo.Current(),
+		capabilities: make(map[string]registeredCapability),
+	}
+	server.installDefaultCapabilities()
 	for _, option := range options {
 		option(server)
 	}
@@ -130,6 +136,9 @@ func WithAttentionBroker(broker AttentionBroker) ServerOption {
 }
 
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
+	if s.capabilityErr != nil {
+		return fmt.Errorf("configure daemon capabilities: %w", s.capabilityErr)
+	}
 	var activeMu sync.Mutex
 	active := make(map[net.Conn]struct{})
 	go func() {
@@ -214,6 +223,9 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	hello.Actor = strings.TrimSpace(hello.Actor)
 	hello.RunID = strings.TrimSpace(hello.RunID)
 	hello.ProjectID = strings.TrimSpace(hello.ProjectID)
+	if hello.ProjectID == "" {
+		hello.ProjectID = "default"
+	}
 	for index := range hello.ContinuityHandles {
 		hello.ContinuityHandles[index] = strings.TrimSpace(hello.ContinuityHandles[index])
 	}
@@ -237,9 +249,6 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	var binding bus.ActorBindResult
 	featureIdentity := hello.NameMode != "" || len(hello.ContinuityHandles) > 0 || hello.Takeover
 	if featureIdentity {
-		if hello.ProjectID == "" {
-			hello.ProjectID = "default"
-		}
 		if !containsString(hello.Capabilities, ActorAllocationCapability) {
 			_ = writeResponse(connection, failure(request.ID, "capability_required", "actor allocation requires capability "+ActorAllocationCapability, false))
 			return
@@ -269,7 +278,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	ready, _ := json.Marshal(map[string]interface{}{
 		"protocol": ProtocolVersion, "daemon": "hollerd/0.1", "actor": assignedActor,
 		"requested_actor": hello.Actor, "run_id": hello.RunID, "server_time": time.Now().UTC(), "build": s.build,
-		"capabilities": []string{ActorAllocationCapability, ActorAliasCapability}, "minted": binding.Minted,
+		"capabilities": []string{ActorAllocationCapability, ActorAliasCapability, CapabilityBridgeCapability}, "minted": binding.Minted,
 		"continuity_reclaimed": binding.ContinuityReclaimed, "provisional": binding.Provisional,
 		"adopted_predecessor": binding.AdoptedPredecessor,
 	})
@@ -329,7 +338,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 
 func finalizesProvisionalActor(operation string) bool {
 	switch operation {
-	case "ping", "list_events", "who", "list_aliases", "resolve_alias", "live_registrations", "heartbeat_registrations":
+	case "ping", "list_events", "who", "list_aliases", "resolve_alias", "list_capabilities", "invoke_read_capability", "live_registrations", "heartbeat_registrations":
 		return false
 	default:
 		return true
@@ -357,8 +366,24 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 	case "ping":
 		return DaemonInfo{
 			Protocol: ProtocolVersion, Actor: identity.Actor, PID: os.Getpid(), Build: s.build,
-			Capabilities: []string{ActorAllocationCapability, ActorAliasCapability},
+			Capabilities: []string{ActorAllocationCapability, ActorAliasCapability, CapabilityBridgeCapability},
 		}, nil
+	case "list_capabilities":
+		var args struct{}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.listCapabilities(), nil
+	case "invoke_read_capability", "invoke_write_capability":
+		var invocation bus.CapabilityInvocation
+		if err := decodeStrict(raw, &invocation); err != nil {
+			return nil, err
+		}
+		expected := bus.CapabilityRead
+		if op == "invoke_write_capability" {
+			expected = bus.CapabilityWrite
+		}
+		return s.invokeCapability(ctx, identity, expected, invocation)
 	case "send":
 		var request bus.SendRequest
 		if err := decodeStrict(raw, &request); err != nil {
@@ -665,18 +690,26 @@ func Dial(ctx context.Context, socketPath string, identity Identity) (*Client, e
 }
 
 func (c *Client) connectLocked(ctx context.Context) error {
-	err := c.connectAttemptLocked(ctx, true)
+	includeProject := c.helloIdentity.ProjectID != ""
+	err := c.connectAttemptLocked(ctx, true, includeProject)
 	if err != nil && strings.Contains(err.Error(), `unknown field "build"`) {
 		// Protocol v1 originally used strict hello decoding before build metadata
-		// was added. Fall back once so a new client can still operate during a
+		// was added. Fall back without it so a new client can still operate during a
 		// daemon-first rolling upgrade. The legacy daemon reports no build and
 		// therefore cannot produce READY certification evidence.
-		return c.connectAttemptLocked(ctx, false)
+		err = c.connectAttemptLocked(ctx, false, includeProject)
+	}
+	featureIdentity := c.helloIdentity.NameMode != "" || len(c.helloIdentity.ContinuityHandles) > 0 || c.helloIdentity.Takeover
+	if err != nil && includeProject && !featureIdentity && strings.Contains(err.Error(), `unknown field "project_id"`) {
+		// Project identity became part of protocol v1 after the oldest strict
+		// daemon. That daemon has no capability bridge, so legacy sessions may
+		// omit project context only to preserve their pre-bridge operations.
+		return c.connectAttemptLocked(ctx, false, false)
 	}
 	return err
 }
 
-func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild bool) error {
+func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild, includeProject bool) error {
 	dialer := net.Dialer{}
 	connection, err := dialer.DialContext(ctx, "unix", c.socketPath)
 	if err != nil {
@@ -695,11 +728,13 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild bool) er
 		"actor": c.helloIdentity.Actor, "run_id": c.helloIdentity.RunID,
 	}
 	featureIdentity := c.helloIdentity.NameMode != "" || len(c.helloIdentity.ContinuityHandles) > 0 || c.helloIdentity.Takeover
+	if includeProject {
+		hello["project_id"] = c.helloIdentity.ProjectID
+	}
 	if featureIdentity {
 		hello["capabilities"] = []string{ActorAllocationCapability, ActorAliasCapability}
 		hello["name_mode"] = c.helloIdentity.NameMode
 		hello["continuity_handles"] = c.helloIdentity.ContinuityHandles
-		hello["project_id"] = c.helloIdentity.ProjectID
 		hello["takeover"] = c.helloIdentity.Takeover
 	}
 	if includeBuild {
@@ -956,6 +991,33 @@ func (c *Client) ResolveAlias(ctx context.Context, alias string) (bus.ActorAlias
 	return result, err
 }
 
+func (c *Client) ListCapabilities(ctx context.Context) ([]bus.CapabilityDescriptor, error) {
+	var result []bus.CapabilityDescriptor
+	err := c.call(ctx, "list_capabilities", struct{}{}, &result)
+	return result, err
+}
+
+func (c *Client) InvokeReadCapability(ctx context.Context, name string, arguments json.RawMessage) (json.RawMessage, error) {
+	return c.invokeCapability(ctx, "invoke_read_capability", name, arguments)
+}
+
+func (c *Client) InvokeWriteCapability(ctx context.Context, name string, arguments json.RawMessage) (json.RawMessage, error) {
+	return c.invokeCapability(ctx, "invoke_write_capability", name, arguments)
+}
+
+func (c *Client) invokeCapability(ctx context.Context, operation, name string, arguments json.RawMessage) (json.RawMessage, error) {
+	if len(arguments) == 0 {
+		arguments = json.RawMessage(`{}`)
+	}
+	invocation := bus.CapabilityInvocation{Name: name, Arguments: arguments}
+	if err := bus.ValidateCapabilityInvocation(invocation); err != nil {
+		return nil, err
+	}
+	var result json.RawMessage
+	err := c.call(ctx, operation, invocation, &result)
+	return result, err
+}
+
 func (c *Client) RegisterSession(ctx context.Context, request bus.RegistrationRequest) (bus.Registration, error) {
 	if err := c.requireActor(request.Actor); err != nil {
 		return bus.Registration{}, err
@@ -1109,7 +1171,7 @@ func (c *Client) callOnceLocked(ctx context.Context, op string, args interface{}
 
 func retryAfterReconnect(op string) bool {
 	switch op {
-	case "ping", "send", "check_inbox", "ack", "extend", "list_events", "who", "set_alias", "remove_alias", "list_aliases", "resolve_alias", "live_registrations", "monitor_attach", "expire_registration", "heartbeat_registrations":
+	case "ping", "send", "check_inbox", "ack", "extend", "list_events", "who", "set_alias", "remove_alias", "list_aliases", "resolve_alias", "list_capabilities", "invoke_read_capability", "live_registrations", "monitor_attach", "expire_registration", "heartbeat_registrations":
 		return true
 	default:
 		return false

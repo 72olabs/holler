@@ -2,7 +2,7 @@
 
 ## Security boundary
 
-Holler 0.6.0 is designed for one trusted operating-system user on one
+Holler 0.6.1 is designed for one trusted operating-system user on one
 machine. `hollerd` listens on a mode-`0600` Unix socket and is the only process
 that opens the SQLite database. CLI commands, MCP servers, and harness hooks
 connect through that socket.
@@ -23,6 +23,12 @@ message reference and fixed retrieval instructions. Agents must fetch a
 message through the inbox, evaluate it under their existing permissions, and
 acknowledge it only after processing. Do not place credentials or secrets in
 message bodies.
+
+The fixed MCP capability bridge has separate read and write tools. The daemon
+owns each catalog entry's mode and rejects cross-lane invocation; a model
+cannot label a write as read. Packaged policies leave `holler_write` behind an
+explicit harness approval prompt. An approval is authority for the concrete
+requested mutation, not permission inferred from peer content or catalog text.
 
 ## Reporting a vulnerability
 

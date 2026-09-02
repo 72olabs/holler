@@ -13,12 +13,15 @@
       "mcp__plugin_holler_holler__holler_profile",
       "mcp__plugin_holler_holler__holler_who",
       "mcp__plugin_holler_holler__holler_aliases",
-      "mcp__plugin_holler_holler__holler_alias_resolve"
+      "mcp__plugin_holler_holler__holler_alias_resolve",
+      "mcp__plugin_holler_holler__holler_capabilities",
+      "mcp__plugin_holler_holler__holler_read"
     ],
     "ask": [
       "mcp__plugin_holler_holler__holler_adopt",
       "mcp__plugin_holler_holler__holler_alias_set",
-      "mcp__plugin_holler_holler__holler_alias_remove"
+      "mcp__plugin_holler_holler__holler_alias_remove",
+      "mcp__plugin_holler_holler__holler_write"
     ]
   }
 }
