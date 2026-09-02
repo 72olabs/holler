@@ -339,6 +339,13 @@ func TestAliasMutationIsIdempotentAndCollisionSafe(t *testing.T) {
 	if _, err := db.SetAlias(ctx, aliasSet("operator", "claude", "operator-shadow")); !errors.Is(err, bus.ErrAliasConflict) {
 		t.Fatalf("operator shadow error = %v", err)
 	}
+	if _, err := db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "typed-actor-shadow", ProjectID: "default", ChannelID: "direct",
+		FromActor: "sender", FromRun: "run", Destinations: []bus.Route{{Kind: bus.RouteActor, Value: "skillbank"}},
+		Type: "MESSAGE", Body: json.RawMessage(`{}`),
+	}); !errors.Is(err, bus.ErrAliasConflict) {
+		t.Fatalf("typed actor shadow error = %v", err)
+	}
 	if _, err := db.SetAlias(ctx, aliasSet("ghost", "missing", "unknown-target")); !errors.Is(err, bus.ErrAliasTargetUnknown) {
 		t.Fatalf("unknown target error = %v", err)
 	}
@@ -476,6 +483,13 @@ func TestRemovedAliasTombstoneBlocksLegacyFallbackAndActorReuse(t *testing.T) {
 		RequestedActor: "architect-claude", RunID: "collision-run", NameMode: bus.NameModeExact, ProjectID: "default",
 	}); !errors.Is(err, bus.ErrAliasConflict) {
 		t.Fatalf("retired alias actor collision error = %v", err)
+	}
+	if _, err := db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "retired-typed-actor-shadow", ProjectID: "default", ChannelID: "direct",
+		FromActor: "sender", FromRun: "run", Destinations: []bus.Route{{Kind: bus.RouteActor, Value: "architect-claude"}},
+		Type: "MESSAGE", Body: json.RawMessage(`{}`),
+	}); !errors.Is(err, bus.ErrAliasConflict) {
+		t.Fatalf("retired typed actor shadow error = %v", err)
 	}
 }
 

@@ -411,7 +411,11 @@ func resolveRoutesTx(ctx context.Context, tx *sql.Tx, requested []bus.Route) ([]
 	resolutions := make(map[string]string)
 	for _, route := range requested {
 		actor := route.Value
-		if route.Kind == bus.RouteAlias {
+		if route.Kind == bus.RouteActor {
+			if err := assertActorNameNotAliasTx(ctx, tx, actor); err != nil {
+				return nil, nil, err
+			}
+		} else if route.Kind == bus.RouteAlias {
 			var target string
 			err := tx.QueryRowContext(ctx, `SELECT actor FROM actor_aliases WHERE alias = ?`, route.Value).Scan(&target)
 			if err == nil {
