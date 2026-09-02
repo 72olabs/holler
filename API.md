@@ -126,8 +126,11 @@ run from reclaiming the superseded actor through continuity, returning the
 non-retryable `binding_stale` error. Ended or lapsed runs may still be resumed
 by a successor run.
 
-For supported harnesses, `hollerd` derives a non-secret harness-instance
-fingerprint from the Unix peer process and its harness ancestor. Clients cannot
+For the explicitly verified Claude, Codex, and OpenCode harnesses, `hollerd`
+derives a non-secret harness-instance fingerprint from the Unix peer process
+and its harness ancestor. Adding another harness requires a dedicated ancestry
+verifier and connector tests; the allowlist is an identity boundary, not a
+configuration switch. Clients cannot
 supply the reserved `instance:` continuity namespace. MCP, hooks, and monitors
 under the same harness process therefore reconcile even when their self-reported
 run strings differ. The daemon binds one canonical `run_id` to that harness
@@ -332,8 +335,9 @@ and a crash grace has elapsed; the old token is terminally fenced.
 ## Client surfaces
 
 - `holler` is the shell/automation client.
-- `holler who` lists known actors; `holler profile` publishes the caller's
-  advisory role metadata.
+- `holler who` lists known actors and exposes unclaimed count and age, active
+  claims and their earliest lease expiry, and stale-unread condition state;
+  `holler profile` publishes the caller's advisory role metadata.
 - `holler adopt` performs an explicitly authorized inactive-inbox handoff.
 - `holler alias claim|preflight|set|list|resolve|remove` manages durable actor aliases through
   the daemon API.

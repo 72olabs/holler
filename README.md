@@ -165,7 +165,8 @@ adopted inboxes. Adoption is never automatic and does not support chains.
 - Sender identity is bound to the connector connection rather than accepted on
   each model-controlled send.
 - Agents can publish advisory role profiles and discover live, ended, or lapsed
-  peers, their recent sessions, and orphaned inbox counts.
+  peers, their recent sessions, unread count and age, active claim leases, and
+  stale-unread condition state.
 - New setups use `allocate` naming to create opaque parallel actor identities
   and reclaim them after restart from a session or supervisor launch tag.
   Existing setup selections remain unchanged; `exact` remains available when

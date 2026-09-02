@@ -101,6 +101,21 @@ func TestActorAdoptionRoutesFutureMessagesAndDeduplicatesDirectRecipient(t *test
 	if err != nil || job.Message.ID != sent.Message.ID || job.RecipientActor != "replacement" {
 		t.Fatalf("adopted notification = %+v, err = %v", job, err)
 	}
+	directory, err := db.Who(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := directoryActor(t, directory, "replacement")
+	if replacement.UnclaimedMessages != 2 {
+		t.Fatalf("adopted directory double-counted delivery: %+v", replacement)
+	}
+	if _, err := db.Claim(ctx, "replacement", sent.Message.ID, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	replacement = directoryActor(t, mustWho(t, db, ctx), "replacement")
+	if replacement.UnclaimedMessages != 1 || replacement.ActiveClaims != 1 {
+		t.Fatalf("adopted claim directory counts = %+v", replacement)
+	}
 }
 
 func TestActorAdoptionRearmsTerminalSourceWakeForLiveReplacement(t *testing.T) {

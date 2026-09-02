@@ -16,6 +16,8 @@ preserving the protocol-v1 socket and 0.6.1 capability bridge.
   attention capability, attachment, reason, and required sender action.
 - Durable coalesced operator conditions appear in `holler status`, startup
   hydration, the CLI, MCP status, and the restart-free read bridge.
+- `holler who` reports unread count and age, active claims and earliest lease
+  expiry, and the current stale-unread condition state for each actor.
 - Alias preflight exposes repoint and whole-actor impact before approval.
 - Guarded reversible actor archival preserves names and unread mail, blocks on
   aliases/presence/claims, and fences late acknowledgements after an explicit

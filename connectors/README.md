@@ -76,7 +76,10 @@ continuity to an external supervisor. Separately launched workers in one
 working directory remain isolated because continuity never depends on cwd.
 
 The daemon also proves a harness-instance fingerprint from the local Unix peer
-process and harness ancestor; connectors cannot assert it. MCP, hooks, and
+process and harness ancestor; connectors cannot assert it. Claude, Codex, and
+OpenCode each have an explicit verifier. Supporting another harness requires a
+new verifier and connector tests rather than an allowlist configuration change.
+MCP, hooks, and
 monitors under one harness instance reconcile even if their run strings differ.
 If the proof is unavailable, the actor and inbox remain usable but attention is
 downgraded to startup-only and a durable operator condition explains why. If a

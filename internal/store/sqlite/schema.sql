@@ -176,7 +176,7 @@ CREATE TABLE IF NOT EXISTS actor_alias_claim_requests (
     alias TEXT NOT NULL,
     actor TEXT NOT NULL,
     policy_id TEXT NOT NULL,
-	 harness TEXT NOT NULL,
+    harness TEXT NOT NULL,
     project_id TEXT NOT NULL,
     result_json BLOB NOT NULL,
     created_at_ns INTEGER NOT NULL,

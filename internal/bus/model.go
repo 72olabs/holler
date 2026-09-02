@@ -36,7 +36,7 @@ var (
 	ErrActorNotLive         = errors.New("adopting actor has no live presence")
 	ErrRunNotLive           = errors.New("adopting run has no live presence")
 	ErrActorAdopted         = errors.New("actor identity was permanently adopted")
-	ErrAliasConflict        = errors.New("alias conflicts with an actor identity")
+	ErrAliasConflict        = errors.New("actor and alias namespaces conflict")
 	ErrAliasNotFound        = errors.New("actor alias not found")
 	ErrAliasTombstoned      = errors.New("actor alias was removed and is reserved")
 	ErrAliasTargetUnknown   = errors.New("alias target is not a known actor")
@@ -406,13 +406,18 @@ type ActorSession struct {
 }
 
 type ActorDirectoryEntry struct {
-	Actor             string         `json:"actor"`
-	State             string         `json:"state"`
-	LastSeenAt        time.Time      `json:"last_seen_at"`
-	Profile           *ActorProfile  `json:"profile,omitempty"`
-	Sessions          []ActorSession `json:"sessions"`
-	SessionsTruncated bool           `json:"sessions_truncated,omitempty"`
-	UnclaimedMessages int            `json:"unclaimed_messages"`
+	Actor                  string         `json:"actor"`
+	State                  string         `json:"state"`
+	LastSeenAt             time.Time      `json:"last_seen_at"`
+	Profile                *ActorProfile  `json:"profile,omitempty"`
+	Sessions               []ActorSession `json:"sessions"`
+	SessionsTruncated      bool           `json:"sessions_truncated,omitempty"`
+	UnclaimedMessages      int            `json:"unclaimed_messages"`
+	OldestUnreadAt         *time.Time     `json:"oldest_unread_at,omitempty"`
+	OldestUnreadAgeSeconds int64          `json:"oldest_unread_age_seconds"`
+	ActiveClaims           int            `json:"active_claims"`
+	EarliestLeaseExpiryAt  *time.Time     `json:"earliest_lease_expiry_at,omitempty"`
+	StaleUnreadCondition   ConditionState `json:"stale_unread_condition,omitempty"`
 }
 
 type ActorDirectory struct {
