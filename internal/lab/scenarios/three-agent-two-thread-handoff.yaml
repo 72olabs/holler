@@ -1,0 +1,103 @@
+name: three-agent-two-thread-handoff
+description: Claude, Codex, and OpenCode complete two interleaved threaded handoffs with independent acknowledgements.
+participants:
+  - id: claude
+    actor: claude
+    harness: fake-claude
+    name_mode: exact
+  - id: codex
+    actor: codex
+    harness: fake-codex
+    name_mode: exact
+  - id: opencode
+    actor: opencode
+    harness: fake-opencode
+    name_mode: exact
+steps:
+  - action: start
+    participant: claude
+  - action: start
+    participant: codex
+  - action: start
+    participant: opencode
+  - action: send
+    from: claude
+    to: codex
+    thread_id: thread-alpha
+    body: Analyze alpha and hand it to OpenCode.
+    type: QUESTION
+    save_as: alpha_question
+  - action: send
+    from: opencode
+    to: claude
+    thread_id: thread-beta
+    body: Confirm beta while alpha is in flight.
+    type: QUESTION
+    save_as: beta_question
+  - action: claim
+    participant: codex
+    message: alpha_question
+    save_as: alpha_question_claim
+  - action: ack
+    participant: codex
+    message: alpha_question
+    claim: alpha_question_claim
+  - action: send
+    from: codex
+    to: opencode
+    message: alpha_question
+    body: Continue the alpha analysis.
+    type: HANDOFF
+    save_as: alpha_handoff
+  - action: claim
+    participant: claude
+    message: beta_question
+    save_as: beta_question_claim
+  - action: ack
+    participant: claude
+    message: beta_question
+    claim: beta_question_claim
+  - action: send
+    from: claude
+    to: codex
+    message: beta_question
+    body: Beta is confirmed.
+    type: ANSWER
+    save_as: beta_answer
+  - action: claim
+    participant: opencode
+    message: alpha_handoff
+    save_as: alpha_handoff_claim
+  - action: ack
+    participant: opencode
+    message: alpha_handoff
+    claim: alpha_handoff_claim
+  - action: send
+    from: opencode
+    to: claude
+    message: alpha_handoff
+    body: Alpha analysis is complete.
+    type: RESULT
+    save_as: alpha_result
+  - action: claim
+    participant: codex
+    message: beta_answer
+    save_as: beta_answer_claim
+  - action: ack
+    participant: codex
+    message: beta_answer
+    claim: beta_answer_claim
+  - action: claim
+    participant: claude
+    message: alpha_result
+    save_as: alpha_result_claim
+  - action: ack
+    participant: claude
+    message: alpha_result
+    claim: alpha_result_claim
+assert:
+  - every_message_acked
+  - durable_inboxes_empty
+  - sandbox_paths_isolated
+  - orphan_processes_zero
+  - socket_removed

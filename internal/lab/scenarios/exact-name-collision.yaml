@@ -1,0 +1,22 @@
+name: exact-name-collision
+description: A second live exact-name session is refused instead of silently sharing an inbox.
+participants:
+  - id: first
+    actor: reviewer
+    harness: fake-claude
+    name_mode: exact
+  - id: second
+    actor: reviewer
+    harness: fake-claude
+    name_mode: exact
+steps:
+  - action: start
+    participant: first
+  - action: start_expect_error
+    participant: second
+    error_contains: actor already has a live presence
+assert:
+  - durable_inboxes_empty
+  - sandbox_paths_isolated
+  - orphan_processes_zero
+  - socket_removed

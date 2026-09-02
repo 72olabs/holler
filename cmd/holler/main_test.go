@@ -868,6 +868,31 @@ func TestCLIProductSetupDryRunUsesHarnessDefaults(t *testing.T) {
 	}
 }
 
+func TestCLIProductSetupDryRunUsesExplicitRuntimePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	runtimePath := filepath.Join(home, "isolated-runtime", "bin-path")
+	marketplace := filepath.Join(filepath.Clean(filepath.Join("..", "..")), "connectors", "marketplace")
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{
+		"setup", "claude", "--dry-run", "--marketplace", marketplace,
+		"--client-binary", "/usr/bin/true", "--daemon-binary", "/usr/bin/true",
+		"--runtime-path", runtimePath,
+	}, strings.NewReader(""), &stdout, &stderr)
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+	var result productSetupResult
+	decode(t, stdout.Bytes(), &result)
+	if result.Connector.RuntimeBinaryPath != runtimePath {
+		t.Fatalf("runtime path = %q, want %q", result.Connector.RuntimeBinaryPath, runtimePath)
+	}
+	if _, err := os.Stat(runtimePath); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote runtime path: %v", err)
+	}
+}
+
 func TestCLIProductSetupPreservesExistingLegacyNameMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

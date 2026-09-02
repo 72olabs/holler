@@ -1,0 +1,78 @@
+name: allocated-alias-resume
+description: Two Claude sessions allocate distinct actors; an alias targets one and remains valid across continuity resume.
+participants:
+  - id: claude_primary
+    actor: claude
+    harness: fake-claude
+    name_mode: allocate
+    continuity: [session:claude:primary]
+  - id: claude_secondary
+    actor: claude
+    harness: fake-claude
+    name_mode: allocate
+    continuity: [session:claude:secondary]
+  - id: codex
+    actor: codex
+    harness: fake-codex
+    name_mode: allocate
+    continuity: [session:codex:sender]
+steps:
+  - action: start
+    participant: claude_primary
+  - action: start
+    participant: claude_secondary
+  - action: start
+    participant: codex
+  - action: assert_actor_distinct
+    participant: claude_primary
+    target: claude_secondary
+  - action: alias_set
+    participant: codex
+    alias: skillbank
+    target: claude_primary
+  - action: send
+    from: codex
+    to: skillbank
+    body: First alias delivery.
+    save_as: first
+  - action: claim
+    participant: claude_primary
+    message: first
+    save_as: first_claim
+  - action: ack
+    participant: claude_primary
+    message: first
+    claim: first_claim
+  - action: assert_inbox
+    participant: claude_secondary
+    count: 0
+  - action: crash
+    participant: claude_primary
+  - action: resume
+    participant: claude_primary
+    continuity_from: claude_primary
+  - action: assert_actor_same
+    participant: claude_primary
+    target: claude_primary
+  - action: send
+    from: codex
+    to: skillbank
+    body: Delivery after resume.
+    save_as: second
+  - action: claim
+    participant: claude_primary
+    message: second
+    save_as: second_claim
+  - action: ack
+    participant: claude_primary
+    message: second
+    claim: second_claim
+  - action: assert_inbox
+    participant: claude_secondary
+    count: 0
+assert:
+  - every_message_acked
+  - durable_inboxes_empty
+  - sandbox_paths_isolated
+  - orphan_processes_zero
+  - socket_removed

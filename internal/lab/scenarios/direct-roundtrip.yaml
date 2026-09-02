@@ -1,0 +1,51 @@
+name: direct-roundtrip
+description: Fake Claude and Codex exchange, claim, reply, and acknowledge through a real isolated daemon.
+participants:
+  - id: claude
+    actor: claude
+    harness: fake-claude
+    name_mode: exact
+  - id: codex
+    actor: codex
+    harness: fake-codex
+    name_mode: exact
+steps:
+  - action: start
+    participant: claude
+  - action: start
+    participant: codex
+  - action: send
+    from: claude
+    to: codex
+    body: What is the current state?
+    type: QUESTION
+    save_as: question
+  - action: claim
+    participant: codex
+    message: question
+    save_as: question_claim
+  - action: send
+    from: codex
+    to: claude
+    body: The isolated bus is healthy.
+    type: ANSWER
+    message: question
+    save_as: answer
+  - action: ack
+    participant: codex
+    message: question
+    claim: question_claim
+  - action: claim
+    participant: claude
+    message: answer
+    save_as: answer_claim
+  - action: ack
+    participant: claude
+    message: answer
+    claim: answer_claim
+assert:
+  - every_message_acked
+  - durable_inboxes_empty
+  - sandbox_paths_isolated
+  - orphan_processes_zero
+  - socket_removed

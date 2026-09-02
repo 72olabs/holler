@@ -78,6 +78,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		err = runConnector(ctx, args[1:], stdin, stdout, stderr)
 	case "setup":
 		err = runProductSetup(ctx, args[1:], stdin, stdout, stderr)
+	case "lab":
+		err = runLab(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -1057,6 +1059,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		serverPort := flags.Int("server-port", 0, "OpenCode server port; must be zero so the OS selects it atomically")
 		serverUsername := flags.String("server-username", "holler", "OpenCode HTTP Basic username")
 		clientBinary := flags.String("client-binary", "", "harness executable")
+		runtimePath := flags.String("runtime-path", "", "connector runtime binary record; defaults to ~/.holler/bin-path")
 		apply := flags.Bool("apply", false, "apply the reported installation and configuration changes")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
@@ -1074,7 +1077,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 				Peer: *peer, Project: *project, Channel: *channelID, Socket: *socket,
 				PluginID: *pluginID, Marketplace: *marketplace, Scope: *scope,
 				ConnectorConfig: *configPath, ClaudeSettings: *settingsPath,
-				ClaudeBinary: *clientBinary, HollerBinary: executable, Apply: *apply,
+				ClaudeBinary: *clientBinary, HollerBinary: executable, RuntimeBinaryPath: *runtimePath, Apply: *apply,
 			})
 		case "codex":
 			plan, err = connector.SetupCodex(ctx, connector.CodexSetupConfig{
@@ -1082,7 +1085,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 				Project: *project, ProjectRoot: *projectRoot, Channel: *channelID, Socket: *socket,
 				PluginID: *pluginID, Marketplace: *marketplace, Profile: *profile,
 				PolicyPath: *policy, ConnectorConfig: *configPath, CodexHome: *codexHome,
-				CodexBinary: *clientBinary, HollerBinary: executable, Apply: *apply,
+				CodexBinary: *clientBinary, HollerBinary: executable, RuntimeBinaryPath: *runtimePath, Apply: *apply,
 			})
 		case "opencode":
 			plan, err = connector.SetupOpenCode(ctx, connector.OpenCodeSetupConfig{
@@ -1308,6 +1311,8 @@ Usage:
   holler --version
   holler setup claude [--yes|--remove]
   holler setup codex [--yes|--remove]
+  holler lab list
+  holler lab run [--all|--scenario NAME|--file PATH] [--output DIR]
   holler status [--socket PATH]
   holler who [--socket PATH] [--limit 100]
   holler profile --actor ACTOR --run RUN --role TEXT [--accepts KIND,KIND]

@@ -1,0 +1,36 @@
+name: daemon-restart-durability
+description: A committed unread delivery survives a supervised daemon stop and restart.
+participants:
+  - id: sender
+    actor: claude
+    harness: fake-claude
+    name_mode: exact
+  - id: recipient
+    actor: codex
+    harness: fake-codex
+    name_mode: exact
+steps:
+  - action: start
+    participant: sender
+  - action: start
+    participant: recipient
+  - action: send
+    from: sender
+    to: recipient
+    body: Persist across daemon replacement.
+    save_as: durable
+  - action: daemon_restart
+  - action: claim
+    participant: recipient
+    message: durable
+    save_as: durable_claim
+  - action: ack
+    participant: recipient
+    message: durable
+    claim: durable_claim
+assert:
+  - every_message_acked
+  - durable_inboxes_empty
+  - sandbox_paths_isolated
+  - orphan_processes_zero
+  - socket_removed

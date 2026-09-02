@@ -93,6 +93,7 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 	profile := flags.String("profile", firstNonEmptyString(existingProfile, "holler"), "dedicated Codex profile name")
 	clientBinary := flags.String("client-binary", existingClient, "Claude or Codex executable")
 	daemonBinary := flags.String("daemon-binary", "", "hollerd executable; defaults next to holler")
+	runtimePath := flags.String("runtime-path", "", "connector runtime binary record; defaults to ~/.holler/bin-path")
 	connectorConfig := flags.String("config", "", "connector selection path")
 	claudeSettings := flags.String("settings", "", "Claude user settings path")
 	codexHome := flags.String("codex-home", "", "Codex configuration directory")
@@ -118,7 +119,7 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 		ProjectRoot: *projectRoot, Channel: *channel, Socket: *socket,
 		PluginID: *pluginID, Profile: *profile, ClientBinary: *clientBinary, ConnectorConfig: *connectorConfig,
 		ClaudeSettings: *claudeSettings, CodexHome: *codexHome, CodexUserConfig: *codexUserConfig,
-		Scope: *scope, HollerBinary: executable,
+		Scope: *scope, HollerBinary: executable, RuntimeBinaryPath: *runtimePath,
 	}
 	if *remove {
 		return runProductRemoval(ctx, harness, input, *daemonBinary, *yes, *dryRun, stdin, stdout, stderr)
@@ -243,7 +244,7 @@ func runProductRemoval(ctx context.Context, harness string, input harnessSetupIn
 		if err != nil {
 			return err
 		}
-		if err := os.Remove(connector.DefaultRuntimeBinaryPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(firstNonEmptyString(input.RuntimeBinaryPath, connector.DefaultRuntimeBinaryPath())); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -255,6 +256,7 @@ type harnessSetupInput struct {
 	Attention, NameMode, Actor, Role, Peer, Project, ProjectRoot, Channel, Socket string
 	Marketplace, PluginID, Profile, ClientBinary, ConnectorConfig                 string
 	ClaudeSettings, CodexHome, CodexUserConfig, Scope, HollerBinary               string
+	RuntimeBinaryPath                                                             string
 	Apply                                                                         bool
 }
 
@@ -265,7 +267,7 @@ func buildHarnessSetupPlan(ctx context.Context, harness string, input harnessSet
 			Project: input.Project, Channel: input.Channel, Socket: input.Socket, PluginID: input.PluginID,
 			Marketplace: input.Marketplace, Scope: input.Scope, ConnectorConfig: input.ConnectorConfig,
 			ClaudeSettings: input.ClaudeSettings, ClaudeBinary: input.ClientBinary,
-			HollerBinary: input.HollerBinary, Apply: input.Apply,
+			HollerBinary: input.HollerBinary, RuntimeBinaryPath: input.RuntimeBinaryPath, Apply: input.Apply,
 		})
 	}
 	return connector.SetupCodex(ctx, connector.CodexSetupConfig{
@@ -273,7 +275,8 @@ func buildHarnessSetupPlan(ctx context.Context, harness string, input harnessSet
 		Project: input.Project, ProjectRoot: input.ProjectRoot, Channel: input.Channel, Socket: input.Socket,
 		PluginID: input.PluginID, Marketplace: input.Marketplace, Profile: input.Profile,
 		ConnectorConfig: input.ConnectorConfig, CodexHome: input.CodexHome, UserConfigPath: input.CodexUserConfig,
-		CodexBinary: input.ClientBinary, HollerBinary: input.HollerBinary, GlobalPolicy: true, Apply: input.Apply,
+		CodexBinary: input.ClientBinary, HollerBinary: input.HollerBinary, RuntimeBinaryPath: input.RuntimeBinaryPath,
+		GlobalPolicy: true, Apply: input.Apply,
 	})
 }
 
@@ -282,13 +285,13 @@ func buildHarnessRemovalPlan(ctx context.Context, harness string, input harnessS
 		return connector.RemoveClaude(ctx, connector.ClaudeSetupConfig{
 			PluginID: input.PluginID, Scope: input.Scope, ConnectorConfig: input.ConnectorConfig,
 			ClaudeSettings: input.ClaudeSettings, ClaudeBinary: input.ClientBinary,
-			RuntimeBinaryPath: connector.DefaultRuntimeBinaryPath(), Apply: input.Apply,
+			RuntimeBinaryPath: input.RuntimeBinaryPath, Apply: input.Apply,
 		})
 	}
 	return connector.RemoveCodex(ctx, connector.CodexSetupConfig{
 		PluginID: input.PluginID, Profile: input.Profile, ConnectorConfig: input.ConnectorConfig,
 		CodexHome: input.CodexHome, UserConfigPath: input.CodexUserConfig,
-		CodexBinary: input.ClientBinary, RuntimeBinaryPath: connector.DefaultRuntimeBinaryPath(),
+		CodexBinary: input.ClientBinary, RuntimeBinaryPath: input.RuntimeBinaryPath,
 		GlobalPolicy: true, Apply: input.Apply,
 	})
 }

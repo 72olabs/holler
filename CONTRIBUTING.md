@@ -18,12 +18,26 @@ go test ./...
 go vet ./...
 go test -race ./...
 ./scripts/build.sh
+./.build/holler lab run --all --timeout 20s
 HOLLER_VERSION=0.0.0-dev ./scripts/package-release.sh
 ```
 
-The tests do not require model calls. Live harness validation is deliberately
-separate because it consumes time and tokens and can be affected by client
-version or TUI changes.
+The lab command starts a real `hollerd` in an isolated home, socket, database,
+and harness configuration tree. Its built-in fake Claude and Codex scenarios
+exercise direct round trips, allocated names and aliases, resume, offline
+delivery, inbox adoption, exact-name collision, daemon replacement, teardown,
+and evidence generation. Reports, redacted scenarios, a body-free event ledger,
+JUnit output, and logs are written under `.runs/lab/` by default. Pass
+`--include-database` only when the full stopped database—including peer message
+bodies—is needed for local diagnosis. The command
+must leave the sandbox removed, the socket closed, and zero supervised orphan
+processes.
+
+These deterministic checks do not require model calls. Fake harnesses certify
+Holler protocol and lifecycle logic; they do not certify a vendor plugin,
+permission prompt, hook, or wake implementation. Live harness validation is
+deliberately separate because it consumes time and tokens and can be affected
+by client version or TUI changes.
 
 ## Design constraints
 
