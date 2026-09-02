@@ -17,6 +17,7 @@ steps:
   - action: send
     from: claude
     to: codex
+    route: actor
     body: What is the current state?
     type: QUESTION
     save_as: question
@@ -30,6 +31,7 @@ steps:
     body: The isolated bus is healthy.
     type: ANSWER
     message: question
+    reply: true
     save_as: answer
   - action: ack
     participant: codex

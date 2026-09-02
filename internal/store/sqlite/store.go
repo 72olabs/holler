@@ -24,7 +24,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const migrationVersion = 11
+const migrationVersion = 14
 
 const (
 	migrationRetryWindow = 5 * time.Second
@@ -294,7 +294,7 @@ func (s *Store) applyMigrations(ctx context.Context, conn *sql.Conn) error {
 	staleProvisional := `
 		SELECT a.actor FROM actor_allocations a
 		WHERE a.provisional = 1
-		  AND NOT EXISTS (SELECT 1 FROM continuity_bindings c WHERE c.actor = a.actor AND c.handle NOT LIKE 'process:%')
+		  AND NOT EXISTS (SELECT 1 FROM continuity_bindings c WHERE c.actor = a.actor AND c.handle NOT LIKE 'process:%' AND c.handle NOT LIKE 'instance:%')
 		  AND NOT EXISTS (SELECT 1 FROM actor_profiles p WHERE p.actor = a.actor)
 		  AND NOT EXISTS (SELECT 1 FROM registrations r WHERE r.actor = a.actor)
 		  AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.from_actor = a.actor)
@@ -419,6 +419,21 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 		}
 	}
 	req.ToActors = resolved
+	for _, recipient := range req.ToActors {
+		archived, archiveErr := s.actorArchivedTx(ctx, tx, recipient)
+		if archiveErr != nil {
+			return bus.SendResult{}, archiveErr
+		}
+		if archived {
+			var adopted int
+			if archiveErr := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_adoptions WHERE source_actor = ?)`, recipient).Scan(&adopted); archiveErr != nil {
+				return bus.SendResult{}, archiveErr
+			}
+			if adopted == 0 {
+				return bus.SendResult{}, fmt.Errorf("%s: %w", recipient, bus.ErrActorArchived)
+			}
+		}
+	}
 
 	messageID, err := s.newID("msg")
 	if err != nil {
@@ -790,6 +805,9 @@ func (s *Store) finish(ctx context.Context, actor, messageID, leaseToken string,
 	}
 	if state == bus.DeliveryDeadLettered && final && !ack && terminalToken.Valid && terminalToken.String == leaseToken {
 		return nil
+	}
+	if terminalToken.Valid && terminalToken.String == leaseToken && state == bus.DeliveryQueued {
+		return bus.ErrDeliveryTerminal
 	}
 	if state == bus.DeliveryAcked || state == bus.DeliveryDeadLettered {
 		return bus.ErrDeliveryTerminal

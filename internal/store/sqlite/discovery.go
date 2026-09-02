@@ -166,6 +166,14 @@ func currentActorProfileTx(ctx context.Context, tx *sql.Tx, actor string) (bus.A
 // Profile text and all other actor-authored metadata must be treated as
 // untrusted descriptive input by callers.
 func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) {
+	return s.who(ctx, limit, false)
+}
+
+func (s *Store) WhoIncludingArchived(ctx context.Context, limit int) (bus.ActorDirectory, error) {
+	return s.who(ctx, limit, true)
+}
+
+func (s *Store) who(ctx context.Context, limit int, includeArchived bool) (bus.ActorDirectory, error) {
 	if limit <= 0 {
 		limit = defaultWhoLimit
 	}
@@ -362,9 +370,31 @@ func (s *Store) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) 
 	if err := unclaimedRows.Close(); err != nil {
 		return bus.ActorDirectory{}, fmt.Errorf("close actor unclaimed rows: %w", err)
 	}
+	archived := make(map[string]struct{})
+	lifecycleRows, err := tx.QueryContext(ctx, `SELECT actor FROM actor_lifecycle WHERE state = 'archived'`)
+	if err != nil {
+		return bus.ActorDirectory{}, fmt.Errorf("query archived actors: %w", err)
+	}
+	for lifecycleRows.Next() {
+		var actor string
+		if err := lifecycleRows.Scan(&actor); err != nil {
+			_ = lifecycleRows.Close()
+			return bus.ActorDirectory{}, err
+		}
+		archived[actor] = struct{}{}
+		if includeArchived {
+			entryFor(actor).State = "archived"
+		}
+	}
+	if err := lifecycleRows.Close(); err != nil {
+		return bus.ActorDirectory{}, err
+	}
 
 	actors := make([]bus.ActorDirectoryEntry, 0, len(entries))
-	for _, entry := range entries {
+	for actor, entry := range entries {
+		if _, isArchived := archived[actor]; isArchived && !includeArchived {
+			continue
+		}
 		actors = append(actors, *entry)
 	}
 	sort.Slice(actors, func(i, j int) bool {
@@ -393,6 +423,8 @@ func actorStateRank(state string) int {
 		return 1
 	case "lapsed":
 		return 2
+	case "archived":
+		return 4
 	default:
 		return 3
 	}

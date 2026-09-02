@@ -17,6 +17,7 @@ steps:
   - action: send
     from: sender
     to: recipient
+    route: actor
     body: Persist across daemon replacement.
     save_as: durable
   - action: daemon_restart

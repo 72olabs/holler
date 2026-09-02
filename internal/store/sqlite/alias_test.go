@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -475,6 +476,35 @@ func TestRemovedAliasTombstoneBlocksLegacyFallbackAndActorReuse(t *testing.T) {
 		RequestedActor: "architect-claude", RunID: "collision-run", NameMode: bus.NameModeExact, ProjectID: "default",
 	}); !errors.Is(err, bus.ErrAliasConflict) {
 		t.Fatalf("retired alias actor collision error = %v", err)
+	}
+}
+
+func TestAliasPreflightShowsBothSidesAndWholeActorImpact(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTestStore(t)
+	for _, actor := range []string{"reviewer-old", "reviewer-new"} {
+		if err := db.ReserveActorName(ctx, actor); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, mapping := range []struct{ alias, actor string }{
+		{"reviewer", "reviewer-old"}, {"legacy-reviewer", "reviewer-old"}, {"new-reviewer", "reviewer-new"},
+	} {
+		if _, err := db.SetAlias(ctx, bus.AliasSetRequest{
+			Alias: mapping.alias, Actor: mapping.actor, UpdatedByActor: "operator", UpdatedByRun: "run",
+			ProjectID: "default", IdempotencyKey: fmt.Sprintf("preflight-%d", index),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	preflight, err := db.AliasPreflight(ctx, "reviewer", "reviewer-new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.CurrentTarget != "reviewer-old" || !preflight.WholeActorAdoption ||
+		!reflect.DeepEqual(preflight.AliasesOnPredecessor, []string{"legacy-reviewer", "reviewer"}) ||
+		!reflect.DeepEqual(preflight.AliasesOnProposed, []string{"new-reviewer"}) || preflight.Predecessor == nil {
+		t.Fatalf("alias preflight = %+v", preflight)
 	}
 }
 

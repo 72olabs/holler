@@ -4,13 +4,19 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,17 +28,20 @@ import (
 )
 
 const (
-	ProtocolVersion           = 1
-	MaxFrameBytes             = 2 << 20
-	MaxAttentionWait          = 25 * time.Second
-	ActorAllocationCapability = "actor-allocation-v1"
-	ActorAliasCapability      = "actor-alias-v1"
-	TypedRoutesCapability     = "typed-routes-v1"
-	AliasClaimCapability      = "alias-claim-if-absent-v1"
+	ProtocolVersion              = 1
+	MaxFrameBytes                = 2 << 20
+	MaxAttentionWait             = 25 * time.Second
+	ActorAllocationCapability    = "actor-allocation-v1"
+	ActorAliasCapability         = "actor-alias-v1"
+	TypedRoutesCapability        = "typed-routes-v1"
+	AliasClaimCapability         = "alias-claim-if-absent-v1"
+	HarnessInstanceCapability    = "harness-instance-v1"
+	OperatorConditionsCapability = "operator-conditions-v1"
+	ActorLifecycleCapability     = "actor-lifecycle-v1"
 )
 
 func protocolCapabilities() []string {
-	return []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, CapabilityBridgeCapability}
+	return []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, HarnessInstanceCapability, OperatorConditionsCapability, ActorLifecycleCapability, CapabilityBridgeCapability}
 }
 
 type Identity struct {
@@ -43,9 +52,13 @@ type Identity struct {
 	NameMode           bus.NameMode
 	ContinuityHandles  []string
 	ProjectID          string
+	Harness            string
+	HarnessInstance    string
+	InstanceState      string
 	Takeover           bool
 	Provisional        bool
 	AdoptedPredecessor string
+	PendingPredecessor string
 }
 
 type Request struct {
@@ -97,6 +110,11 @@ type Store interface {
 	HeartbeatRegistrations(context.Context, string, string, time.Duration) (int, error)
 	SetActorProfile(context.Context, string, string, string, bus.ActorProfileRequest) (bus.ActorProfileResult, error)
 	Who(context.Context, int) (bus.ActorDirectory, error)
+	WhoIncludingArchived(context.Context, int) (bus.ActorDirectory, error)
+	ArchivePreflight(context.Context, string, int) (bus.ActorArchivePreflight, error)
+	ArchiveActor(context.Context, string, string, bool) (bus.ActorArchiveResult, error)
+	RestoreActor(context.Context, string, string) (bus.ActorArchiveResult, error)
+	RevokeDeliveryLease(context.Context, string, string, time.Duration) error
 	AdoptActor(context.Context, bus.AdoptRequest) (bus.AdoptResult, error)
 	BindActor(context.Context, bus.ActorBindRequest) (bus.ActorBindResult, error)
 	FinalizeActorAllocation(context.Context, string, string, string, []string) error
@@ -108,6 +126,15 @@ type Store interface {
 	RemoveAlias(context.Context, bus.AliasRemoveRequest) (bus.AliasMutationResult, error)
 	ListAliases(context.Context) ([]bus.ActorAlias, error)
 	ResolveAlias(context.Context, string) (bus.ActorAlias, error)
+	AliasPreflight(context.Context, string, string) (bus.AliasPreflight, error)
+	DeliveryReceipts(context.Context, bus.Message) ([]bus.DeliveryReceipt, error)
+	ObserveCondition(context.Context, bus.ConditionObservation) (bus.OperatorCondition, error)
+	ResolveCondition(context.Context, string, string) error
+	ResolveConditionIfReason(context.Context, string, string, string) error
+	ListConditions(context.Context, bool, int) ([]bus.OperatorCondition, error)
+	AcknowledgeCondition(context.Context, string, string, int) (bus.OperatorCondition, error)
+	SnoozeCondition(context.Context, string, string, int, time.Time) (bus.OperatorCondition, error)
+	ClaimConditionPresentation(context.Context, string, string, int, string, time.Duration) (bool, error)
 }
 
 type AttentionBroker interface {
@@ -116,26 +143,96 @@ type AttentionBroker interface {
 	Cancel(string, string, string, error)
 }
 
+type attentionAttachmentInspector interface {
+	Attached(string, string, string) bool
+}
+
 type Server struct {
-	store         Store
-	build         buildinfo.Info
-	attention     AttentionBroker
-	capabilities  map[string]registeredCapability
-	capabilityErr error
+	store                  Store
+	build                  buildinfo.Info
+	attention              AttentionBroker
+	capabilities           map[string]registeredCapability
+	capabilityErr          error
+	resolveHarnessInstance HarnessInstanceResolver
 }
 
 type ServerOption func(*Server)
 
+type HarnessInstanceResolver func(net.Conn, string) (string, error)
+
+func WithHarnessInstanceResolver(resolver HarnessInstanceResolver) ServerOption {
+	return func(server *Server) { server.resolveHarnessInstance = resolver }
+}
+
 func NewServer(store Store, options ...ServerOption) *Server {
 	server := &Server{
 		store: store, build: buildinfo.Current(),
-		capabilities: make(map[string]registeredCapability),
+		capabilities: make(map[string]registeredCapability), resolveHarnessInstance: localHarnessInstance,
 	}
 	server.installDefaultCapabilities()
 	for _, option := range options {
 		option(server)
 	}
 	return server
+}
+
+func localHarnessInstance(connection net.Conn, harness string) (string, error) {
+	harness = strings.ToLower(strings.TrimSpace(harness))
+	switch harness {
+	case "claude", "codex", "opencode":
+	default:
+		return "", &bus.ValidationError{Field: "harness", Problem: "must be claude, codex, or opencode"}
+	}
+	pid, err := peerProcessID(connection)
+	if err != nil {
+		return "", err
+	}
+	const maximumAncestorDepth = 64
+	for depth := 0; pid > 1 && depth < maximumAncestorDepth; depth++ {
+		parent, command, err := processIdentity(pid)
+		if err != nil {
+			return "", err
+		}
+		name := strings.ToLower(filepath.Base(command))
+		if strings.Contains(name, harness) && !strings.Contains(name, "holler") {
+			start, err := processStart(pid)
+			if err != nil {
+				return "", err
+			}
+			digest := sha256.Sum256([]byte(harness + "\x00" + strconv.Itoa(pid) + "\x00" + start))
+			return "hin_" + hex.EncodeToString(digest[:16]), nil
+		}
+		pid = parent
+	}
+	return "", fmt.Errorf("could not prove a live %s harness ancestor", harness)
+}
+
+func processIdentity(pid int) (int, string, error) {
+	output, err := exec.Command("/bin/ps", "-o", "ppid=", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0, "", fmt.Errorf("inspect process %d: %w", pid, err)
+	}
+	fields := strings.Fields(strings.TrimSpace(string(output)))
+	if len(fields) < 2 {
+		return 0, "", fmt.Errorf("process %d identity is unavailable", pid)
+	}
+	parent, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, "", fmt.Errorf("decode parent process for %d: %w", pid, err)
+	}
+	return parent, strings.Join(fields[1:], " "), nil
+}
+
+func processStart(pid int) (string, error) {
+	output, err := exec.Command("/bin/ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return "", fmt.Errorf("inspect process start for %d: %w", pid, err)
+	}
+	start := strings.TrimSpace(string(output))
+	if start == "" {
+		return "", fmt.Errorf("process %d start fingerprint is unavailable", pid)
+	}
+	return start, nil
 }
 
 func WithAttentionBroker(broker AttentionBroker) ServerOption {
@@ -221,6 +318,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		NameMode          bus.NameMode   `json:"name_mode"`
 		ContinuityHandles []string       `json:"continuity_handles"`
 		ProjectID         string         `json:"project_id"`
+		Harness           string         `json:"harness"`
 		Takeover          bool           `json:"takeover"`
 	}
 	if err := decodeStrict(request.Args, &hello); err != nil {
@@ -230,11 +328,16 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	hello.Actor = strings.TrimSpace(hello.Actor)
 	hello.RunID = strings.TrimSpace(hello.RunID)
 	hello.ProjectID = strings.TrimSpace(hello.ProjectID)
+	hello.Harness = strings.ToLower(strings.TrimSpace(hello.Harness))
 	if hello.ProjectID == "" {
 		hello.ProjectID = "default"
 	}
 	for index := range hello.ContinuityHandles {
 		hello.ContinuityHandles[index] = strings.TrimSpace(hello.ContinuityHandles[index])
+		if strings.HasPrefix(hello.ContinuityHandles[index], "instance:") {
+			_ = writeResponse(connection, failure(request.ID, "bad_request", "continuity_handles namespace instance is daemon-owned", false))
+			return
+		}
 	}
 	if hello.Protocol != ProtocolVersion {
 		_ = writeResponse(connection, failure(request.ID, "protocol_mismatch", fmt.Sprintf("protocol %d is not supported", hello.Protocol), false))
@@ -252,9 +355,34 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		_ = writeResponse(connection, failure(request.ID, "bad_request", err.Error(), false))
 		return
 	}
-	assignedActor := hello.Actor
-	var binding bus.ActorBindResult
 	featureIdentity := hello.NameMode != "" || len(hello.ContinuityHandles) > 0 || hello.Takeover
+	instanceState := "legacy"
+	harnessInstance := ""
+	if hello.Harness != "" {
+		if !containsString(hello.Capabilities, HarnessInstanceCapability) {
+			_ = writeResponse(connection, failure(request.ID, "capability_required", "harness identity requires capability "+HarnessInstanceCapability, false))
+			return
+		}
+		switch hello.Harness {
+		case "claude", "codex", "opencode":
+		default:
+			_ = writeResponse(connection, failure(request.ID, "bad_request", "harness must be claude, codex, or opencode", false))
+			return
+		}
+		instanceState = "unreconciled"
+		if s.resolveHarnessInstance != nil {
+			if resolved, resolveErr := s.resolveHarnessInstance(connection, hello.Harness); resolveErr == nil && strings.TrimSpace(resolved) != "" {
+				harnessInstance = strings.TrimSpace(resolved)
+				if featureIdentity && (hello.NameMode == bus.NameModeAllocate || hello.NameMode == bus.NameModeExact) {
+					hello.ContinuityHandles = append(hello.ContinuityHandles, "instance:"+harnessInstance)
+				}
+				instanceState = "bound"
+			}
+		}
+	}
+	assignedActor := hello.Actor
+	assignedRunID := hello.RunID
+	var binding bus.ActorBindResult
 	if featureIdentity {
 		if !containsString(hello.Capabilities, ActorAllocationCapability) {
 			_ = writeResponse(connection, failure(request.ID, "capability_required", "actor allocation requires capability "+ActorAllocationCapability, false))
@@ -269,10 +397,30 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 			ContinuityHandles: hello.ContinuityHandles, ProjectID: hello.ProjectID, Takeover: hello.Takeover,
 		})
 		if err != nil {
+			if errors.Is(err, bus.ErrContinuityConflict) {
+				details, _ := json.Marshal(map[string]interface{}{
+					"requested_actor": hello.Actor, "harness": hello.Harness,
+					"harness_instance": harnessInstance, "continuity_kinds": continuityKinds(hello.ContinuityHandles),
+				})
+				subject := hello.Actor
+				if harnessInstance != "" {
+					subject = harnessInstance
+				}
+				_, _ = s.store.ObserveCondition(connectionCtx, bus.ConditionObservation{
+					Kind: "identity_conflict", Subject: subject, ReasonCode: "contradictory_binding_evidence",
+					Summary: "Conflicting connector identity evidence was rejected", Details: details,
+				})
+			}
 			_ = writeResponse(connection, Response{ID: request.ID, OK: false, Error: rpcError(err)})
 			return
 		}
 		assignedActor = binding.Actor
+		if binding.AssignedRunID != "" {
+			assignedRunID = binding.AssignedRunID
+		}
+		if len(binding.AcceptedContinuityHandles) > 0 {
+			hello.ContinuityHandles = append([]string(nil), binding.AcceptedContinuityHandles...)
+		}
 		if s.attention != nil {
 			for _, presence := range binding.SupersededPresences {
 				s.attention.Cancel(presence.Actor, presence.RunID, presence.SessionID, bus.ErrPresenceSuperseded)
@@ -282,21 +430,47 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		_ = writeResponse(connection, Response{ID: request.ID, OK: false, Error: rpcError(err)})
 		return
 	}
+	if binding.PendingPredecessor != "" {
+		details, _ := json.Marshal(map[string]interface{}{
+			"predecessor": binding.PendingPredecessor, "successor": assignedActor,
+			"harness": hello.Harness, "harness_instance": harnessInstance,
+		})
+		_, _ = s.store.ObserveCondition(connectionCtx, bus.ConditionObservation{
+			Kind: "pending_takeover", Subject: binding.PendingPredecessor, ReasonCode: "predecessor_still_live",
+			Summary: "A resumed harness is waiting for an explicit identity takeover", Details: details,
+		})
+	} else if binding.ContinuityReclaimed && hello.Takeover {
+		_ = s.store.ResolveCondition(connectionCtx, "pending_takeover", assignedActor)
+	}
+	if hello.Harness != "" {
+		if instanceState == "unreconciled" {
+			details, _ := json.Marshal(map[string]string{"actor": assignedActor, "harness": hello.Harness})
+			_, _ = s.store.ObserveCondition(connectionCtx, bus.ConditionObservation{
+				Kind: "attention_unavailable", Subject: assignedActor, ReasonCode: "harness_instance_unreconciled",
+				Summary: "Holler could not prove the live harness instance for " + assignedActor, Details: details,
+			})
+		} else if instanceState == "bound" {
+			_ = s.store.ResolveConditionIfReason(connectionCtx, "attention_unavailable", assignedActor, "harness_instance_unreconciled")
+		}
+	}
 	ready, _ := json.Marshal(map[string]interface{}{
 		"protocol": ProtocolVersion, "daemon": "hollerd/0.1", "actor": assignedActor,
-		"requested_actor": hello.Actor, "run_id": hello.RunID, "server_time": time.Now().UTC(), "build": s.build,
+		"requested_actor": hello.Actor, "run_id": assignedRunID, "server_time": time.Now().UTC(), "build": s.build,
 		"capabilities": protocolCapabilities(), "minted": binding.Minted,
 		"continuity_reclaimed": binding.ContinuityReclaimed, "provisional": binding.Provisional,
-		"adopted_predecessor": binding.AdoptedPredecessor,
+		"adopted_predecessor": binding.AdoptedPredecessor, "harness_instance": harnessInstance,
+		"pending_predecessor": binding.PendingPredecessor, "instance_state": instanceState,
 	})
 	if err := writeResponse(connection, Response{ID: request.ID, OK: true, Result: ready}); err != nil {
 		return
 	}
 	identity := Identity{
-		Actor: assignedActor, RunID: hello.RunID, Client: hello.Client, Build: hello.Build,
+		Actor: assignedActor, RunID: assignedRunID, Client: hello.Client, Build: hello.Build,
 		NameMode: hello.NameMode, ContinuityHandles: hello.ContinuityHandles, ProjectID: hello.ProjectID,
+		Harness: hello.Harness, HarnessInstance: harnessInstance, InstanceState: instanceState,
 		Provisional:        binding.Provisional,
 		AdoptedPredecessor: binding.AdoptedPredecessor,
+		PendingPredecessor: binding.PendingPredecessor,
 	}
 	defer func() {
 		if identity.Provisional {
@@ -345,11 +519,28 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 
 func finalizesProvisionalActor(operation string) bool {
 	switch operation {
-	case "ping", "list_events", "who", "list_aliases", "resolve_alias", "list_capabilities", "invoke_read_capability", "live_registrations", "heartbeat_registrations":
+	case "ping", "list_events", "who", "list_aliases", "resolve_alias", "list_capabilities", "invoke_read_capability", "live_registrations", "heartbeat_registrations", "list_conditions":
 		return false
 	default:
 		return true
 	}
+}
+
+func continuityKinds(handles []string) []string {
+	seen := make(map[string]struct{})
+	for _, handle := range handles {
+		kind := handle
+		if index := strings.IndexByte(handle, ':'); index >= 0 {
+			kind = handle[:index]
+		}
+		seen[kind] = struct{}{}
+	}
+	kinds := make([]string, 0, len(seen))
+	for kind := range seen {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	return kinds
 }
 
 func duplicateSocketDescriptor(connection net.Conn) (int, bool) {
@@ -381,6 +572,55 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 			return nil, err
 		}
 		return s.listCapabilities(), nil
+	case "list_conditions":
+		var args struct {
+			IncludeResolved bool `json:"include_resolved"`
+			Limit           int  `json:"limit"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.ListConditions(ctx, args.IncludeResolved, args.Limit)
+	case "acknowledge_condition":
+		if identity.Actor != "operator" {
+			return nil, &bus.ValidationError{Field: "actor", Problem: "only the operator identity may acknowledge conditions"}
+		}
+		var args struct {
+			Kind       string `json:"kind"`
+			Subject    string `json:"subject"`
+			Generation int    `json:"generation"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.AcknowledgeCondition(ctx, args.Kind, args.Subject, args.Generation)
+	case "snooze_condition":
+		if identity.Actor != "operator" {
+			return nil, &bus.ValidationError{Field: "actor", Problem: "only the operator identity may snooze conditions"}
+		}
+		var args struct {
+			Kind       string    `json:"kind"`
+			Subject    string    `json:"subject"`
+			Generation int       `json:"generation"`
+			Until      time.Time `json:"until"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.SnoozeCondition(ctx, args.Kind, args.Subject, args.Generation, args.Until)
+	case "claim_condition_presentation":
+		var args struct {
+			Kind       string `json:"kind"`
+			Subject    string `json:"subject"`
+			Generation int    `json:"generation"`
+			LeaseNS    int64  `json:"lease_ns"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		claimed, err := s.store.ClaimConditionPresentation(ctx, args.Kind, args.Subject, args.Generation,
+			identity.Actor+"/"+identity.RunID, time.Duration(args.LeaseNS))
+		return map[string]bool{"claimed": claimed}, err
 	case "invoke_read_capability", "invoke_write_capability":
 		var invocation bus.CapabilityInvocation
 		if err := decodeStrict(raw, &invocation); err != nil {
@@ -398,7 +638,11 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		}
 		request.FromActor = identity.Actor
 		request.FromRun = identity.RunID
-		return s.store.Send(ctx, request)
+		result, err := s.store.Send(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+		return s.finalizeSend(ctx, result)
 	case "check_inbox":
 		var args struct {
 			Limit int `json:"limit"`
@@ -434,6 +678,9 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		if s.attention == nil {
 			return nil, bus.ErrAttentionUnavailable
 		}
+		if identity.InstanceState == "unreconciled" {
+			return nil, fmt.Errorf("%w: daemon could not prove the live %s harness instance", bus.ErrAttentionUnavailable, identity.Harness)
+		}
 		waitCtx, cancel := context.WithTimeout(ctx, wait)
 		defer cancel()
 		notice, err := s.attention.Wait(waitCtx, identity.Actor, identity.RunID, args.SessionID, args.Adapter)
@@ -454,6 +701,9 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		args.Adapter = strings.TrimSpace(args.Adapter)
 		if s.attention == nil {
 			return nil, bus.ErrAttentionUnavailable
+		}
+		if identity.InstanceState == "unreconciled" {
+			return nil, fmt.Errorf("%w: daemon could not prove the live %s harness instance", bus.ErrAttentionUnavailable, identity.Harness)
 		}
 		registration, err := s.store.AttachMonitor(ctx, identity.Actor, identity.RunID, args.SessionID,
 			"claude", args.Adapter, time.Duration(args.LeaseNS))
@@ -531,12 +781,61 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		})
 	case "who":
 		var args struct {
-			Limit int `json:"limit"`
+			Limit           int  `json:"limit"`
+			IncludeArchived bool `json:"include_archived"`
 		}
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
+		if args.IncludeArchived {
+			return s.store.WhoIncludingArchived(ctx, args.Limit)
+		}
 		return s.store.Who(ctx, args.Limit)
+	case "archive_preflight":
+		var args struct {
+			Actor string `json:"actor"`
+			Limit int    `json:"limit"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.ArchivePreflight(ctx, args.Actor, args.Limit)
+	case "archive_actor":
+		if identity.Actor != "operator" {
+			return nil, &bus.ValidationError{Field: "actor", Problem: "only the operator identity may archive actors"}
+		}
+		var args struct {
+			Actor       string `json:"actor"`
+			AllowUnread bool   `json:"allow_unread"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.ArchiveActor(ctx, args.Actor, identity.Actor, args.AllowUnread)
+	case "restore_actor":
+		if identity.Actor != "operator" {
+			return nil, &bus.ValidationError{Field: "actor", Problem: "only the operator identity may restore actors"}
+		}
+		var args struct {
+			Actor string `json:"actor"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.RestoreActor(ctx, args.Actor, identity.Actor)
+	case "revoke_delivery_lease":
+		if identity.Actor != "operator" {
+			return nil, &bus.ValidationError{Field: "actor", Problem: "only the operator identity may revoke leases"}
+		}
+		var args struct {
+			Actor        string `json:"actor"`
+			MessageID    string `json:"message_id"`
+			CrashGraceNS int64  `json:"crash_grace_ns"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return map[string]bool{"revoked": true}, s.store.RevokeDeliveryLease(ctx, args.Actor, args.MessageID, time.Duration(args.CrashGraceNS))
 	case "adopt_actor":
 		var args struct {
 			SourceActor    string `json:"source_actor"`
@@ -576,11 +875,21 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		return s.store.ClaimAliasIfAbsent(ctx, bus.AliasClaimRequest{
+		result, err := s.store.ClaimAliasIfAbsent(ctx, bus.AliasClaimRequest{
 			Alias: args.Alias, Actor: args.Actor, PolicyID: args.PolicyID, Harness: args.Harness,
 			UpdatedByActor: identity.Actor, UpdatedByRun: identity.RunID,
 			ProjectID: args.ProjectID, IdempotencyKey: args.IdempotencyKey,
 		})
+		if err == nil && !result.Claimed && result.Alias.Actor != args.Actor {
+			details, _ := json.Marshal(result)
+			_, _ = s.store.ObserveCondition(ctx, bus.ConditionObservation{
+				Kind: "alias_collision", Subject: args.Alias, ReasonCode: "claim_if_absent_lost",
+				Summary: "Alias " + args.Alias + " is already owned by another actor", Details: details,
+			})
+		} else if err == nil && result.Alias.Actor == args.Actor {
+			_ = s.store.ResolveCondition(ctx, "alias_collision", args.Alias)
+		}
+		return result, err
 	case "remove_alias":
 		var args struct {
 			Alias          string `json:"alias"`
@@ -608,6 +917,15 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 			return nil, err
 		}
 		return s.store.ResolveAlias(ctx, args.Alias)
+	case "alias_preflight":
+		var args struct {
+			Alias         string `json:"alias"`
+			ProposedActor string `json:"proposed_actor"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.AliasPreflight(ctx, args.Alias, args.ProposedActor)
 	case "register_session":
 		var request bus.RegistrationRequest
 		if err := decodeStrict(raw, &request); err != nil {
@@ -615,7 +933,21 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		}
 		request.Actor = identity.Actor
 		request.RunID = identity.RunID
-		return s.store.RegisterSession(ctx, request)
+		if identity.InstanceState == "unreconciled" && request.AttentionMode != "" && request.AttentionMode != "startup-only" {
+			request.AttentionMode = "startup-only"
+			request.DeliveryHandle = ""
+		}
+		registration, err := s.store.RegisterSession(ctx, request)
+		if err == nil && registration.AttentionMode != "startup-only" && identity.InstanceState != "unreconciled" {
+			_ = s.store.ResolveConditionIfReason(ctx, "attention_unavailable", identity.Actor, "startup_only_selected")
+		} else if err == nil && registration.AttentionMode == "startup-only" && identity.InstanceState == "bound" {
+			details, _ := json.Marshal(map[string]string{"actor": identity.Actor, "harness": identity.Harness})
+			_, _ = s.store.ObserveCondition(ctx, bus.ConditionObservation{
+				Kind: "attention_unavailable", Subject: identity.Actor, ReasonCode: "startup_only_selected",
+				Summary: "Automatic wake is disabled by configuration for " + identity.Actor, Details: details,
+			})
+		}
+		return registration, err
 	case "live_registrations":
 		var args struct {
 			Actor string `json:"actor"`
@@ -680,6 +1012,56 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 	}
 }
 
+func (s *Server) finalizeSend(ctx context.Context, result bus.SendResult) (bus.SendResult, error) {
+	var err error
+	result.DeliveryReceipts, err = s.store.DeliveryReceipts(ctx, result.Message)
+	if err != nil {
+		return bus.SendResult{}, err
+	}
+	if err := s.decorateAttentionReceipts(ctx, result.DeliveryReceipts); err != nil {
+		return bus.SendResult{}, err
+	}
+	for _, receipt := range result.DeliveryReceipts {
+		if receipt.AttentionCapability != "disabled_by_config" && receipt.AttentionCapability != "integration_missing" && receipt.AttentionCapability != "version_blocked" {
+			continue
+		}
+		details, _ := json.Marshal(receipt)
+		_, _ = s.store.ObserveCondition(ctx, bus.ConditionObservation{
+			Kind: "attention_unavailable", Subject: receipt.CanonicalRecipient,
+			ReasonCode: receipt.AttentionReason,
+			Summary:    "Automatic wake is unavailable for " + receipt.CanonicalRecipient,
+			Details:    details,
+		})
+	}
+	return result, nil
+}
+
+func (s *Server) decorateAttentionReceipts(ctx context.Context, receipts []bus.DeliveryReceipt) error {
+	inspector, ok := s.attention.(attentionAttachmentInspector)
+	if !ok {
+		return nil
+	}
+	for index := range receipts {
+		if receipts[index].AttentionAttachment != "reconnecting" {
+			continue
+		}
+		registrations, err := s.store.LiveRegistrations(ctx, receipts[index].CanonicalRecipient)
+		if err != nil {
+			return err
+		}
+		for _, registration := range registrations {
+			if registration.Harness == "claude" && registration.AttentionMode == "hook-long-poll" &&
+				inspector.Attached(registration.Actor, registration.RunID, registration.SessionID) {
+				receipts[index].AttentionAttachment = "attached"
+				receipts[index].AttentionReason = ""
+				receipts[index].AttentionDetail = ""
+				break
+			}
+		}
+	}
+	return nil
+}
+
 type Client struct {
 	connection         net.Conn
 	connectionMu       sync.Mutex
@@ -698,6 +1080,7 @@ func Dial(ctx context.Context, socketPath string, identity Identity) (*Client, e
 	identity.RunID = strings.TrimSpace(identity.RunID)
 	identity.Client = strings.TrimSpace(identity.Client)
 	identity.ProjectID = strings.TrimSpace(identity.ProjectID)
+	identity.Harness = strings.ToLower(strings.TrimSpace(identity.Harness))
 	identity.NameMode = bus.NameMode(strings.TrimSpace(string(identity.NameMode)))
 	if identity.Build.Commit == "" {
 		identity.Build = buildinfo.Current()
@@ -753,14 +1136,20 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild, include
 		"actor": c.helloIdentity.Actor, "run_id": c.helloIdentity.RunID,
 	}
 	featureIdentity := c.helloIdentity.NameMode != "" || len(c.helloIdentity.ContinuityHandles) > 0 || c.helloIdentity.Takeover
+	featureHarness := c.helloIdentity.Harness != ""
 	if includeProject {
 		hello["project_id"] = c.helloIdentity.ProjectID
 	}
+	if featureIdentity || featureHarness {
+		hello["capabilities"] = []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, HarnessInstanceCapability, OperatorConditionsCapability, ActorLifecycleCapability}
+	}
 	if featureIdentity {
-		hello["capabilities"] = []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability}
 		hello["name_mode"] = c.helloIdentity.NameMode
 		hello["continuity_handles"] = c.helloIdentity.ContinuityHandles
 		hello["takeover"] = c.helloIdentity.Takeover
+	}
+	if featureHarness {
+		hello["harness"] = c.helloIdentity.Harness
 	}
 	if includeBuild {
 		hello["build"] = c.helloIdentity.Build
@@ -789,16 +1178,26 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild, include
 	var ready struct {
 		Protocol           int            `json:"protocol"`
 		Actor              string         `json:"actor"`
+		RunID              string         `json:"run_id"`
 		Build              buildinfo.Info `json:"build"`
 		Capabilities       []string       `json:"capabilities"`
 		Provisional        bool           `json:"provisional"`
 		AdoptedPredecessor string         `json:"adopted_predecessor"`
+		PendingPredecessor string         `json:"pending_predecessor"`
+		HarnessInstance    string         `json:"harness_instance"`
+		InstanceState      string         `json:"instance_state"`
 	}
 	if err := json.Unmarshal(response.Result, &ready); err != nil {
 		c.closeLocked()
 		return fmt.Errorf("decode hollerd hello: %w", err)
 	}
-	if ready.Protocol != ProtocolVersion || ready.Actor == "" || (!featureIdentity && ready.Actor != c.helloIdentity.Actor) {
+	if ready.RunID == "" && !featureIdentity && !featureHarness {
+		// The oldest protocol-v1 daemon did not echo run_id in READY. This is
+		// safe only for the legacy path, where no daemon-owned identity binding
+		// was negotiated and the authenticated run therefore cannot change.
+		ready.RunID = c.helloIdentity.RunID
+	}
+	if ready.Protocol != ProtocolVersion || ready.Actor == "" || ready.RunID == "" || (!featureIdentity && ready.Actor != c.helloIdentity.Actor) {
 		c.closeLocked()
 		return errors.New("hollerd returned mismatched session identity")
 	}
@@ -807,8 +1206,12 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild, include
 		return errors.New("hollerd does not support negotiated actor allocation")
 	}
 	c.identity.Actor = ready.Actor
+	c.identity.RunID = ready.RunID
 	c.identity.Provisional = ready.Provisional
 	c.identity.AdoptedPredecessor = ready.AdoptedPredecessor
+	c.identity.PendingPredecessor = ready.PendingPredecessor
+	c.identity.HarnessInstance = ready.HarnessInstance
+	c.identity.InstanceState = ready.InstanceState
 	c.serverBuild = ready.Build
 	c.serverCapabilities = append([]string(nil), ready.Capabilities...)
 	return nil
@@ -980,8 +1383,38 @@ func (c *Client) SetActorProfile(ctx context.Context, actor, runID, projectID st
 
 func (c *Client) Who(ctx context.Context, limit int) (bus.ActorDirectory, error) {
 	var result bus.ActorDirectory
-	err := c.call(ctx, "who", map[string]interface{}{"limit": limit}, &result)
+	err := c.call(ctx, "who", map[string]interface{}{"limit": limit, "include_archived": false}, &result)
 	return result, err
+}
+
+func (c *Client) WhoIncludingArchived(ctx context.Context, limit int) (bus.ActorDirectory, error) {
+	var result bus.ActorDirectory
+	err := c.call(ctx, "who", map[string]interface{}{"limit": limit, "include_archived": true}, &result)
+	return result, err
+}
+
+func (c *Client) ArchivePreflight(ctx context.Context, actor string, limit int) (bus.ActorArchivePreflight, error) {
+	var result bus.ActorArchivePreflight
+	err := c.call(ctx, "archive_preflight", map[string]interface{}{"actor": actor, "limit": limit}, &result)
+	return result, err
+}
+
+func (c *Client) ArchiveActor(ctx context.Context, actor string, allowUnread bool) (bus.ActorArchiveResult, error) {
+	var result bus.ActorArchiveResult
+	err := c.call(ctx, "archive_actor", map[string]interface{}{"actor": actor, "allow_unread": allowUnread}, &result)
+	return result, err
+}
+
+func (c *Client) RestoreActor(ctx context.Context, actor string) (bus.ActorArchiveResult, error) {
+	var result bus.ActorArchiveResult
+	err := c.call(ctx, "restore_actor", map[string]interface{}{"actor": actor}, &result)
+	return result, err
+}
+
+func (c *Client) RevokeDeliveryLease(ctx context.Context, actor, messageID string, crashGrace time.Duration) error {
+	return c.call(ctx, "revoke_delivery_lease", map[string]interface{}{
+		"actor": actor, "message_id": messageID, "crash_grace_ns": int64(crashGrace),
+	}, &struct{}{})
 }
 
 func (c *Client) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.AdoptResult, error) {
@@ -1039,10 +1472,50 @@ func (c *Client) ResolveAlias(ctx context.Context, alias string) (bus.ActorAlias
 	return result, err
 }
 
+func (c *Client) AliasPreflight(ctx context.Context, alias, proposedActor string) (bus.AliasPreflight, error) {
+	var result bus.AliasPreflight
+	err := c.call(ctx, "alias_preflight", map[string]interface{}{"alias": alias, "proposed_actor": proposedActor}, &result)
+	return result, err
+}
+
 func (c *Client) ListCapabilities(ctx context.Context) ([]bus.CapabilityDescriptor, error) {
 	var result []bus.CapabilityDescriptor
 	err := c.call(ctx, "list_capabilities", struct{}{}, &result)
 	return result, err
+}
+
+func (c *Client) ListConditions(ctx context.Context, includeResolved bool, limit int) ([]bus.OperatorCondition, error) {
+	var result []bus.OperatorCondition
+	err := c.call(ctx, "list_conditions", map[string]interface{}{
+		"include_resolved": includeResolved, "limit": limit,
+	}, &result)
+	return result, err
+}
+
+func (c *Client) AcknowledgeCondition(ctx context.Context, kind, subject string, generation int) (bus.OperatorCondition, error) {
+	var result bus.OperatorCondition
+	err := c.call(ctx, "acknowledge_condition", map[string]interface{}{
+		"kind": kind, "subject": subject, "generation": generation,
+	}, &result)
+	return result, err
+}
+
+func (c *Client) SnoozeCondition(ctx context.Context, kind, subject string, generation int, until time.Time) (bus.OperatorCondition, error) {
+	var result bus.OperatorCondition
+	err := c.call(ctx, "snooze_condition", map[string]interface{}{
+		"kind": kind, "subject": subject, "generation": generation, "until": until,
+	}, &result)
+	return result, err
+}
+
+func (c *Client) ClaimConditionPresentation(ctx context.Context, kind, subject string, generation int, lease time.Duration) (bool, error) {
+	var result struct {
+		Claimed bool `json:"claimed"`
+	}
+	err := c.call(ctx, "claim_condition_presentation", map[string]interface{}{
+		"kind": kind, "subject": subject, "generation": generation, "lease_ns": int64(lease),
+	}, &result)
+	return result.Claimed, err
 }
 
 func (c *Client) InvokeReadCapability(ctx context.Context, name string, arguments json.RawMessage) (json.RawMessage, error) {
@@ -1132,8 +1605,10 @@ func (c *Client) requireActor(actor string) error {
 }
 
 func (c *Client) requireRun(runID string) error {
-	identity := c.Identity()
-	if strings.TrimSpace(runID) != identity.RunID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	candidate := strings.TrimSpace(runID)
+	if candidate != c.identity.RunID && candidate != c.helloIdentity.RunID {
 		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
 	}
 	return nil
@@ -1219,7 +1694,7 @@ func (c *Client) callOnceLocked(ctx context.Context, op string, args interface{}
 
 func retryAfterReconnect(op string) bool {
 	switch op {
-	case "ping", "send", "check_inbox", "ack", "extend", "list_events", "who", "set_alias", "remove_alias", "list_aliases", "resolve_alias", "list_capabilities", "invoke_read_capability", "live_registrations", "monitor_attach", "expire_registration", "heartbeat_registrations":
+	case "ping", "send", "check_inbox", "ack", "extend", "list_events", "who", "set_alias", "remove_alias", "list_aliases", "resolve_alias", "alias_preflight", "list_capabilities", "invoke_read_capability", "live_registrations", "monitor_attach", "expire_registration", "heartbeat_registrations", "list_conditions", "claim_condition_presentation", "archive_preflight":
 		return true
 	default:
 		return false
@@ -1343,6 +1818,8 @@ func rpcError(err error) *RPCError {
 		code = "delivery_terminal"
 	case errors.Is(err, bus.ErrActorLive):
 		code = "actor_live"
+	case errors.Is(err, bus.ErrActorArchived):
+		code = "actor_archived"
 	case errors.Is(err, bus.ErrBindingStale):
 		code = "binding_stale"
 	case errors.Is(err, bus.ErrContinuityConflict):
@@ -1403,6 +1880,8 @@ func errorFromRPC(rpc *RPCError) error {
 		sentinel = bus.ErrDeliveryTerminal
 	case "actor_live":
 		sentinel = bus.ErrActorLive
+	case "actor_archived":
+		sentinel = bus.ErrActorArchived
 	case "binding_stale":
 		sentinel = bus.ErrBindingStale
 	case "continuity_conflict":

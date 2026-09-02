@@ -1,3 +1,43 @@
+# Holler 0.7.0
+
+Holler 0.7.0 makes session routing explicit and failure states visible while
+preserving the protocol-v1 socket and 0.6.1 capability bridge.
+
+## Highlights
+
+- Typed alias, actor, and immutable reply routes retain requested-route
+  provenance; alias repoints cannot redirect old replies or idempotent retries.
+- Daemon-proven harness-instance binding reconciles MCP, hooks, and monitors.
+  Unproven connectors keep durable messaging but cannot claim live wake.
+- Concurrent resume never steals a live predecessor. Holler gives the successor
+  a usable identity and records a pending-takeover condition for an explicit
+  operator decision.
+- Per-recipient send receipts separate durable commit, control presence,
+  attention capability, attachment, reason, and required sender action.
+- Durable coalesced operator conditions appear in `holler status`, startup
+  hydration, the CLI, MCP status, and the restart-free read bridge.
+- Alias preflight exposes repoint and whole-actor impact before approval.
+- Guarded reversible actor archival preserves names and unread mail, blocks on
+  aliases/presence/claims, and fences late acknowledgements after an explicit
+  crash-grace lease revocation.
+- `holler migrate bare-harnesses` produces a read-only plan for legacy `claude`,
+  `codex`, and `opencode` identities; it changes nothing automatically.
+
+## Compatibility
+
+The wire protocol remains version 1 and the database migrates forward to schema
+14. A 0.6.1 MCP child can discover typed send, alias preflight, conditions, and
+archive preflight through its existing capability bridge. Fresh connectors add
+daemon-attested harness-instance binding and the new startup behavior.
+
+## Validation
+
+Release-candidate validation is in progress on the local release branch. The
+release will not be pushed until the full unit, vet, race, sandbox-lab, packaged
+artifact, upgrade, and live connector checks pass.
+
+---
+
 # Holler 0.6.1
 
 Holler 0.6.1 makes 0.6.0's MCP upgrade boundary a one-time event. It adds a

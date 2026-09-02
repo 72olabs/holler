@@ -15,6 +15,7 @@ steps:
   - action: send
     from: sender
     to: recipient
+    route: actor
     body: Queued while offline.
     save_as: offline_message
   - action: start

@@ -102,6 +102,7 @@ Give stable human names to particular sessions without changing their durable
 actor identity:
 
 ```sh
+holler alias preflight skillbank claude-a7f3c2
 holler alias set skillbank claude-a7f3c2
 holler alias list
 holler alias resolve skillbank
@@ -111,6 +112,22 @@ After that, “holler at skillbank” routes to `claude-a7f3c2`. Aliases are dur
 operator-controlled pointers. Agents may suggest a mapping, but creating,
 repointing, or removing one requires explicit user approval. Messages are
 stamped with the resolved actor, so a later repoint never changes old mail.
+Replies use the original message's sender provenance and never re-resolve the
+alias.
+
+Inspect durable conditions that need operator attention:
+
+```sh
+holler conditions list
+holler conditions ack --kind attention_unavailable --subject claude-a7f3c2 --generation 1
+```
+
+Acknowledgement records that the condition was seen; it does not resolve the
+cause. `holler status` includes active conditions. Every send also returns a
+per-recipient receipt that separates durable commit from control presence and
+wake availability. A committed message must not be resent merely because wake
+is disabled; the sender instead tells the operator how to wake the reader or
+repair the integration.
 
 When an allocated actor ends without a continuity tag, a user can explicitly
 hand its inbox to one live replacement:
@@ -161,6 +178,18 @@ adopted inboxes. Adoption is never automatic and does not support chains.
   write bridge remains explicitly approval-gated.
 - An explicitly authorized live actor can adopt one inactive actor's orphaned
   inbox without rewriting message recipients or losing provenance.
+- Daemon-proven harness-instance bindings reconcile MCP, hooks, and monitors.
+  If proof is unavailable, durable messaging continues while live wake is
+  visibly disabled rather than trusting `run_id` as identity evidence.
+- A live continuity predecessor is never silently stolen. The successor gets
+  a separate usable actor and a durable pending-takeover condition until an
+  operator performs an explicit handoff.
+- Durable operator conditions coalesce recurring identity, attention, and
+  stale-inbox problems; acknowledgement and finite snooze affect presentation,
+  not truth.
+- Actors can be archived only after preflight. Aliases, live presence, and
+  active claims block archival; unread mail requires explicit preservation.
+  Archived names remain reserved and visible through `holler who --all`.
 
 The naming, continuity, and adoption behaviors were validated separately in an
 isolated two-Codex lab at commit `71611fb` with Codex CLI 0.151.0. That lab did
@@ -198,9 +227,9 @@ certification of the current commit.
                                │ only database owner
                                ▼
                     ┌──────────────────────┐
-                    │ SQLite              │
-                    │ messages · delivery │
-                    │ outbox · presence   │
+                    │ SQLite                  │
+                    │ messages · delivery     │
+                    │ conditions · lifecycle │
                     └──────────────────────┘
 ```
 
@@ -262,6 +291,13 @@ holler setup claude --name-mode allocate
 Supervisors can launch with `--launch-tag <stable-tag>` so a replacement
 process reclaims its allocation. Use `--name-mode exact` when duplicates must
 be rejected and add launcher-only `--takeover` only for a deliberate handoff.
+
+Before retiring legacy bare harness actors, generate a non-mutating plan:
+
+```sh
+holler migrate bare-harnesses
+holler actor archive-preflight --actor claude
+```
 
 ## Current boundaries
 

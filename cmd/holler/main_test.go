@@ -684,7 +684,10 @@ func TestClaudeMonitorReconnectsAcrossShortAndLongDaemonOutages(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				done := make(chan error, 1)
 				go func() {
-					done <- daemon.Run(ctx, daemon.Config{DatabasePath: database, SocketPath: socket, Clock: clock.Now}, nil)
+					done <- daemon.Run(ctx, daemon.Config{
+						DatabasePath: database, SocketPath: socket, Clock: clock.Now,
+						HarnessInstanceResolver: func(net.Conn, string) (string, error) { return "hin_outage_test", nil },
+					}, nil)
 				}()
 				deadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(deadline) {
@@ -1064,6 +1067,9 @@ func startAPIServer(t *testing.T) string {
 
 func startAPIServerWithOptions(t *testing.T, options ...api.ServerOption) string {
 	t.Helper()
+	options = append([]api.ServerOption{api.WithHarnessInstanceResolver(func(_ net.Conn, harness string) (string, error) {
+		return "hin_test_" + harness, nil
+	})}, options...)
 	ctx, cancel := context.WithCancel(context.Background())
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
 	if err != nil {

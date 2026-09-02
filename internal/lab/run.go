@@ -284,9 +284,21 @@ func (e *execution) execute(step Step) error {
 			ProjectID:      "lab", ChannelID: "direct", ThreadID: step.ThreadID, ToActors: []string{to}, Type: messageType,
 			DeliveryRequest: bus.DeliveryNonBlocking, Body: body,
 		}
-		if parent, exists := e.messages[step.Message]; exists {
+		if step.Route != "" {
+			request.ToActors = nil
+			request.Destinations = []bus.Route{{Kind: bus.RouteKind(step.Route), Value: to}}
+		}
+		if step.Message != "" {
+			parent, exists := e.messages[step.Message]
+			if !exists {
+				return fmt.Errorf("unknown message %q", step.Message)
+			}
 			request.ThreadID = parent.Message.ThreadID
-			request.InReplyTo = parent.Message.ID
+			if step.Reply {
+				request.ToActors = nil
+				request.Destinations = nil
+				request.InReplyTo = parent.Message.ID
+			}
 		}
 		sent, err := from.client.Send(e.ctx, request)
 		if err != nil {

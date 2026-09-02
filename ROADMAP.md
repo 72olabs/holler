@@ -78,6 +78,12 @@ Exit gate:
 
 ### 1. Add actor binding and protocol evolution
 
+The 0.7 direct-message foundation now provides typed routes, immutable reply
+provenance, daemon-proven local harness-instance binding, pending-takeover
+conditions, guarded actor archival, and negotiated additive capabilities. This
+slice extends those primitives to channel scopes and retains the external
+identity-provider boundary below.
+
 Holler accepts an opaque actor identity supplied by the user, client, or an
 external identity system. It binds that identity to a connector connection and
 run, but does not become the actor registry or credential issuer. The owning OS

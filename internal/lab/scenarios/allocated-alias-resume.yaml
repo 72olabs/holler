@@ -33,6 +33,7 @@ steps:
   - action: send
     from: codex
     to: skillbank
+    route: alias
     body: First alias delivery.
     save_as: first
   - action: claim
@@ -57,6 +58,7 @@ steps:
   - action: send
     from: codex
     to: skillbank
+    route: alias
     body: Delivery after resume.
     save_as: second
   - action: claim

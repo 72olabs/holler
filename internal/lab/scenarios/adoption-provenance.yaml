@@ -21,6 +21,7 @@ steps:
   - action: send
     from: sender
     to: retired
+    route: actor
     body: Review this after handoff.
     type: REVIEW_REQUEST
     save_as: review

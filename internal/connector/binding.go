@@ -85,8 +85,8 @@ func ResolveRuntimeBinding(harness string, binding RuntimeBinding) (RuntimeBindi
 	if err := ValidateNameMode(string(binding.NameMode)); err != nil {
 		return RuntimeBinding{}, err
 	}
-	if binding.Takeover && binding.NameMode != bus.NameModeExact {
-		return RuntimeBinding{}, fmt.Errorf("takeover requires exact name mode")
+	if binding.Takeover && binding.NameMode == "" {
+		return RuntimeBinding{}, fmt.Errorf("takeover requires exact or allocate name mode")
 	}
 	if binding.LaunchTag != "" && binding.NameMode != bus.NameModeAllocate {
 		return RuntimeBinding{}, fmt.Errorf("launch tag requires allocate name mode")

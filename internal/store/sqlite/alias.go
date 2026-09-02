@@ -75,6 +75,11 @@ func (s *Store) ClaimAliasIfAbsent(ctx context.Context, request bus.AliasClaimRe
 	if !actorExists {
 		return bus.AliasClaimResult{}, fmt.Errorf("%s: %w", req.Actor, bus.ErrAliasTargetUnknown)
 	}
+	if archived, err := s.actorArchivedTx(ctx, tx, req.Actor); err != nil {
+		return bus.AliasClaimResult{}, err
+	} else if archived {
+		return bus.AliasClaimResult{}, fmt.Errorf("%s: %w", req.Actor, bus.ErrActorArchived)
+	}
 	current, err := aliasByNameTx(ctx, tx, req.Alias)
 	result := bus.AliasClaimResult{PolicyID: req.PolicyID}
 	switch {
@@ -192,6 +197,11 @@ func (s *Store) mutateAlias(ctx context.Context, alias, actor, action, updatedBy
 		if !actorExists {
 			return bus.AliasMutationResult{}, fmt.Errorf("%s: %w", actor, bus.ErrAliasTargetUnknown)
 		}
+		if archived, err := s.actorArchivedTx(ctx, tx, actor); err != nil {
+			return bus.AliasMutationResult{}, err
+		} else if archived {
+			return bus.AliasMutationResult{}, fmt.Errorf("%s: %w", actor, bus.ErrActorArchived)
+		}
 		identityExists, err := actorIdentityExistsTx(ctx, tx, alias)
 		if err != nil {
 			return bus.AliasMutationResult{}, err
@@ -294,6 +304,88 @@ func (s *Store) ResolveAlias(ctx context.Context, name string) (bus.ActorAlias, 
 	}
 	alias.UpdatedAt = time.Unix(0, updatedAtNS).UTC()
 	return alias, nil
+}
+
+func (s *Store) AliasPreflight(ctx context.Context, name, proposedActor string) (bus.AliasPreflight, error) {
+	name, err := normalizeAlias("alias", name)
+	if err != nil {
+		return bus.AliasPreflight{}, err
+	}
+	proposedActor = strings.TrimSpace(proposedActor)
+	result := bus.AliasPreflight{
+		Alias: name, ProposedTarget: proposedActor, AliasesOnPredecessor: []string{}, AliasesOnProposed: []string{},
+	}
+	current, err := s.ResolveAlias(ctx, name)
+	switch {
+	case err == nil:
+		result.State = "resolved_alias"
+		result.CurrentTarget = current.Actor
+		result.CurrentRevision = current.Revision
+	case errors.Is(err, bus.ErrAliasNotFound):
+		var tombstoned int
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_alias_history WHERE alias = ?)`, name).Scan(&tombstoned); err != nil {
+			return result, err
+		}
+		if tombstoned != 0 {
+			result.State = "tombstoned_alias"
+		} else {
+			result.State = "missing"
+		}
+	default:
+		return result, err
+	}
+	if proposedActor != "" {
+		var known int
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_names WHERE actor = ?)`, proposedActor).Scan(&known); err != nil {
+			return result, err
+		}
+		if known == 0 {
+			return result, fmt.Errorf("%s: %w", proposedActor, bus.ErrAliasTargetUnknown)
+		}
+		aliases, err := aliasesForActor(ctx, s.db, proposedActor)
+		if err != nil {
+			return result, err
+		}
+		result.AliasesOnProposed = aliases
+	}
+	if result.CurrentTarget == "" || result.CurrentTarget == proposedActor {
+		return result, nil
+	}
+	result.AliasesOnPredecessor, err = aliasesForActor(ctx, s.db, result.CurrentTarget)
+	if err != nil {
+		return result, err
+	}
+	preflight, err := s.ArchivePreflight(ctx, result.CurrentTarget, 25)
+	if err != nil {
+		return result, err
+	}
+	result.Predecessor = &preflight
+	result.WholeActorAdoption = true
+	return result, nil
+}
+
+type aliasQueryer interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+}
+
+func aliasesForActor(ctx context.Context, queryer aliasQueryer, actor string) ([]string, error) {
+	aliases := make([]string, 0)
+	rows, err := queryer.QueryContext(ctx, `SELECT alias FROM actor_aliases WHERE actor = ? ORDER BY alias`, actor)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var alias string
+		if err := rows.Scan(&alias); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		aliases = append(aliases, alias)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return aliases, nil
 }
 
 func classifyLegacyRoutesTx(ctx context.Context, tx *sql.Tx, requested []string) ([]bus.Route, error) {

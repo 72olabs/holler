@@ -86,7 +86,14 @@ func (s *Server) invokeCapability(ctx context.Context, identity Identity, expect
 				invocation.Name, registration.descriptor.Mode, expected),
 		}
 	}
-	return registration.handler(ctx, s.store, identity, invocation.Arguments)
+	result, err := registration.handler(ctx, s.store, identity, invocation.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if sent, ok := result.(bus.SendResult); ok {
+		return s.finalizeSend(ctx, sent)
+	}
+	return result, nil
 }
 
 func defaultCapabilities() []registeredCapability {
@@ -107,6 +114,66 @@ func defaultCapabilities() []registeredCapability {
 		return map[string]interface{}{"type": "string", "description": description}
 	}
 	return []registeredCapability{
+		{
+			descriptor: bus.CapabilityDescriptor{
+				Name: "alias.preflight", Mode: bus.CapabilityRead, Since: "0.7.0",
+				Description: "Inspect the complete impact of creating or repointing an alias before requesting operator approval.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"alias":          stringProperty("human-facing alias"),
+					"proposed_actor": stringProperty("proposed canonical actor target"),
+				}, "alias", "proposed_actor"),
+			},
+			handler: func(ctx context.Context, store Store, _ Identity, raw json.RawMessage) (interface{}, error) {
+				var args struct {
+					Alias         string `json:"alias"`
+					ProposedActor string `json:"proposed_actor"`
+				}
+				if err := decodeStrict(raw, &args); err != nil {
+					return nil, err
+				}
+				return store.AliasPreflight(ctx, args.Alias, args.ProposedActor)
+			},
+		},
+		{
+			descriptor: bus.CapabilityDescriptor{
+				Name: "operator.conditions", Mode: bus.CapabilityRead, Since: "0.7.0",
+				Description: "List durable operator-visible conditions without changing their state.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"include_resolved": map[string]interface{}{"type": "boolean"},
+					"limit":            map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100},
+				}),
+			},
+			handler: func(ctx context.Context, store Store, _ Identity, raw json.RawMessage) (interface{}, error) {
+				var args struct {
+					IncludeResolved bool `json:"include_resolved"`
+					Limit           int  `json:"limit"`
+				}
+				if err := decodeStrict(raw, &args); err != nil {
+					return nil, err
+				}
+				return store.ListConditions(ctx, args.IncludeResolved, args.Limit)
+			},
+		},
+		{
+			descriptor: bus.CapabilityDescriptor{
+				Name: "actor.archive_preflight", Mode: bus.CapabilityRead, Since: "0.7.0",
+				Description: "Show aliases, live presence, claims, continuity, and untrusted unread previews before actor archival.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"actor": stringProperty("canonical actor to inspect"),
+					"limit": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100},
+				}, "actor"),
+			},
+			handler: func(ctx context.Context, store Store, _ Identity, raw json.RawMessage) (interface{}, error) {
+				var args struct {
+					Actor string `json:"actor"`
+					Limit int    `json:"limit"`
+				}
+				if err := decodeStrict(raw, &args); err != nil {
+					return nil, err
+				}
+				return store.ArchivePreflight(ctx, args.Actor, args.Limit)
+			},
+		},
 		{
 			descriptor: bus.CapabilityDescriptor{
 				Name: "message.send.v2", Mode: bus.CapabilityWrite, Since: "0.7.0",

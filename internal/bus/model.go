@@ -41,6 +41,7 @@ var (
 	ErrAliasTombstoned      = errors.New("actor alias was removed and is reserved")
 	ErrAliasTargetUnknown   = errors.New("alias target is not a known actor")
 	ErrDatabaseOwned        = errors.New("another hollerd already owns this database")
+	ErrActorArchived        = errors.New("actor is archived")
 )
 
 type NameMode string
@@ -130,9 +131,89 @@ type SendRequest struct {
 }
 
 type SendResult struct {
-	Message           Message `json:"message"`
-	Duplicate         bool    `json:"duplicate"`
-	NotificationState string  `json:"notification_state,omitempty"`
+	Message           Message           `json:"message"`
+	Duplicate         bool              `json:"duplicate"`
+	NotificationState string            `json:"notification_state,omitempty"`
+	DeliveryReceipts  []DeliveryReceipt `json:"delivery_receipts,omitempty"`
+}
+
+type DeliveryReceipt struct {
+	MessageState        string    `json:"message"`
+	RequestedRoute      Route     `json:"requested_route"`
+	CanonicalRecipient  string    `json:"canonical_recipient"`
+	RouteKind           RouteKind `json:"route_kind"`
+	DurableDelivery     string    `json:"durable_delivery"`
+	ControlPresence     string    `json:"control_presence"`
+	AttentionCapability string    `json:"attention_capability"`
+	AttentionAttachment string    `json:"attention_attachment"`
+	AttentionReason     string    `json:"attention_reason,omitempty"`
+	AttentionDetail     string    `json:"attention_detail,omitempty"`
+	SenderAction        string    `json:"sender_action"`
+}
+
+type ConditionState string
+
+const (
+	ConditionActiveVisible      ConditionState = "active_visible"
+	ConditionActiveSnoozed      ConditionState = "active_snoozed"
+	ConditionActiveAcknowledged ConditionState = "active_acknowledged"
+	ConditionResolved           ConditionState = "resolved"
+)
+
+type OperatorCondition struct {
+	Kind                   string          `json:"kind"`
+	Subject                string          `json:"subject"`
+	Generation             int             `json:"generation"`
+	State                  ConditionState  `json:"state"`
+	ReasonCode             string          `json:"reason_code"`
+	Summary                string          `json:"summary"`
+	Details                json.RawMessage `json:"details,omitempty"`
+	FirstSeenAt            time.Time       `json:"first_seen_at"`
+	LastSeenAt             time.Time       `json:"last_seen_at"`
+	ResolvedAt             *time.Time      `json:"resolved_at,omitempty"`
+	SnoozedUntil           *time.Time      `json:"snoozed_until,omitempty"`
+	AcknowledgedAt         *time.Time      `json:"acknowledged_at,omitempty"`
+	PresentationOwner      string          `json:"presentation_owner,omitempty"`
+	PresentationLeaseUntil *time.Time      `json:"presentation_lease_until,omitempty"`
+}
+
+type ActorArchiveMessage struct {
+	MessageID        string    `json:"message_id"`
+	FromActor        string    `json:"from_actor"`
+	CreatedAt        time.Time `json:"created_at"`
+	ThreadID         string    `json:"thread_id,omitempty"`
+	Type             string    `json:"type"`
+	BodyPreview      string    `json:"body_preview"`
+	PreviewUntrusted bool      `json:"preview_untrusted"`
+}
+
+type ActorArchivePreflight struct {
+	Actor              string                `json:"actor"`
+	Archived           bool                  `json:"archived"`
+	Aliases            []string              `json:"aliases"`
+	Unread             []ActorArchiveMessage `json:"unread"`
+	UnreadTruncated    bool                  `json:"unread_truncated"`
+	ActiveClaims       int                   `json:"active_claims"`
+	ControlPresence    int                   `json:"control_presence"`
+	ContinuityBindings int                   `json:"continuity_bindings"`
+	AutomaticEligible  bool                  `json:"automatic_eligible"`
+	OperatorEligible   bool                  `json:"operator_eligible"`
+	Blockers           []string              `json:"blockers"`
+}
+
+type ActorArchiveResult struct {
+	Actor      string    `json:"actor"`
+	Archived   bool      `json:"archived"`
+	WithUnread bool      `json:"with_unread"`
+	ChangedAt  time.Time `json:"changed_at"`
+}
+
+type ConditionObservation struct {
+	Kind       string          `json:"kind"`
+	Subject    string          `json:"subject"`
+	ReasonCode string          `json:"reason_code"`
+	Summary    string          `json:"summary"`
+	Details    json.RawMessage `json:"details,omitempty"`
 }
 
 type LeaseExtension struct {
@@ -252,6 +333,18 @@ type AliasMutationResult struct {
 	DuplicateRequest bool       `json:"duplicate_request"`
 }
 
+type AliasPreflight struct {
+	Alias                string                 `json:"alias"`
+	State                string                 `json:"state"`
+	CurrentTarget        string                 `json:"current_target,omitempty"`
+	CurrentRevision      int64                  `json:"current_revision,omitempty"`
+	ProposedTarget       string                 `json:"proposed_target,omitempty"`
+	AliasesOnPredecessor []string               `json:"aliases_on_predecessor"`
+	AliasesOnProposed    []string               `json:"aliases_on_proposed"`
+	Predecessor          *ActorArchivePreflight `json:"predecessor,omitempty"`
+	WholeActorAdoption   bool                   `json:"whole_actor_adoption"`
+}
+
 type Registration struct {
 	Actor          string    `json:"actor"`
 	RunID          string    `json:"run_id"`
@@ -339,14 +432,17 @@ type ActorBindRequest struct {
 }
 
 type ActorBindResult struct {
-	Actor               string         `json:"actor"`
-	RequestedActor      string         `json:"requested_actor"`
-	NameMode            NameMode       `json:"name_mode"`
-	Minted              bool           `json:"minted"`
-	Provisional         bool           `json:"provisional"`
-	ContinuityReclaimed bool           `json:"continuity_reclaimed"`
-	AdoptedPredecessor  string         `json:"adopted_predecessor,omitempty"`
-	SupersededPresences []Registration `json:"-"`
+	Actor                     string         `json:"actor"`
+	AssignedRunID             string         `json:"assigned_run_id"`
+	RequestedActor            string         `json:"requested_actor"`
+	NameMode                  NameMode       `json:"name_mode"`
+	Minted                    bool           `json:"minted"`
+	Provisional               bool           `json:"provisional"`
+	ContinuityReclaimed       bool           `json:"continuity_reclaimed"`
+	AdoptedPredecessor        string         `json:"adopted_predecessor,omitempty"`
+	PendingPredecessor        string         `json:"pending_predecessor,omitempty"`
+	AcceptedContinuityHandles []string       `json:"-"`
+	SupersededPresences       []Registration `json:"-"`
 }
 
 type NotificationAttempt struct {

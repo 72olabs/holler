@@ -996,6 +996,69 @@ func TestMigrationV9AddsAliasesWithoutLosingMessages(t *testing.T) {
 	}
 }
 
+func TestMigrationV11AddsIdentityConditionsAndLifecycleWithoutLosingMessages(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, err := db.Send(ctx, testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE harness_instance_bindings`,
+		`DROP TABLE operator_conditions`,
+		`DROP TABLE actor_lifecycle`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (11, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	items, err := db.CheckInbox(ctx, "reviewer", 10)
+	if err != nil || len(items) != 1 || items[0].MessageID != sent.Message.ID {
+		t.Fatalf("migrated inbox = %+v, err = %v", items, err)
+	}
+	binding, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "worker", RunID: "run-1", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:run-1", "instance:hin_migration", "launch:codex:migration"},
+		ProjectID:         "migration",
+	})
+	if err != nil || binding.Actor == "" || binding.AssignedRunID != "run-1" {
+		t.Fatalf("migrated harness binding = %+v, err = %v", binding, err)
+	}
+	condition, err := db.ObserveCondition(ctx, bus.ConditionObservation{
+		Kind: "attention_unavailable", Subject: binding.Actor, ReasonCode: "migration_probe", Summary: "migration probe",
+	})
+	if err != nil || condition.Generation != 1 {
+		t.Fatalf("migrated condition = %+v, err = %v", condition, err)
+	}
+	preflight, err := db.ArchivePreflight(ctx, "reviewer", 10)
+	if err != nil || preflight.Actor != "reviewer" || len(preflight.Unread) != 1 {
+		t.Fatalf("migrated lifecycle preflight = %+v, err = %v", preflight, err)
+	}
+}
+
 func TestStoreRepairsUnversionedLegacyColumns(t *testing.T) {
 	db, path := openTestStore(t)
 	if _, err := db.RegisterSession(context.Background(), bus.RegistrationRequest{

@@ -571,6 +571,21 @@ func checkDaemon(ctx context.Context, config DoctorConfig, report *DoctorReport)
 			map[string]string{"socket": config.SocketPath, "detail": err.Error()}, "upgrade hollerd and the connector together")
 		return false
 	}
+	conditions, conditionErr := client.ListConditions(ctx, false, 100)
+	if conditionErr != nil {
+		report.add(CheckWarn, "daemon.operator_conditions", "runtime", "operator conditions could not be inspected",
+			map[string]string{"detail": conditionErr.Error()}, "run holler conditions list")
+	} else if len(conditions) > 0 {
+		labels := make([]string, 0, len(conditions))
+		for _, condition := range conditions {
+			labels = append(labels, condition.Kind+"/"+condition.Subject+"/"+string(condition.State))
+		}
+		report.add(CheckWarn, "daemon.operator_conditions", "runtime", "active operator conditions require attention",
+			map[string]string{"count": strconv.Itoa(len(conditions)), "conditions": strings.Join(labels, ",")},
+			"run holler conditions list for full reason and remediation context")
+	} else {
+		report.add(CheckPass, "daemon.operator_conditions", "runtime", "no active operator conditions", nil, "")
+	}
 	build := client.ServerBuild()
 	buildEvidence := map[string]string{"id": build.ID(), "commit": build.Commit, "dirty": strconv.FormatBool(build.Dirty)}
 	if build.Commit == "" || build.Commit == "unknown" || build.Dirty {

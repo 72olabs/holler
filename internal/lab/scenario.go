@@ -35,9 +35,11 @@ type Step struct {
 	Participant    string `yaml:"participant,omitempty" json:"participant,omitempty"`
 	From           string `yaml:"from,omitempty" json:"from,omitempty"`
 	To             string `yaml:"to,omitempty" json:"to,omitempty"`
+	Route          string `yaml:"route,omitempty" json:"route,omitempty"`
 	Body           string `yaml:"body,omitempty" json:"body,omitempty"`
 	Type           string `yaml:"type,omitempty" json:"type,omitempty"`
 	Message        string `yaml:"message,omitempty" json:"message,omitempty"`
+	Reply          bool   `yaml:"reply,omitempty" json:"reply,omitempty"`
 	ThreadID       string `yaml:"thread_id,omitempty" json:"thread_id,omitempty"`
 	Claim          string `yaml:"claim,omitempty" json:"claim,omitempty"`
 	SaveAs         string `yaml:"save_as,omitempty" json:"save_as,omitempty"`
@@ -122,6 +124,12 @@ func (s Scenario) Validate() error {
 	for index, step := range s.Steps {
 		if !validActions[step.Action] {
 			return fmt.Errorf("scenario %q step %d has unsupported action %q", s.Name, index+1, step.Action)
+		}
+		if step.Reply && (step.Action != "send" || strings.TrimSpace(step.Message) == "") {
+			return fmt.Errorf("scenario %q step %d reply requires a send with message provenance", s.Name, index+1)
+		}
+		if step.Route != "" && step.Route != "actor" && step.Route != "alias" {
+			return fmt.Errorf("scenario %q step %d has unsupported route %q", s.Name, index+1, step.Route)
 		}
 	}
 	validAssertions := map[string]bool{

@@ -22,12 +22,15 @@ import (
 )
 
 type Config struct {
-	DatabasePath        string
-	SocketPath          string
-	CodexBinary         string
-	CodexBinaryResolver func() string
-	NotificationTimeout time.Duration
-	Clock               func() time.Time
+	DatabasePath            string
+	SocketPath              string
+	CodexBinary             string
+	CodexBinaryResolver     func() string
+	NotificationTimeout     time.Duration
+	Clock                   func() time.Time
+	HarnessInstanceResolver api.HarnessInstanceResolver
+	StaleUnreadAfter        time.Duration
+	ArchiveAfter            time.Duration
 }
 
 func Run(ctx context.Context, config Config, ready io.Writer) error {
@@ -105,9 +108,13 @@ func Run(ctx context.Context, config Config, ready io.Writer) error {
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
-		runNotificationWorker(workerCtx, db, notifier)
+		runNotificationWorker(workerCtx, db, notifier, config.StaleUnreadAfter, config.ArchiveAfter)
 	}()
-	serveErr := api.NewServer(db, api.WithAttentionBroker(attentionBroker)).Serve(ctx, listener)
+	serverOptions := []api.ServerOption{api.WithAttentionBroker(attentionBroker)}
+	if config.HarnessInstanceResolver != nil {
+		serverOptions = append(serverOptions, api.WithHarnessInstanceResolver(config.HarnessInstanceResolver))
+	}
+	serveErr := api.NewServer(db, serverOptions...).Serve(ctx, listener)
 	cancelWorker()
 	<-workerDone
 	closeErr := db.Close()
@@ -125,9 +132,36 @@ type notificationQueue interface {
 	FinishNotification(context.Context, bus.NotificationJob, bus.NotificationDisposition, string) error
 }
 
-func runNotificationWorker(ctx context.Context, queue notificationQueue, notifier *connector.Runtime) {
+type conditionReconciler interface {
+	ReconcileStaleUnreadConditions(context.Context, time.Duration) error
+}
+
+type conditionObserver interface {
+	ObserveCondition(context.Context, bus.ConditionObservation) (bus.OperatorCondition, error)
+	ResolveCondition(context.Context, string, string) error
+}
+
+type lifecycleArchiver interface {
+	ArchiveEligibleActors(context.Context, time.Duration) ([]string, error)
+}
+
+func runNotificationWorker(ctx context.Context, queue notificationQueue, notifier *connector.Runtime, staleAfter, archiveAfter time.Duration) {
+	if staleAfter <= 0 {
+		staleAfter = 15 * time.Minute
+	}
+	if archiveAfter <= 0 {
+		archiveAfter = 30 * 24 * time.Hour
+	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	reconcileTicker := time.NewTicker(30 * time.Second)
+	defer reconcileTicker.Stop()
+	if reconciler, ok := queue.(conditionReconciler); ok {
+		_ = reconciler.ReconcileStaleUnreadConditions(ctx, staleAfter)
+	}
+	if archiver, ok := queue.(lifecycleArchiver); ok {
+		_, _ = archiver.ArchiveEligibleActors(ctx, archiveAfter)
+	}
 	for {
 		job, err := queue.ClaimNotification(ctx)
 		if err == nil {
@@ -136,6 +170,9 @@ func runNotificationWorker(ctx context.Context, queue notificationQueue, notifie
 			attempts, notifyErr := notifier.Notify(notifyCtx, job.RecipientActor, job.Message)
 			disposition, detail := notificationOutcome(attempts, notifyErr)
 			_ = queue.FinishNotification(ctx, job, disposition, detail)
+			if observer, ok := queue.(conditionObserver); ok {
+				observeNotificationCondition(ctx, observer, job.RecipientActor, attempts)
+			}
 			continue
 		}
 		// No work and transient store errors both retry on the next tick. The
@@ -144,7 +181,44 @@ func runNotificationWorker(ctx context.Context, queue notificationQueue, notifie
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-reconcileTicker.C:
+			if reconciler, ok := queue.(conditionReconciler); ok {
+				_ = reconciler.ReconcileStaleUnreadConditions(ctx, staleAfter)
+			}
+			if archiver, ok := queue.(lifecycleArchiver); ok {
+				_, _ = archiver.ArchiveEligibleActors(ctx, archiveAfter)
+			}
 		}
+	}
+}
+
+func observeNotificationCondition(ctx context.Context, observer conditionObserver, actor string, attempts []bus.NotificationAttempt) {
+	for _, attempt := range attempts {
+		if attempt.Result == "accepted" {
+			_ = observer.ResolveCondition(ctx, "attention_unavailable", actor)
+			return
+		}
+	}
+	for _, attempt := range attempts {
+		if attempt.Result != "unsupported" {
+			continue
+		}
+		reason := "harness_wake_unsupported"
+		detailLower := strings.ToLower(attempt.Detail)
+		switch {
+		case strings.Contains(detailLower, "startup-only"):
+			reason = "startup_only_selected"
+		case strings.Contains(detailLower, "unavailable") || strings.Contains(detailLower, "missing"):
+			reason = "host_attention_adapter_missing"
+		}
+		details, _ := json.Marshal(map[string]interface{}{
+			"actor": actor, "harness": attempt.Harness, "session_id": attempt.SessionID, "detail": attempt.Detail,
+		})
+		_, _ = observer.ObserveCondition(ctx, bus.ConditionObservation{
+			Kind: "attention_unavailable", Subject: actor, ReasonCode: reason,
+			Summary: "Automatic wake is unavailable for " + actor, Details: details,
+		})
+		return
 	}
 }
 

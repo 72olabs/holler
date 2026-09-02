@@ -23,6 +23,7 @@ steps:
   - action: send
     from: claude
     to: codex
+    route: actor
     thread_id: thread-alpha
     body: Analyze alpha and hand it to OpenCode.
     type: QUESTION
@@ -30,6 +31,7 @@ steps:
   - action: send
     from: opencode
     to: claude
+    route: actor
     thread_id: thread-beta
     body: Confirm beta while alpha is in flight.
     type: QUESTION
@@ -45,6 +47,7 @@ steps:
   - action: send
     from: codex
     to: opencode
+    route: actor
     message: alpha_question
     body: Continue the alpha analysis.
     type: HANDOFF
@@ -60,6 +63,7 @@ steps:
   - action: send
     from: claude
     to: codex
+    route: actor
     message: beta_question
     body: Beta is confirmed.
     type: ANSWER
@@ -75,6 +79,7 @@ steps:
   - action: send
     from: opencode
     to: claude
+    route: actor
     message: alpha_handoff
     body: Alpha analysis is complete.
     type: RESULT

@@ -34,6 +34,7 @@ type Store interface {
 	RemoveAlias(context.Context, bus.AliasRemoveRequest) (bus.AliasMutationResult, error)
 	ListAliases(context.Context) ([]bus.ActorAlias, error)
 	ResolveAlias(context.Context, string) (bus.ActorAlias, error)
+	ListConditions(context.Context, bool, int) ([]bus.OperatorCondition, error)
 }
 
 type capabilityStore interface {
@@ -291,6 +292,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if result.NotificationState != "" {
 			view["notification_state"] = result.NotificationState
 		}
+		if len(result.DeliveryReceipts) > 0 {
+			view["delivery_receipts"] = result.DeliveryReceipts
+		}
 		return view, nil
 	case "bus_check_inbox":
 		var args struct {
@@ -409,9 +413,14 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			}
 		}
 		actor, runID = s.boundIdentity()
+		conditions, err := s.store.ListConditions(ctx, false, 100)
+		if err != nil {
+			return nil, err
+		}
 		return map[string]interface{}{
 			"actor": actor, "run": runID, "peer": s.config.Peer,
 			"unread": len(items), "available": available, "counts_truncated": len(items) == 100,
+			"operator_conditions": conditions,
 		}, nil
 	case "holler_profile":
 		var args struct {

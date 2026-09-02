@@ -44,12 +44,18 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		err = runVersion(args[1:], stdout, stderr)
 	case "status":
 		err = runStatus(ctx, args[1:], stdout, stderr)
+	case "conditions":
+		err = runConditions(ctx, args[1:], stdout, stderr)
 	case "who":
 		err = runWho(ctx, args[1:], stdout, stderr)
 	case "profile":
 		err = runProfile(ctx, args[1:], stdout, stderr)
 	case "adopt":
 		err = runAdopt(ctx, args[1:], stdout, stderr)
+	case "actor":
+		err = runActor(ctx, args[1:], stdout, stderr)
+	case "migrate":
+		err = runMigrate(ctx, args[1:], stdout, stderr)
 	case "alias":
 		err = runAlias(ctx, args[1:], stdout, stderr)
 	case "send":
@@ -425,10 +431,73 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err := client.Ping(ctx); err != nil {
 		return err
 	}
+	conditions, err := client.ListConditions(ctx, false, 100)
+	if err != nil {
+		return err
+	}
 	return writeJSON(stdout, map[string]interface{}{
 		"ok": true, "socket": *socketPath, "protocol": api.ProtocolVersion,
 		"client_build": buildinfo.Current(), "daemon_build": client.ServerBuild(),
+		"operator_conditions": conditions,
 	})
+}
+
+func runConditions(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return &bus.ValidationError{Field: "conditions", Problem: "requires list, acknowledge, snooze, or claim"}
+	}
+	flags := commandFlags("conditions "+args[0], stderr)
+	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
+	kind := flags.String("kind", "", "condition kind")
+	subject := flags.String("subject", "", "condition subject")
+	generation := flags.Int("generation", 0, "condition generation")
+	includeResolved := flags.Bool("all", false, "include resolved conditions")
+	limit := flags.Int("limit", 100, "maximum rows")
+	forDuration := flags.Duration("for", 0, "snooze duration")
+	lease := flags.Duration("lease", 30*time.Second, "presentation lease")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	actor, runID := "operator", "operator-conditions"
+	if args[0] == "claim" {
+		actor, runID = environmentOr("HOLLER_ACTOR", "operator"), environmentOr("HOLLER_RUN", "operator-conditions")
+	}
+	client, err := dialAPI(ctx, *socketPath, actor, runID, "holler-cli/conditions")
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	switch args[0] {
+	case "list":
+		conditions, err := client.ListConditions(ctx, *includeResolved, *limit)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, conditions)
+	case "acknowledge", "ack":
+		condition, err := client.AcknowledgeCondition(ctx, *kind, *subject, *generation)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, condition)
+	case "snooze":
+		if *forDuration <= 0 {
+			return &bus.ValidationError{Field: "for", Problem: "must be positive"}
+		}
+		condition, err := client.SnoozeCondition(ctx, *kind, *subject, *generation, time.Now().UTC().Add(*forDuration))
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, condition)
+	case "claim":
+		claimed, err := client.ClaimConditionPresentation(ctx, *kind, *subject, *generation, *lease)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, map[string]bool{"claimed": claimed})
+	default:
+		return fmt.Errorf("unknown conditions command %q", args[0])
+	}
 }
 
 func runWho(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -437,6 +506,7 @@ func runWho(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	actor := flags.String("actor", "operator", "diagnostic session actor")
 	runID := flags.String("run", "operator-who", "diagnostic session run")
 	limit := flags.Int("limit", 100, "maximum actors")
+	includeArchived := flags.Bool("all", false, "include archived actors")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -445,11 +515,119 @@ func runWho(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return err
 	}
 	defer client.Close()
-	directory, err := client.Who(ctx, *limit)
+	var directory bus.ActorDirectory
+	if *includeArchived {
+		directory, err = client.WhoIncludingArchived(ctx, *limit)
+	} else {
+		directory, err = client.Who(ctx, *limit)
+	}
 	if err != nil {
 		return err
 	}
 	return writeJSON(stdout, directory)
+}
+
+func runActor(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return &bus.ValidationError{Field: "actor", Problem: "requires archive-preflight, archive, restore, or revoke-lease"}
+	}
+	flags := commandFlags("actor "+args[0], stderr)
+	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
+	actor := flags.String("actor", "", "canonical actor")
+	messageID := flags.String("message", "", "claimed message id")
+	allowUnread := flags.Bool("allow-unread", false, "archive after reviewing and preserving unread messages")
+	limit := flags.Int("limit", 25, "maximum unread previews")
+	crashGrace := flags.Duration("crash-grace", 30*time.Second, "minimum time since claim before operator revocation")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	client, err := dialAPI(ctx, *socketPath, "operator", "operator-actor-lifecycle", "holler-cli/actor")
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	switch args[0] {
+	case "archive-preflight", "preflight":
+		result, err := client.ArchivePreflight(ctx, *actor, *limit)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, result)
+	case "archive":
+		result, err := client.ArchiveActor(ctx, *actor, *allowUnread)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, result)
+	case "restore":
+		result, err := client.RestoreActor(ctx, *actor)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, result)
+	case "revoke-lease":
+		if err := client.RevokeDeliveryLease(ctx, *actor, *messageID, *crashGrace); err != nil {
+			return err
+		}
+		return writeJSON(stdout, map[string]bool{"revoked": true})
+	default:
+		return fmt.Errorf("unknown actor command %q", args[0])
+	}
+}
+
+func runMigrate(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 || args[0] != "bare-harnesses" {
+		return &bus.ValidationError{Field: "migrate", Problem: "supported migration is bare-harnesses"}
+	}
+	flags := commandFlags("migrate bare-harnesses", stderr)
+	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	client, err := dialAPI(ctx, *socketPath, "operator", "operator-migration", "holler-cli/migrate")
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	directory, err := client.WhoIncludingArchived(ctx, 500)
+	if err != nil {
+		return err
+	}
+	present := make(map[string]bus.ActorDirectoryEntry)
+	for _, entry := range directory.Actors {
+		present[entry.Actor] = entry
+	}
+	type migrationCandidate struct {
+		Harness     string                    `json:"harness"`
+		Actor       bus.ActorDirectoryEntry   `json:"actor"`
+		Preflight   bus.ActorArchivePreflight `json:"archive_preflight"`
+		NextActions []string                  `json:"next_actions"`
+	}
+	candidates := make([]migrationCandidate, 0, 3)
+	for _, harness := range []string{"claude", "codex", "opencode"} {
+		entry, exists := present[harness]
+		if !exists {
+			continue
+		}
+		preflight, err := client.ArchivePreflight(ctx, harness, 25)
+		if err != nil {
+			return err
+		}
+		candidates = append(candidates, migrationCandidate{
+			Harness: harness, Actor: entry, Preflight: preflight,
+			NextActions: []string{
+				"run holler setup " + harness + " --name-mode allocate",
+				"start the harness and note its new opaque actor plus <project>-" + harness + " alias outcome",
+				"preflight every alias repoint and choose whether the whole old inbox should be adopted",
+				"remove remaining aliases, then archive the bare actor after reviewing unread messages",
+			},
+		})
+	}
+	return writeJSON(stdout, map[string]interface{}{
+		"migration": "bare-harnesses", "automatic_changes": false,
+		"candidates": candidates,
+		"note":       "canonical identities and unread mail are preserved; Holler never auto-repoints, auto-adopts, or reuses these names",
+	})
 }
 
 func runProfile(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -510,7 +688,7 @@ func runAdopt(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 
 func runAlias(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: holler alias claim ALIAS ACTOR --policy-id ID --harness HARNESS | set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS")
+		fmt.Fprintln(stderr, "usage: holler alias claim ALIAS ACTOR --policy-id ID --harness HARNESS | preflight ALIAS [ACTOR] | set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS")
 		return flag.ErrHelp
 	}
 	action := args[0]
@@ -531,6 +709,15 @@ func runAlias(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	}
 	defer client.Close()
 	switch action {
+	case "preflight":
+		if flags.NArg() < 1 || flags.NArg() > 2 {
+			return &bus.ValidationError{Field: "alias preflight", Problem: "requires ALIAS and optional proposed ACTOR"}
+		}
+		preflight, err := client.AliasPreflight(ctx, flags.Arg(0), flags.Arg(1))
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, preflight)
 	case "claim":
 		if flags.NArg() != 2 {
 			return &bus.ValidationError{Field: "alias claim", Problem: "requires ALIAS and ACTOR"}
@@ -925,6 +1112,27 @@ func runHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			*actor, predecessor,
 		)
 	}
+	conditions, conditionsErr := client.ListConditions(hookCtx, false, 20)
+	if conditionsErr == nil {
+		presented := 0
+		for _, condition := range conditions {
+			if condition.State != bus.ConditionActiveVisible {
+				continue
+			}
+			claimed, claimErr := client.ClaimConditionPresentation(hookCtx, condition.Kind, condition.Subject, condition.Generation, 30*time.Second)
+			if claimErr != nil || !claimed {
+				continue
+			}
+			output.HookSpecificOutput.AdditionalContext += fmt.Sprintf(
+				" Holler operator condition [%s/%s generation %d, reason %s]: %s. Inform the operator; acknowledgement changes presentation only and does not resolve the predicate.",
+				condition.Kind, condition.Subject, condition.Generation, condition.ReasonCode, condition.Summary,
+			)
+			presented++
+			if presented == 3 {
+				break
+			}
+		}
+	}
 	return writeJSON(stdout, output)
 }
 
@@ -1308,7 +1516,7 @@ func dialAPIBinding(ctx context.Context, socketPath string, binding connector.Ru
 	return api.Dial(ctx, socketPath, api.Identity{
 		Actor: binding.Actor, RunID: binding.RunID, Client: clientName, Build: buildinfo.Current(),
 		NameMode: binding.NameMode, ContinuityHandles: binding.ContinuityHandles(harness, sessionID),
-		ProjectID: binding.Project, Takeover: binding.Takeover,
+		ProjectID: binding.Project, Harness: harness, Takeover: binding.Takeover,
 	})
 }
 
@@ -1365,10 +1573,14 @@ Usage:
   holler lab list
   holler lab run [--all|--scenario NAME|--file PATH] [--output DIR]
   holler status [--socket PATH]
-  holler who [--socket PATH] [--limit 100]
+  holler conditions list [--all] | ack|snooze|claim --kind KIND --subject SUBJECT --generation N
+  holler who [--socket PATH] [--limit 100] [--all]
+  holler actor archive-preflight|archive|restore --actor ACTOR
+  holler actor revoke-lease --actor ACTOR --message ID [--crash-grace 30s]
+  holler migrate bare-harnesses
   holler profile --actor ACTOR --run RUN --role TEXT [--accepts KIND,KIND]
   holler adopt --actor LIVE_ACTOR --run RUN --from INACTIVE_ACTOR --idempotency-key KEY
-  holler alias claim ALIAS ACTOR --policy-id ID --harness HARNESS | set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS
+  holler alias claim ALIAS ACTOR --policy-id ID --harness HARNESS | preflight ALIAS [ACTOR] | set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS
   holler send   --socket PATH --actor ACTOR --run RUN --to ACTOR[,ACTOR] --idempotency-key KEY [options]
   holler inbox  --socket PATH --actor ACTOR
   holler claim  --socket PATH --actor ACTOR [--message ID] [--lease 5m]

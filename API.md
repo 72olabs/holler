@@ -93,8 +93,9 @@ Build metadata is an additive protocol-v1 hello field. A new client first sends 
 
 Holler clients may explicitly negotiate actor allocation by adding capability
 `actor-allocation-v1`, `name_mode`, and continuity metadata to `hello`. Current
-clients also advertise `actor-alias-v1`, `typed-routes-v1`, and
-`alias-claim-if-absent-v1`. The daemon ready response advertises
+clients also advertise `actor-alias-v1`, `typed-routes-v1`,
+`alias-claim-if-absent-v1`, `harness-instance-v1`, `operator-conditions-v1`,
+and `actor-lifecycle-v1`. The daemon ready response advertises
 `capability-bridge-v1` when it supports the stable discovery and invocation
 operations described below:
 
@@ -104,7 +105,8 @@ operations described below:
   "client": "codex-connector/0.2",
   "actor": "codex-reviewer",
   "run_id": "run-07",
-  "capabilities": ["actor-allocation-v1", "actor-alias-v1", "typed-routes-v1", "alias-claim-if-absent-v1"],
+  "capabilities": ["actor-allocation-v1", "actor-alias-v1", "typed-routes-v1", "alias-claim-if-absent-v1", "harness-instance-v1", "operator-conditions-v1", "actor-lifecycle-v1"],
+  "harness": "codex",
   "name_mode": "allocate",
   "continuity_handles": ["session:codex:thread-07", "launch:codex:tab-07"],
   "project_id": "coupon"
@@ -116,13 +118,30 @@ visibly opaque actor (`codex-reviewer-a7f3c2`, never a sequential suffix).
 `exact` refuses
 another live run unless the launcher sets `takeover: true`. Takeover is an
 operator/launcher capability, never an MCP tool. The ready response returns the
-assigned actor; all later requests are stamped with it. Omitting every naming
+daemon-assigned actor and run; all later requests are stamped with them. Omitting every naming
 field preserves the original protocol-v1 behavior exactly. A feature client
 must not downgrade to legacy exact naming when the daemon lacks the negotiated
 capability. Once a run has been superseded, the daemon permanently refuses that
 run from reclaiming the superseded actor through continuity, returning the
 non-retryable `binding_stale` error. Ended or lapsed runs may still be resumed
 by a successor run.
+
+For supported harnesses, `hollerd` derives a non-secret harness-instance
+fingerprint from the Unix peer process and its harness ancestor. Clients cannot
+supply the reserved `instance:` continuity namespace. MCP, hooks, and monitors
+under the same harness process therefore reconcile even when their self-reported
+run strings differ. The daemon binds one canonical `run_id` to that harness
+instance and returns it in READY; the caller-supplied run string is not identity
+proof. The ready response reports `instance_state` as `bound` or
+`unreconciled`. An unreconciled connector retains durable send and inbox access,
+but registration is reduced to `startup-only` and live attention fails
+explicitly.
+
+If a resumed continuity handle points to an actor with a live registration from
+a different harness instance, allocate mode never steals it. The ready response
+returns a separate assigned actor plus `pending_predecessor`, and Holler records
+a durable condition. Only an explicit launcher/operator takeover may supersede
+the predecessor.
 
 Every live or removed alias reserves its name in the same namespace as canonical
 actors, and every live or retired actor reserves its name against aliases. A
@@ -162,13 +181,22 @@ This implemented slice does not yet perform the Ed25519 challenge-response speci
 - `nack {message_id, lease_token, reason, final}`
 - `list_events {partition, stream, after, limit}`
 - `set_actor_profile {project_id, role_text, accepts}`
-- `who {limit}`
+- `who {limit, include_archived}`
+- `archive_preflight {actor, limit}`
+- `archive_actor {actor, allow_unread}`
+- `restore_actor {actor}`
+- `revoke_delivery_lease {actor, message_id, crash_grace_ns}`
 - `adopt_actor {source_actor, project_id, idempotency_key}`
 - `claim_alias_if_absent {alias, actor, policy_id, harness, project_id, idempotency_key}`
 - `set_alias {alias, actor, project_id, idempotency_key}`
 - `remove_alias {alias, project_id, idempotency_key}`
 - `list_aliases {}`
 - `resolve_alias {alias}`
+- `alias_preflight {alias, proposed_actor}`
+- `list_conditions {include_resolved, limit}`
+- `acknowledge_condition {kind, subject, generation}`
+- `snooze_condition {kind, subject, generation, until}`
+- `claim_condition_presentation {kind, subject, generation, lease_ns}`
 - `list_capabilities {}`
 - `invoke_read_capability {name, arguments}`
 - `invoke_write_capability {name, arguments}`
@@ -239,6 +267,14 @@ compatibility window, legacy `to_actors` resolves active alias, then alias
 tombstone error, then raw actor. Holler retains the requested route for
 idempotency, so retrying after a repoint returns the original message.
 
+Every API send response includes one `delivery_receipts` entry per canonical
+recipient. It reports the committed message state, requested route, canonical
+recipient, durable availability, control presence, attention capability,
+current attachment, reason, and sender action. Attention failure never rolls
+back a committed message. `sender_action: inform_operator` means the sender
+must explain the wake limitation and ask the operator to wake the reader or
+repair the integration; it must not resend.
+
 `list_capabilities` returns a daemon-owned catalog whose entries contain
 `name`, enforced `mode` (`read` or `write`), `description`, `input_schema`, and
 the optional release that introduced the operation. The two invocation
@@ -259,7 +295,10 @@ automatically retried after transport failure; each write capability must
 define its own idempotency contract.
 
 The daemon-owned `message.send.v2` write capability exposes typed alias, actor,
-and reply routes to an already-running 0.6.1 MCP process. Fresh 0.7.0 connector
+and reply routes to an already-running 0.6.1 MCP process, including the same
+delivery receipts as native `send`. Read capabilities `alias.preflight`,
+`operator.conditions`, and `actor.archive_preflight` expose current daemon
+state through that same unchanged bridge. Fresh 0.7.0 connector
 sessions also receive `to_alias` and `to_actor` directly on `bus_send`; the
 bridge is the restart-free upgrade path.
 
@@ -274,20 +313,39 @@ restart. It automatically retries only requests whose semantics make that
 safe; neither a claim nor a generic capability write is silently repeated.
 Requests have bounded dial and operation deadlines.
 
+Operator conditions are coalesced by `(kind, subject)`. Recurrence after
+resolution increments the generation; recurrence while active preserves
+acknowledgement, and an expired finite snooze becomes visible again. A short
+presentation lease prevents multiple agents from surfacing the same visible
+generation at once. Acknowledgement and snooze are presentation state only;
+the daemon resolves a condition when its predicate clears.
+
+Archival is reversible state, not name deletion or reuse. Preflight returns
+aliases, control presence, active claims, continuity bindings, and bounded
+untrusted unread previews. Aliases, live presence, and active claims block the
+operation. Preserving unread mail requires `allow_unread`; its stale-inbox
+condition stays acknowledged but unresolved. Archival clears continuity, hides
+the actor from default discovery, and permanently reserves its name. Lease
+revocation is an operator recovery action allowed only after presence is gone
+and a crash grace has elapsed; the old token is terminally fenced.
+
 ## Client surfaces
 
 - `holler` is the shell/automation client.
 - `holler who` lists known actors; `holler profile` publishes the caller's
   advisory role metadata.
 - `holler adopt` performs an explicitly authorized inactive-inbox handoff.
-- `holler alias claim|set|list|resolve|remove` manages durable actor aliases through
+- `holler alias claim|preflight|set|list|resolve|remove` manages durable actor aliases through
   the daemon API.
+- `holler conditions list|ack|snooze|claim` inspects and controls condition presentation.
+- `holler actor archive-preflight|archive|restore|revoke-lease` performs guarded lifecycle recovery.
+- `holler migrate bare-harnesses` emits a read-only migration plan; it never repoints, adopts, or archives automatically.
 - `holler mcp` translates MCP stdio calls into this API.
 - `holler hook` and `holler session-end` use this API for lifecycle integration.
 - `holler connector manifest|doctor|certify` expose package identity, deterministic diagnostics, and real-client readiness evidence.
 - Connector setup accepts optional `--name-mode exact|allocate`. Launch accepts
-  `--launch-tag` for durable allocation continuity and `--takeover` only with
-  exact naming.
+  `--launch-tag` for durable allocation continuity and `--takeover` for an
+  explicit exact-name handoff or a confirmed allocate-mode predecessor.
 - `internal/api.Client` is the current typed Go client and the reference for future Python and TypeScript SDKs.
 
 An agent without MCP can use the CLI immediately. A custom harness can implement the small framed protocol directly, but should normally use an SDK or connector so credentials, reconnects, leases, and acknowledgements remain consistent.

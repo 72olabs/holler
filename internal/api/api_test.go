@@ -920,6 +920,405 @@ func TestUnixAPIReleasesUnusedProvisionalActorOnDisconnect(t *testing.T) {
 	}
 }
 
+func TestUnixAPIHarnessInstanceBindsDivergentRunsToOneActor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	db, socket := startServer(t, ctx, cancel, api.WithHarnessInstanceResolver(func(net.Conn, string) (string, error) {
+		return "hin_shared", nil
+	}))
+	first, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "worker", RunID: "client-run-a", Client: "mcp", Harness: "codex",
+		NameMode: bus.NameModeAllocate, ContinuityHandles: []string{"process:codex:client-run-a"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := first.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: first.Identity().Actor, RunID: "client-run-a", Harness: "codex", AttentionMode: "native-queue",
+		SessionID: "session-a", ProjectID: "test", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "worker", RunID: "different-client-run", Client: "hook", Harness: "codex",
+		NameMode: bus.NameModeAllocate, ContinuityHandles: []string{"process:codex:different-client-run"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if first.Identity().Actor != second.Identity().Actor {
+		t.Fatalf("same harness instance split actor: first=%+v second=%+v", first.Identity(), second.Identity())
+	}
+	if first.Identity().RunID != second.Identity().RunID || second.Identity().RunID != "client-run-a" {
+		t.Fatalf("same harness instance split run: first=%+v second=%+v", first.Identity(), second.Identity())
+	}
+	for _, identity := range []api.Identity{first.Identity(), second.Identity()} {
+		if identity.HarnessInstance != "hin_shared" || identity.InstanceState != "bound" {
+			t.Fatalf("harness binding = %+v", identity)
+		}
+	}
+	live, err := db.LiveRegistrations(ctx, first.Identity().Actor)
+	if err != nil || len(live) != 1 || live[0].RunID != "client-run-a" || live[0].SessionID != "session-a" {
+		t.Fatalf("second harness child superseded first presence: live=%+v err=%v", live, err)
+	}
+}
+
+func TestUnixAPIRejectsClientSuppliedHarnessInstance(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel, api.WithHarnessInstanceResolver(func(net.Conn, string) (string, error) {
+		return "hin_server", nil
+	}))
+	client, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "worker", RunID: "run-1", Client: "spoof", Harness: "codex", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:codex:run-1", "instance:hin_forged"}, ProjectID: "test",
+	})
+	if client != nil {
+		_ = client.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "daemon-owned") {
+		t.Fatalf("client-supplied instance error = %v", err)
+	}
+}
+
+func TestUnixAPIHarnessInstanceRejectsConflictingExactActors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel, api.WithHarnessInstanceResolver(func(net.Conn, string) (string, error) {
+		return "hin_exact_shared", nil
+	}))
+	first, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer-a", RunID: "run-a", Client: "mcp", Harness: "claude", NameMode: bus.NameModeExact, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	conflicting, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer-b", RunID: "run-b", Client: "hook", Harness: "claude", NameMode: bus.NameModeExact, ProjectID: "test",
+	})
+	if conflicting != nil {
+		_ = conflicting.Close()
+	}
+	if !errors.Is(err, bus.ErrContinuityConflict) {
+		t.Fatalf("conflicting exact actor error = %v", err)
+	}
+	conditions, err := first.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 1 || conditions[0].Kind != "identity_conflict" || conditions[0].Subject != "hin_exact_shared" {
+		t.Fatalf("identity conflict condition = %+v, err=%v", conditions, err)
+	}
+}
+
+func TestUnixAPIUnreconciledHarnessKeepsInboxButDisablesAttention(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel,
+		api.WithAttentionBroker(attention.NewBroker()),
+		api.WithHarnessInstanceResolver(func(net.Conn, string) (string, error) {
+			return "", errors.New("no harness ancestor")
+		}),
+	)
+	client, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "run-1", Client: "hook", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:run-1", "session:claude:session-1"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if identity := client.Identity(); identity.InstanceState != "unreconciled" || identity.HarnessInstance != "" {
+		t.Fatalf("unreconciled identity = %+v", identity)
+	}
+	registration, err := client.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: client.Identity().Actor, RunID: "run-1", Harness: "claude", AttentionMode: "hook-long-poll",
+		SessionID: "session-1", DeliveryHandle: "session-1", ProjectID: "test", Lease: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.AttentionMode != "startup-only" {
+		t.Fatalf("unsafe registration was not downgraded: %+v", registration)
+	}
+	if _, err := client.MonitorAttach(ctx, client.Identity().Actor, "run-1", "session-1", "hook-long-poll", time.Hour); !errors.Is(err, bus.ErrAttentionUnavailable) {
+		t.Fatalf("unreconciled monitor error = %v", err)
+	}
+	sender := dial(t, socket, "sender", "sender-run")
+	sent, err := sender.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "unreconciled-receipt", ProjectID: "test", ChannelID: "direct",
+		Destinations: []bus.Route{{Kind: bus.RouteActor, Value: client.Identity().Actor}}, Type: "MESSAGE",
+		DeliveryRequest: bus.DeliveryWake, Body: json.RawMessage(`{"text":"wake"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent.DeliveryReceipts) != 1 || sent.DeliveryReceipts[0].AttentionCapability != "integration_missing" ||
+		sent.DeliveryReceipts[0].AttentionReason != "harness_instance_unreconciled" || sent.DeliveryReceipts[0].SenderAction != "inform_operator" {
+		t.Fatalf("unreconciled receipt = %+v", sent.DeliveryReceipts)
+	}
+}
+
+func TestUnixAPIHarnessInstanceReconcilesMCPFirstResume(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var instance atomic.Value
+	instance.Store("hin_old")
+	_, socket := startServer(t, ctx, cancel, api.WithHarnessInstanceResolver(func(net.Conn, string) (string, error) {
+		return instance.Load().(string), nil
+	}))
+	old, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "old-run", Client: "hook", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:old-run", "session:claude:resume-id"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	oldActor := old.Identity().Actor
+
+	instance.Store("hin_new")
+	mcp, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "new-run", Client: "mcp", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:new-run"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mcp.Close()
+	if !mcp.Identity().Provisional || mcp.Identity().Actor == oldActor {
+		t.Fatalf("MCP-first identity = %+v", mcp.Identity())
+	}
+	hook, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "new-run", Client: "hook", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:new-run", "session:claude:resume-id"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hook.Close()
+	if hook.Identity().Actor != oldActor {
+		t.Fatalf("resume actor = %+v, want %q", hook.Identity(), oldActor)
+	}
+	if _, err := mcp.Who(ctx, 10); err != nil {
+		t.Fatalf("MCP did not follow reconciliation: %v", err)
+	}
+	if identity := mcp.Identity(); identity.Actor != oldActor || identity.Provisional {
+		t.Fatalf("reconnected MCP identity = %+v", identity)
+	}
+}
+
+func TestUnixAPIHarnessResumeRequiresTakeoverWhilePredecessorIsLive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var instance atomic.Value
+	instance.Store("hin_live_old")
+	_, socket := startServer(t, ctx, cancel, api.WithHarnessInstanceResolver(func(net.Conn, string) (string, error) {
+		return instance.Load().(string), nil
+	}))
+	old, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "old-run", Client: "hook", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:old-run", "session:claude:resume-id"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	oldActor := old.Identity().Actor
+	if _, err := old.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: oldActor, RunID: "old-run", Harness: "claude", AttentionMode: "hook-long-poll",
+		SessionID: "resume-id", ProjectID: "test", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	instance.Store("hin_live_new")
+	newMCP, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "new-run", Client: "mcp", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:new-run"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newMCP.Close()
+	newActor := newMCP.Identity().Actor
+	newHook, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "new-run", Client: "hook", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:new-run", "session:claude:resume-id"}, ProjectID: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newHook.Close()
+	if identity := newHook.Identity(); identity.Actor != newActor || identity.Actor == oldActor || identity.PendingPredecessor != oldActor {
+		t.Fatalf("pending successor = %+v, old=%q new=%q", identity, oldActor, newActor)
+	}
+	conditions, err := newHook.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 1 || conditions[0].Kind != "pending_takeover" || conditions[0].Subject != oldActor {
+		t.Fatalf("takeover conditions = %+v, err = %v", conditions, err)
+	}
+	live, err := old.LiveRegistrations(ctx, oldActor)
+	if err != nil || len(live) != 1 || live[0].RunID != "old-run" {
+		t.Fatalf("predecessor presence changed before authority: %+v, err=%v", live, err)
+	}
+	if _, err := newHook.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: newActor, RunID: "new-run", Harness: "claude", AttentionMode: "hook-long-poll",
+		SessionID: "pending-session", ProjectID: "test", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := newHook.ExpireRegistration(ctx, newActor, "new-run", "pending-session", "restart_for_explicit_takeover"); err != nil {
+		t.Fatal(err)
+	}
+	if err := newHook.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := newMCP.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Explicit authority is applied by restarting the successor connector with
+	// takeover enabled. A live pending successor never silently steals the old
+	// actor, and its old instance binding cannot be reused as identity evidence.
+	instance.Store("hin_live_takeover")
+	takeover, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "takeover-run", Client: "hook", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:takeover-run", "session:claude:resume-id"}, ProjectID: "test", Takeover: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer takeover.Close()
+	if takeover.Identity().Actor != oldActor || takeover.Identity().PendingPredecessor != "" {
+		t.Fatalf("authorized takeover identity = %+v", takeover.Identity())
+	}
+	conditions, err = takeover.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 0 {
+		t.Fatalf("takeover condition not resolved: %+v, err=%v", conditions, err)
+	}
+	instance.Store("hin_live_old")
+	if stale, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "old-run", Client: "old-reconnect", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"process:claude:old-run", "session:claude:resume-id"}, ProjectID: "test",
+	}); !errors.Is(err, bus.ErrBindingStale) {
+		if stale != nil {
+			_ = stale.Close()
+		}
+		t.Fatalf("late predecessor reconnect error = %v", err)
+	}
+}
+
+func TestUnixAPISendReceiptSeparatesDurabilityFromDisabledAttention(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel, api.WithHarnessInstanceResolver(func(net.Conn, string) (string, error) {
+		return "hin_receipt_test", nil
+	}))
+	receiver, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "claude", RunID: "claude-run", Client: "test", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"session:claude:receipt-test"}, ProjectID: "default",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+	if _, err := receiver.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: receiver.Identity().Actor, RunID: "claude-run", Harness: "claude", SessionID: "receipt-session",
+		AttentionMode: "startup-only", ProjectID: "default", Lease: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sender := dial(t, socket, "codex", "codex-run")
+	sent, err := sender.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "receipt-disabled-attention", ProjectID: "default", ChannelID: "direct",
+		Destinations: []bus.Route{{Kind: bus.RouteActor, Value: receiver.Identity().Actor}},
+		Type:         "MESSAGE", DeliveryRequest: bus.DeliveryWake, Body: json.RawMessage(`{"text":"review"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent.DeliveryReceipts) != 1 {
+		t.Fatalf("delivery receipts = %+v", sent.DeliveryReceipts)
+	}
+	receipt := sent.DeliveryReceipts[0]
+	if receipt.MessageState != "committed" || receipt.DurableDelivery != "available" ||
+		receipt.AttentionCapability != "disabled_by_config" || receipt.SenderAction != "inform_operator" {
+		t.Fatalf("delivery receipt = %+v", receipt)
+	}
+	conditions, err := sender.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 1 || conditions[0].Kind != "attention_unavailable" ||
+		conditions[0].Subject != receiver.Identity().Actor {
+		t.Fatalf("conditions = %+v, err = %v", conditions, err)
+	}
+	mcp, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "claude", RunID: "mcp-run-differs", Client: "mcp-test", Harness: "claude", NameMode: bus.NameModeAllocate,
+		ContinuityHandles: []string{"session:claude:receipt-test"}, ProjectID: "default",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mcp.Close()
+	conditions, err = mcp.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 1 || conditions[0].ReasonCode != "startup_only_selected" {
+		t.Fatalf("MCP handshake erased startup-only condition: %+v, err = %v", conditions, err)
+	}
+}
+
+func TestUnixAPIDynamicSendGetsDeliveryReceipts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	dial(t, socket, "claude", "claude-run")
+	sender := dial(t, socket, "codex", "codex-run")
+	raw, err := sender.InvokeWriteCapability(ctx, "message.send.v2", json.RawMessage(`{
+		"to_actor":"claude","body":"review","idempotency_key":"dynamic-receipt"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent bus.SendResult
+	if err := json.Unmarshal(raw, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent.DeliveryReceipts) != 1 || sent.DeliveryReceipts[0].MessageState != "committed" ||
+		sent.DeliveryReceipts[0].CanonicalRecipient != "claude" {
+		t.Fatalf("dynamic delivery receipts = %+v", sent.DeliveryReceipts)
+	}
+}
+
+func TestUnixAPIDeliveryReceiptsPreserveCrossedRouteResolution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, socket := startServer(t, ctx, cancel)
+	operator := dial(t, socket, "operator", "operator-run")
+	defer operator.Close()
+	for _, actor := range []string{"actor-a", "actor-b"} {
+		client := dial(t, socket, actor, actor+"-run")
+		if err := client.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := operator.SetAlias(ctx, bus.AliasSetRequest{
+		Alias: "z-route", Actor: "actor-a", UpdatedByActor: "operator", UpdatedByRun: "operator-run",
+		ProjectID: "test", IdempotencyKey: "crossed-route-alias",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sent, err := operator.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "crossed-route-send", ProjectID: "test", ChannelID: "direct",
+		Destinations: []bus.Route{{Kind: bus.RouteActor, Value: "actor-b"}, {Kind: bus.RouteAlias, Value: "z-route"}},
+		Type:         "MESSAGE", DeliveryRequest: bus.DeliveryWake, Body: json.RawMessage(`{"text":"route receipts"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent.DeliveryReceipts) != 2 {
+		t.Fatalf("delivery receipts = %+v", sent.DeliveryReceipts)
+	}
+	byActor := make(map[string]bus.DeliveryReceipt)
+	for _, receipt := range sent.DeliveryReceipts {
+		byActor[receipt.CanonicalRecipient] = receipt
+	}
+	if got := byActor["actor-a"].RequestedRoute; got != (bus.Route{Kind: bus.RouteAlias, Value: "z-route"}) {
+		t.Fatalf("actor-a requested route = %+v", got)
+	}
+	if got := byActor["actor-b"].RequestedRoute; got != (bus.Route{Kind: bus.RouteActor, Value: "actor-b"}) {
+		t.Fatalf("actor-b requested route = %+v", got)
+	}
+}
+
 func startServer(t *testing.T, ctx context.Context, cancel context.CancelFunc, options ...api.ServerOption) (*store.Store, string) {
 	t.Helper()
 	directory := t.TempDir()

@@ -67,12 +67,22 @@ For OpenCode, setup previews and, only after the operator chooses `--apply`, gen
 New product setup defaults to `--name-mode allocate`; rerunning an existing
 setup preserves its prior choice. Advanced setup can omit `--name-mode` to keep
 the original shared-inbox behavior. `--name-mode exact` refuses another live run for the
-same actor; launcher-only `--takeover` records and supersedes the old presence.
+same actor; restarting the successor through the launcher with explicit
+`--takeover` records the decision and supersedes the old presence.
 `--name-mode allocate` treats the configured actor as a base and always mints
 an opaque canonical identity such as `claude-a7f3c2`. A harness session ID automatically reclaims the
 same allocation on resume, while `--launch-tag <stable-tag>` provides the same
 continuity to an external supervisor. Separately launched workers in one
 working directory remain isolated because continuity never depends on cwd.
+
+The daemon also proves a harness-instance fingerprint from the local Unix peer
+process and harness ancestor; connectors cannot assert it. MCP, hooks, and
+monitors under one harness instance reconcile even if their run strings differ.
+If the proof is unavailable, the actor and inbox remain usable but attention is
+downgraded to startup-only and a durable operator condition explains why. If a
+resume collides with a still-live predecessor from another instance, the new
+session receives a separate usable actor and reports the exact predecessor for
+an explicit takeover decision. It never steals the predecessor silently.
 
 Allocation, continuity binding, and the mint event commit in one daemon
 transaction. Live and removed aliases share a reserved namespace with live and
@@ -133,7 +143,7 @@ open after its response is complete.
 
 For custom identity, attention, scope, or policy destinations, `scripts/setup-claude.sh` and `holler connector setup --harness claude` retain the advanced preview/`--apply` workflow.
 
-An actor is a durable inbox identity, not a session name. Legacy concurrent sessions using the same actor are intentional competing consumers: the first successful `bus_inbox` claim owns the lease. Prefer allocate mode when parallel sessions must each be independently talkable. Directory-discovered opaque handles are candidates, not routing authority; an agent must ask the operator before using one unless the operator supplied the exact handle.
+An actor is a durable inbox identity, not a session name. Legacy concurrent sessions using the same actor are intentional competing consumers: the first successful `bus_inbox` claim owns the lease. Prefer allocate mode when parallel sessions must each be independently talkable. Directory-discovered opaque handles are candidates, not routing authority; liveness, profile, role, harness, and working-directory metadata never select a recipient. An agent must ask the operator before using a handle unless the operator supplied the exact value.
 
 ## OpenCode setup and launch
 
@@ -190,6 +200,13 @@ Plugin paths resolve through `PLUGIN_ROOT` or `CLAUDE_PLUGIN_ROOT`, never throug
 `SessionEnd` expires that exact `(actor, run, session)` registration and records `session.stale`. It is advisory; crash recovery still relies on the registration lease. A failed start hook emits small `DEGRADED` context and exits successfully so Holler cannot prevent the underlying agent session from starting.
 
 Notification dispatch belongs to `hollerd` through a durable outbox created in the message transaction. CLI, MCP, and future SDK/API senders have identical wake semantics; daemon restart cannot lose a committed wake request. Adapter acceptance is not processing proof: the outbox remains visibly `accepted` until the recipient claims the message, but the daemon does not reinject an already-accepted reference. A claim atomically closes the actor-scoped wake job. Retryable adapter failures use bounded backoff and separate operational evidence; they never turn a committed message into a retryable send error. Duplicate idempotent sends do not create a second wake job.
+
+Send responses separately report durable commit, control presence, attention
+capability, and attachment for every recipient. Disabled or missing wake opens a
+coalesced durable operator condition and asks the sender to inform the operator,
+not retry the message. Startup hooks lease visible condition presentation so one
+agent surfaces a generation; acknowledgement and finite snooze affect only
+presentation, while predicate recovery resolves it.
 
 The MCP process renews only the newest registration for its actor/run. A passively expired newest session can recover after daemon downtime, while explicit `SessionEnd` is terminal and prevents an older sibling from being resurrected. Agents can call `bus_extend` before a long task exhausts a message lease, and acknowledgement is idempotent for the same terminal lease token. The API client reconnects after daemon restart without replaying unsafe claims.
 

@@ -272,8 +272,8 @@ func validateLaunchNaming(nameMode, launchTag string, takeover bool) error {
 	if len(launchTag) > 256 || strings.ContainsAny(launchTag, "\x00\r\n") {
 		return fmt.Errorf("launch tag must be at most 256 bytes and contain no NUL or newlines")
 	}
-	if takeover && nameMode != "exact" {
-		return fmt.Errorf("takeover requires exact name mode")
+	if takeover && nameMode == "" {
+		return fmt.Errorf("takeover requires exact or allocate name mode")
 	}
 	if launchTag != "" && nameMode != "allocate" {
 		return fmt.Errorf("launch tag requires allocate name mode")
