@@ -27,7 +27,13 @@ const (
 	MaxAttentionWait          = 25 * time.Second
 	ActorAllocationCapability = "actor-allocation-v1"
 	ActorAliasCapability      = "actor-alias-v1"
+	TypedRoutesCapability     = "typed-routes-v1"
+	AliasClaimCapability      = "alias-claim-if-absent-v1"
 )
+
+func protocolCapabilities() []string {
+	return []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, CapabilityBridgeCapability}
+}
 
 type Identity struct {
 	Actor              string
@@ -97,6 +103,7 @@ type Store interface {
 	CurrentActorForContinuity(context.Context, []string) (string, error)
 	ReleaseProvisionalActor(context.Context, string) error
 	ReserveActorName(context.Context, string) error
+	ClaimAliasIfAbsent(context.Context, bus.AliasClaimRequest) (bus.AliasClaimResult, error)
 	SetAlias(context.Context, bus.AliasSetRequest) (bus.AliasMutationResult, error)
 	RemoveAlias(context.Context, bus.AliasRemoveRequest) (bus.AliasMutationResult, error)
 	ListAliases(context.Context) ([]bus.ActorAlias, error)
@@ -278,7 +285,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	ready, _ := json.Marshal(map[string]interface{}{
 		"protocol": ProtocolVersion, "daemon": "hollerd/0.1", "actor": assignedActor,
 		"requested_actor": hello.Actor, "run_id": hello.RunID, "server_time": time.Now().UTC(), "build": s.build,
-		"capabilities": []string{ActorAllocationCapability, ActorAliasCapability, CapabilityBridgeCapability}, "minted": binding.Minted,
+		"capabilities": protocolCapabilities(), "minted": binding.Minted,
 		"continuity_reclaimed": binding.ContinuityReclaimed, "provisional": binding.Provisional,
 		"adopted_predecessor": binding.AdoptedPredecessor,
 	})
@@ -366,7 +373,7 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 	case "ping":
 		return DaemonInfo{
 			Protocol: ProtocolVersion, Actor: identity.Actor, PID: os.Getpid(), Build: s.build,
-			Capabilities: []string{ActorAllocationCapability, ActorAliasCapability, CapabilityBridgeCapability},
+			Capabilities: protocolCapabilities(),
 		}, nil
 	case "list_capabilities":
 		var args struct{}
@@ -557,6 +564,23 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 			Alias: args.Alias, Actor: args.Actor, UpdatedByActor: identity.Actor,
 			UpdatedByRun: identity.RunID, ProjectID: args.ProjectID, IdempotencyKey: args.IdempotencyKey,
 		})
+	case "claim_alias_if_absent":
+		var args struct {
+			Alias          string `json:"alias"`
+			Actor          string `json:"actor"`
+			PolicyID       string `json:"policy_id"`
+			Harness        string `json:"harness"`
+			ProjectID      string `json:"project_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := decodeStrict(raw, &args); err != nil {
+			return nil, err
+		}
+		return s.store.ClaimAliasIfAbsent(ctx, bus.AliasClaimRequest{
+			Alias: args.Alias, Actor: args.Actor, PolicyID: args.PolicyID, Harness: args.Harness,
+			UpdatedByActor: identity.Actor, UpdatedByRun: identity.RunID,
+			ProjectID: args.ProjectID, IdempotencyKey: args.IdempotencyKey,
+		})
 	case "remove_alias":
 		var args struct {
 			Alias          string `json:"alias"`
@@ -657,15 +681,16 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 }
 
 type Client struct {
-	connection    net.Conn
-	connectionMu  sync.Mutex
-	reader        *bufio.Reader
-	socketPath    string
-	identity      Identity
-	helloIdentity Identity
-	serverBuild   buildinfo.Info
-	mu            sync.Mutex
-	nextID        uint64
+	connection         net.Conn
+	connectionMu       sync.Mutex
+	reader             *bufio.Reader
+	socketPath         string
+	identity           Identity
+	helloIdentity      Identity
+	serverBuild        buildinfo.Info
+	serverCapabilities []string
+	mu                 sync.Mutex
+	nextID             uint64
 }
 
 func Dial(ctx context.Context, socketPath string, identity Identity) (*Client, error) {
@@ -732,7 +757,7 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild, include
 		hello["project_id"] = c.helloIdentity.ProjectID
 	}
 	if featureIdentity {
-		hello["capabilities"] = []string{ActorAllocationCapability, ActorAliasCapability}
+		hello["capabilities"] = []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability}
 		hello["name_mode"] = c.helloIdentity.NameMode
 		hello["continuity_handles"] = c.helloIdentity.ContinuityHandles
 		hello["takeover"] = c.helloIdentity.Takeover
@@ -785,6 +810,7 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild, include
 	c.identity.Provisional = ready.Provisional
 	c.identity.AdoptedPredecessor = ready.AdoptedPredecessor
 	c.serverBuild = ready.Build
+	c.serverCapabilities = append([]string(nil), ready.Capabilities...)
 	return nil
 }
 
@@ -844,6 +870,10 @@ func (c *Client) ServerBuild() buildinfo.Info {
 }
 
 func (c *Client) Send(ctx context.Context, request bus.SendRequest) (bus.SendResult, error) {
+	if (len(request.Destinations) > 0 || (strings.TrimSpace(request.InReplyTo) != "" && len(request.ToActors) == 0)) &&
+		!c.supports(TypedRoutesCapability) {
+		return bus.SendResult{}, &bus.ValidationError{Field: "destinations", Problem: "connected daemon does not support typed routes; upgrade hollerd"}
+	}
 	request.FromActor = ""
 	request.FromRun = ""
 	var result bus.SendResult
@@ -969,6 +999,24 @@ func (c *Client) SetAlias(ctx context.Context, request bus.AliasSetRequest) (bus
 		"idempotency_key": request.IdempotencyKey,
 	}, &result)
 	return result, err
+}
+
+func (c *Client) ClaimAliasIfAbsent(ctx context.Context, request bus.AliasClaimRequest) (bus.AliasClaimResult, error) {
+	if !c.supports(AliasClaimCapability) {
+		return bus.AliasClaimResult{}, &bus.ValidationError{Field: "policy_id", Problem: "connected daemon does not support atomic alias claims; upgrade hollerd"}
+	}
+	var result bus.AliasClaimResult
+	err := c.call(ctx, "claim_alias_if_absent", map[string]interface{}{
+		"alias": request.Alias, "actor": request.Actor, "policy_id": request.PolicyID, "harness": request.Harness,
+		"project_id": request.ProjectID, "idempotency_key": request.IdempotencyKey,
+	}, &result)
+	return result, err
+}
+
+func (c *Client) supports(capability string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return containsString(c.serverCapabilities, capability)
 }
 
 func (c *Client) RemoveAlias(ctx context.Context, request bus.AliasRemoveRequest) (bus.AliasMutationResult, error) {
@@ -1315,6 +1363,8 @@ func rpcError(err error) *RPCError {
 		code = "alias_conflict"
 	case errors.Is(err, bus.ErrAliasNotFound):
 		code = "alias_not_found"
+	case errors.Is(err, bus.ErrAliasTombstoned):
+		code = "alias_tombstoned"
 	case errors.Is(err, bus.ErrAliasTargetUnknown):
 		code = "alias_target_unknown"
 	}
@@ -1373,6 +1423,8 @@ func errorFromRPC(rpc *RPCError) error {
 		sentinel = bus.ErrAliasConflict
 	case "alias_not_found":
 		sentinel = bus.ErrAliasNotFound
+	case "alias_tombstoned":
+		sentinel = bus.ErrAliasTombstoned
 	case "alias_target_unknown":
 		sentinel = bus.ErrAliasTargetUnknown
 	}

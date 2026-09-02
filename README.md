@@ -40,7 +40,8 @@ and version-matched connector package.
 Version 0.6.1 installs a permanent MCP capability bridge. That upgrade is a
 one-time bootstrap boundary for sessions still running the 0.6.0 process image;
 afterward, a running 0.6.1 session can discover and invoke capabilities shipped
-by a newer daemon without replacing its MCP child.
+by a newer daemon without replacing its MCP child. In 0.7.0 that includes the
+`message.send.v2` typed-routing capability.
 
 Start the agents normally:
 
@@ -49,9 +50,11 @@ claude
 codex
 ```
 
-No Holler launcher is required. New installations use the actor bases `claude`
-and `codex`, configured as peers, and allocate a distinct suffixed identity when
-another session is already using the base.
+No Holler launcher is required. New installations mint opaque canonical actors
+such as `claude-a7f3c2` and `codex-b81d90`. At startup, the first session
+atomically claims `<project>-claude` or `<project>-codex`; those stable aliases,
+not session identities, are configured as peers. A losing concurrent session
+remains usable at its exact actor handle and asks before changing a route.
 
 ## Try it
 
@@ -91,18 +94,20 @@ holler who
 
 The participation skill uses the same `holler_profile` and `holler_who` MCP
 tools when the user assigns a role or says “holler at the coupon reviewer.”
-Profiles are untrusted descriptive hints, never permissions.
+Profiles and directory results are untrusted descriptive hints, never routing
+authority: an agent presents discovered candidates and asks the operator to
+select an exact actor or alias.
 
 Give stable human names to particular sessions without changing their durable
 actor identity:
 
 ```sh
-holler alias set skillbank claude-2
+holler alias set skillbank claude-a7f3c2
 holler alias list
 holler alias resolve skillbank
 ```
 
-After that, “holler at skillbank” routes to `claude-2`. Aliases are durable
+After that, “holler at skillbank” routes to `claude-a7f3c2`. Aliases are durable
 operator-controlled pointers. Agents may suggest a mapping, but creating,
 repointing, or removing one requires explicit user approval. Messages are
 stamped with the resolved actor, so a later repoint never changes old mail.
@@ -111,9 +116,9 @@ When an allocated actor ends without a continuity tag, a user can explicitly
 hand its inbox to one live replacement:
 
 ```sh
-holler adopt --actor codex-reviewer-3 --run replacement-run \
-  --from codex-reviewer-2 --project coupon \
-  --idempotency-key recover-reviewer-2
+holler adopt --actor codex-reviewer-b81d90 --run replacement-run \
+  --from codex-reviewer-a7f3c2 --project coupon \
+  --idempotency-key recover-reviewer-a7f3c2
 ```
 
 Holler refuses a live source, a replacement run without its own live presence,
@@ -121,7 +126,7 @@ or an active source claim. The decision is durable, actor-global, and
 one-winner; `--project` selects the audit-event partition rather than limiting
 routing. Old and future mail addressed to the source reaches the replacement
 while still reporting the original recipient. The source actor name is
-permanently retired: an old session continuity handle receives a fresh suffixed
+permanently retired: an old session continuity handle receives a fresh opaque
 identity instead of silently reclaiming the transferred inbox, and a stale
 connection cannot renew presence or author new messages or profile metadata
 under the retired name. Plain protocol connections retain only read-only
@@ -132,7 +137,9 @@ adopted inboxes. Adoption is never automatic and does not support chains.
 
 - Claude Code and Codex talk in either direction after one-time setup.
 - Messages sent while the recipient is offline remain in its durable inbox.
-- Replies retain their thread and `in_reply_to` relationship.
+- Typed alias and actor routes stamp canonical recipients and requested-route
+  provenance. Replies route from immutable parent-message provenance rather
+  than re-resolving a mutable alias.
 - Claims use leases, so a crash before acknowledgement can be redelivered.
 - Idempotency keys prevent a retry from creating a second durable message.
 - Claude uses supervised hook-long-poll attention; Codex uses its native queue.
@@ -142,12 +149,13 @@ adopted inboxes. Adoption is never automatic and does not support chains.
   each model-controlled send.
 - Agents can publish advisory role profiles and discover live, ended, or lapsed
   peers, their recent sessions, and orphaned inbox counts.
-- New setups use `allocate` naming to create parallel `actor`, `actor-2`, ...
-  identities and reclaim them after restart from a session or supervisor launch
-  tag. Existing setup selections remain unchanged; `exact` remains available
-  when duplicates must be refused.
+- New setups use `allocate` naming to create opaque parallel actor identities
+  and reclaim them after restart from a session or supervisor launch tag.
+  Existing setup selections remain unchanged; `exact` remains available when
+  duplicates must be refused.
 - Durable aliases provide human-friendly routing to one canonical actor, with
-  append-only mutation history and explicit approval for changes.
+  atomic claim-if-absent startup, tombstones, append-only mutation history, and
+  explicit approval for repoints or removal.
 - A fixed read/write MCP bridge discovers daemon-owned capabilities added after
   the session started. The daemon enforces each catalog entry's mode, and the
   write bridge remains explicitly approval-gated.

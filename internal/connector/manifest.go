@@ -111,7 +111,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:c3f7fbe457f34b340fff28dd555ae16d078594be7d4a21487a75611d4a32b1e4"
+		base.PackageHash = "sha256:8014881fa388290f73334f3c0fc6fc908ea957e883f47ecffe7ee5677569e4b7"
 	case "claude":
 		base.PluginID = DefaultClaudePluginID
 		base.ClientCommand = "claude"
@@ -127,7 +127,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:c4317f1bc391aa80eab1be6ed55e8cdd55cf1b212a8675cd67f697c55e45bc2a"
+		base.PackageHash = "sha256:01b1c6305d4cc1a1bba52c49d06d05e33929250667792be7e30876df22f050ce"
 	case "opencode":
 		base.PluginID = DefaultOpenCodePluginID
 		base.ClientCommand = "opencode"
@@ -141,7 +141,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"plugins/holler.js", "scripts/holler",
 			"skills/holler/SKILL.md", "skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:66132f9a99703465189704d82ce4df7a5c97eae17f75ba32d140d30f560a68e8"
+		base.PackageHash = "sha256:ea320fe9775e46c8d2e36d607c7c0861578c513c0a8b0d5e835a7c22e5183a81"
 	default:
 		return CapabilityManifest{}, fmt.Errorf("unsupported harness %q: %w", harness, errors.New("expected codex, claude, or opencode"))
 	}

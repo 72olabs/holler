@@ -59,6 +59,74 @@ func TestConcurrentAliasRepointsSerializeWithHistory(t *testing.T) {
 	}
 }
 
+func TestClaimAliasIfAbsentHasOneWinnerAndDurableLoser(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	registerAliasActor(t, db, "claude-a7f3c2", "claude-a-run")
+	registerAliasActor(t, db, "claude-b81d90", "claude-b-run")
+
+	type outcome struct {
+		request bus.AliasClaimRequest
+		result  bus.AliasClaimResult
+		err     error
+	}
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+	for index, actor := range []string{"claude-a7f3c2", "claude-b81d90"} {
+		request := bus.AliasClaimRequest{
+			Alias: "coupon-claude", Actor: actor, PolicyID: "setup:default-workstream-alias",
+			Harness:        "claude",
+			UpdatedByActor: actor, UpdatedByRun: fmt.Sprintf("run-%d", index), ProjectID: "coupon",
+			IdempotencyKey: fmt.Sprintf("claim-%d", index),
+		}
+		go func() {
+			<-start
+			result, err := db.ClaimAliasIfAbsent(ctx, request)
+			outcomes <- outcome{request: request, result: result, err: err}
+		}()
+	}
+	close(start)
+	results := []outcome{<-outcomes, <-outcomes}
+	claimed := 0
+	var winner string
+	for _, result := range results {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.result.Claimed {
+			claimed++
+		}
+		if winner == "" {
+			winner = result.result.Alias.Actor
+		} else if result.result.Alias.Actor != winner {
+			t.Fatalf("claim outcomes disagree: %+v", results)
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("claimed outcomes = %d, want one: %+v", claimed, results)
+	}
+
+	var loser outcome
+	for _, result := range results {
+		if !result.result.Claimed {
+			loser = result
+		}
+	}
+	retry, err := db.ClaimAliasIfAbsent(ctx, loser.request)
+	if err != nil || retry.Claimed || !retry.DuplicateRequest || retry.Alias.Actor != winner {
+		t.Fatalf("durable loser retry = %+v, err = %v", retry, err)
+	}
+	changed := loser.request
+	changed.Actor = winner
+	if _, err := db.ClaimAliasIfAbsent(ctx, changed); !errors.Is(err, bus.ErrIdempotencyConflict) {
+		t.Fatalf("changed loser retry error = %v", err)
+	}
+}
+
 func TestConcurrentAliasRepointAndSendStampOneAtomicTarget(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
@@ -309,8 +377,104 @@ func TestAllocatedActorSkipsReservedAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if allocation.Actor != "claude-2" {
-		t.Fatalf("allocated actor = %q, want claude-2", allocation.Actor)
+	assertOpaqueActor(t, allocation.Actor, "claude")
+}
+
+func TestTypedRoutesAndReplyProvenance(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	registerAliasActor(t, db, "claude-a7f3c2", "claude-run")
+	registerAliasActor(t, db, "claude-b81d90", "claude-2-run")
+	if _, err := db.SetAlias(ctx, aliasSet("architect-claude", "claude-a7f3c2", "alias-v1")); err != nil {
+		t.Fatal(err)
+	}
+
+	question, err := db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "question", ProjectID: "default", ChannelID: "direct", ThreadID: "routing-thread",
+		FromActor: "codex-a1b2c3", FromRun: "codex-run",
+		Destinations: []bus.Route{{Kind: bus.RouteAlias, Value: "architect-claude"}},
+		Type:         "MESSAGE", Body: json.RawMessage(`{"text":"review"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := question.Message.ToActors; len(got) != 1 || got[0] != "claude-a7f3c2" {
+		t.Fatalf("canonical recipients = %v", got)
+	}
+	if got := question.Message.RequestedRoutes; len(got) != 1 || got[0] != (bus.Route{Kind: bus.RouteAlias, Value: "architect-claude"}) {
+		t.Fatalf("requested routes = %+v", got)
+	}
+
+	if _, err := db.SetAlias(ctx, aliasSet("architect-claude", "claude-b81d90", "alias-v2")); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "reply", ProjectID: "default", ChannelID: "direct",
+		FromActor: "claude-a7f3c2", FromRun: "claude-run", InReplyTo: question.Message.ID,
+		Type: "MESSAGE", Body: json.RawMessage(`{"text":"done"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reply.Message.ToActors; len(got) != 1 || got[0] != "codex-a1b2c3" {
+		t.Fatalf("reply recipients = %v", got)
+	}
+	if got := reply.Message.RequestedRoutes; len(got) != 1 || got[0] != (bus.Route{Kind: bus.RouteReply, Value: question.Message.ID}) {
+		t.Fatalf("reply provenance = %+v", got)
+	}
+
+	_, err = db.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "unsafe-legacy-reply", ProjectID: "default", ChannelID: "direct",
+		FromActor: "claude-a7f3c2", FromRun: "claude-run", ToActors: []string{"architect-claude"},
+		InReplyTo: question.Message.ID, Type: "MESSAGE", Body: json.RawMessage(`{"text":"wrong"}`),
+	})
+	if !errors.Is(err, bus.ErrInvalid) {
+		t.Fatalf("legacy reply through repointed alias error = %v", err)
+	}
+}
+
+func TestRemovedAliasTombstoneBlocksLegacyFallbackAndActorReuse(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	registerAliasActor(t, db, "claude-a7f3c2", "claude-run")
+	if _, err := db.SetAlias(ctx, aliasSet("architect-claude", "claude-a7f3c2", "alias-set")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RemoveAlias(ctx, bus.AliasRemoveRequest{
+		Alias: "architect-claude", UpdatedByActor: "operator", UpdatedByRun: "operator-run",
+		ProjectID: "default", IdempotencyKey: "alias-remove",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, request := range map[string]bus.SendRequest{
+		"legacy": {
+			IdempotencyKey: "legacy", ProjectID: "default", ChannelID: "direct", FromActor: "sender", FromRun: "run",
+			ToActors: []string{"architect-claude"}, Type: "MESSAGE", Body: json.RawMessage(`{}`),
+		},
+		"typed": {
+			IdempotencyKey: "typed", ProjectID: "default", ChannelID: "direct", FromActor: "sender", FromRun: "run",
+			Destinations: []bus.Route{{Kind: bus.RouteAlias, Value: "architect-claude"}}, Type: "MESSAGE", Body: json.RawMessage(`{}`),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := db.Send(ctx, request); !errors.Is(err, bus.ErrAliasTombstoned) {
+				t.Fatalf("send error = %v", err)
+			}
+		})
+	}
+	if _, err := db.BindActor(ctx, bus.ActorBindRequest{
+		RequestedActor: "architect-claude", RunID: "collision-run", NameMode: bus.NameModeExact, ProjectID: "default",
+	}); !errors.Is(err, bus.ErrAliasConflict) {
+		t.Fatalf("retired alias actor collision error = %v", err)
 	}
 }
 

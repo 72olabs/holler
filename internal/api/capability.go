@@ -109,6 +109,72 @@ func defaultCapabilities() []registeredCapability {
 	return []registeredCapability{
 		{
 			descriptor: bus.CapabilityDescriptor{
+				Name: "message.send.v2", Mode: bus.CapabilityWrite, Since: "0.7.0",
+				Description: "Send with one typed alias/actor route or immutable reply provenance. Use this from an already-running connector whose fixed bus_send schema predates typed routes.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"to_alias":        stringProperty("human-facing alias resolved at send time"),
+					"to_actor":        stringProperty("operator-supplied or confirmed exact actor handle"),
+					"reply_to":        stringProperty("parent message id; omit recipient fields for replies"),
+					"thread_id":       stringProperty("optional thread for a new message"),
+					"body":            stringProperty("complete message"),
+					"idempotency_key": stringProperty("stable key for safe retries"),
+				}, "body", "idempotency_key"),
+			},
+			handler: func(ctx context.Context, store Store, identity Identity, raw json.RawMessage) (interface{}, error) {
+				var args struct {
+					ToAlias        string `json:"to_alias"`
+					ToActor        string `json:"to_actor"`
+					ReplyTo        string `json:"reply_to"`
+					ThreadID       string `json:"thread_id"`
+					Body           string `json:"body"`
+					IdempotencyKey string `json:"idempotency_key"`
+				}
+				if err := decodeStrict(raw, &args); err != nil {
+					return nil, err
+				}
+				routes := 0
+				if strings.TrimSpace(args.ToAlias) != "" {
+					routes++
+				}
+				if strings.TrimSpace(args.ToActor) != "" {
+					routes++
+				}
+				if strings.TrimSpace(args.ReplyTo) != "" {
+					routes++
+				}
+				if routes != 1 {
+					return nil, &bus.ValidationError{Field: "route", Problem: "use exactly one of to_alias, to_actor, or reply_to"}
+				}
+				if strings.TrimSpace(args.Body) == "" {
+					return nil, &bus.ValidationError{Field: "body", Problem: "is required"}
+				}
+				if strings.TrimSpace(args.IdempotencyKey) == "" {
+					return nil, &bus.ValidationError{Field: "idempotency_key", Problem: "is required"}
+				}
+				body, err := json.Marshal(map[string]string{"text": strings.TrimSpace(args.Body)})
+				if err != nil {
+					return nil, err
+				}
+				projectID := strings.TrimSpace(identity.ProjectID)
+				if projectID == "" {
+					projectID = "default"
+				}
+				request := bus.SendRequest{
+					IdempotencyKey: args.IdempotencyKey, ProjectID: projectID, ChannelID: "direct",
+					ThreadID: args.ThreadID, FromActor: identity.Actor, FromRun: identity.RunID,
+					Type: "MESSAGE", DeliveryRequest: bus.DeliveryWake, InReplyTo: args.ReplyTo, Body: body,
+				}
+				switch {
+				case strings.TrimSpace(args.ToAlias) != "":
+					request.Destinations = []bus.Route{{Kind: bus.RouteAlias, Value: args.ToAlias}}
+				case strings.TrimSpace(args.ToActor) != "":
+					request.Destinations = []bus.Route{{Kind: bus.RouteActor, Value: args.ToActor}}
+				}
+				return store.Send(ctx, request)
+			},
+		},
+		{
+			descriptor: bus.CapabilityDescriptor{
 				Name: "alias.list", Mode: bus.CapabilityRead, Since: "0.6.1",
 				Description: "List operator-approved aliases and their canonical actor targets.",
 				InputSchema: objectSchema(map[string]interface{}{}),

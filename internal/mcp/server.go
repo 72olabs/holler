@@ -224,6 +224,8 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 	case "bus_send":
 		var args struct {
 			To             string `json:"to"`
+			ToAlias        string `json:"to_alias"`
+			ToActor        string `json:"to_actor"`
 			Body           string `json:"body"`
 			ThreadID       string `json:"thread_id"`
 			ReplyTo        string `json:"reply_to"`
@@ -233,12 +235,24 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			return nil, err
 		}
 		args.To = strings.TrimSpace(args.To)
+		args.ToAlias = strings.TrimSpace(args.ToAlias)
+		args.ToActor = strings.TrimSpace(args.ToActor)
 		args.Body = strings.TrimSpace(args.Body)
-		if args.To == "" {
+		suppliedRoutes := 0
+		for _, value := range []string{args.To, args.ToAlias, args.ToActor} {
+			if value != "" {
+				suppliedRoutes++
+			}
+		}
+		if suppliedRoutes > 1 {
+			return nil, &bus.ValidationError{Field: "bus_send", Problem: "use exactly one of to_alias, to_actor, or legacy to"}
+		}
+		if suppliedRoutes == 0 && strings.TrimSpace(args.ReplyTo) == "" {
 			args.To = s.config.Peer
 		}
-		if args.To == "" || args.Body == "" || strings.TrimSpace(args.IdempotencyKey) == "" {
-			return nil, &bus.ValidationError{Field: "bus_send", Problem: "recipient (or configured peer), body, and idempotency_key are required"}
+		if args.To == "" && args.ToAlias == "" && args.ToActor == "" && strings.TrimSpace(args.ReplyTo) == "" ||
+			args.Body == "" || strings.TrimSpace(args.IdempotencyKey) == "" {
+			return nil, &bus.ValidationError{Field: "bus_send", Problem: "route (or reply_to/configured peer), body, and idempotency_key are required"}
 		}
 		if args.ThreadID == "" && args.ReplyTo == "" {
 			args.ThreadID = deterministicThreadID(actor, args.IdempotencyKey)
@@ -247,7 +261,7 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err != nil {
 			return nil, err
 		}
-		result, err := s.store.Send(ctx, bus.SendRequest{
+		request := bus.SendRequest{
 			IdempotencyKey:  args.IdempotencyKey,
 			ProjectID:       s.config.ProjectID,
 			ChannelID:       s.config.ChannelID,
@@ -255,12 +269,20 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			FromActor:       actor,
 			FromRun:         runID,
 			FromRole:        s.config.Role,
-			ToActors:        []string{args.To},
 			Type:            "MESSAGE",
 			DeliveryRequest: bus.DeliveryWake,
 			InReplyTo:       args.ReplyTo,
 			Body:            body,
-		})
+		}
+		switch {
+		case args.ToAlias != "":
+			request.Destinations = []bus.Route{{Kind: bus.RouteAlias, Value: args.ToAlias}}
+		case args.ToActor != "":
+			request.Destinations = []bus.Route{{Kind: bus.RouteActor, Value: args.ToActor}}
+		case args.To != "":
+			request.ToActors = []string{args.To}
+		}
+		result, err := s.store.Send(ctx, request)
 		if err != nil {
 			return nil, err
 		}
@@ -521,13 +543,21 @@ func messageView(message bus.Message, recipientActor, originalRecipientActor, le
 		body = decoded.Text
 	}
 	result := map[string]interface{}{
-		"message_id": message.ID,
-		"thread_id":  message.ThreadID,
-		"from":       message.FromActor,
-		"to":         message.ToActors,
-		"body":       body,
-		"reply_to":   message.InReplyTo,
-		"created_at": message.CreatedAt,
+		"message_id":           message.ID,
+		"thread_id":            message.ThreadID,
+		"from":                 message.FromActor,
+		"to":                   message.ToActors,
+		"canonical_recipients": message.ToActors,
+		"body":                 body,
+		"reply_to":             message.InReplyTo,
+		"created_at":           message.CreatedAt,
+	}
+	if len(message.RequestedRoutes) > 0 {
+		result["requested_routes"] = message.RequestedRoutes
+		if len(message.RequestedRoutes) == 1 {
+			result["route_kind"] = message.RequestedRoutes[0].Kind
+			result["requested_route"] = message.RequestedRoutes[0].Value
+		}
 	}
 	if leaseToken != "" {
 		result["lease_token"] = leaseToken
@@ -603,7 +633,10 @@ func toolDefinitions() []map[string]interface{} {
 		{
 			"name": "bus_send", "description": "Send a durable message. Sender identity is fixed by the connector session.",
 			"inputSchema": object(map[string]interface{}{
-				"to": stringProperty("recipient actor"), "body": stringProperty("complete message"),
+				"to":        stringProperty("legacy untyped recipient; prefer to_alias or to_actor"),
+				"to_alias":  stringProperty("human-facing alias resolved atomically at send time"),
+				"to_actor":  stringProperty("exact canonical actor handle explicitly selected by the operator"),
+				"body":      stringProperty("complete message"),
 				"thread_id": stringProperty("thread for a new message"), "reply_to": stringProperty("message being answered"),
 				"idempotency_key": stringProperty("stable key for safe retries"),
 			}, "body", "idempotency_key"),

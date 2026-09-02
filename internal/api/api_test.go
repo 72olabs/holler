@@ -84,6 +84,14 @@ func TestUnixAPIAliasMutationResolutionAndActorCollision(t *testing.T) {
 	if err != nil || alias.Alias.Actor != "claude" {
 		t.Fatalf("set alias = %+v, err = %v", alias, err)
 	}
+	claimed, err := operator.ClaimAliasIfAbsent(ctx, bus.AliasClaimRequest{
+		Alias: "default-claude", Actor: "claude", PolicyID: "setup:default-workstream-alias",
+		Harness:   "claude",
+		ProjectID: "default", IdempotencyKey: "api-alias-claim",
+	})
+	if err != nil || !claimed.Claimed || claimed.Alias.Actor != "claude" || claimed.Alias.UpdatedByActor != "operator" {
+		t.Fatalf("claim alias = %+v, err = %v", claimed, err)
+	}
 	resolved, err := operator.ResolveAlias(ctx, "skillbank")
 	if err != nil || resolved.Actor != "claude" {
 		t.Fatalf("resolve alias = %+v, err = %v", resolved, err)
@@ -91,10 +99,14 @@ func TestUnixAPIAliasMutationResolutionAndActorCollision(t *testing.T) {
 	sender := dial(t, socket, "codex", "codex-run")
 	sent, err := sender.Send(ctx, bus.SendRequest{
 		IdempotencyKey: "api-alias-send", ProjectID: "default", ChannelID: "direct",
-		ToActors: []string{"skillbank"}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"review"}`),
+		Destinations: []bus.Route{{Kind: bus.RouteAlias, Value: "skillbank"}},
+		Type:         "MESSAGE", Body: json.RawMessage(`{"text":"review"}`),
 	})
 	if err != nil || len(sent.Message.ToActors) != 1 || sent.Message.ToActors[0] != "claude" {
 		t.Fatalf("alias send = %+v, err = %v", sent, err)
+	}
+	if len(sent.Message.RequestedRoutes) != 1 || sent.Message.RequestedRoutes[0] != (bus.Route{Kind: bus.RouteAlias, Value: "skillbank"}) {
+		t.Fatalf("route provenance = %+v", sent.Message.RequestedRoutes)
 	}
 	if _, err := api.Dial(ctx, socket, api.Identity{Actor: "skillbank", RunID: "shadow-run", Client: "test"}); !errors.Is(err, bus.ErrAliasConflict) {
 		t.Fatalf("alias actor collision error = %v", err)
@@ -179,15 +191,16 @@ func TestUnixAPIAdoptionFencesSourceAndReportsFreshContinuityIdentity(t *testing
 		t.Fatal(err)
 	}
 	defer source.Close()
+	sourceActor := source.Identity().Actor
 	if _, err := source.RegisterSession(ctx, bus.RegistrationRequest{
-		Actor: "reviewer", RunID: "source-run", Harness: "claude", AttentionMode: "hook-long-poll",
+		Actor: sourceActor, RunID: "source-run", Harness: "claude", AttentionMode: "hook-long-poll",
 		SessionID: "source-session", ProjectID: "coupon", Lease: 10 * time.Millisecond,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := source.Send(ctx, bus.SendRequest{
 		IdempotencyKey: "api-fence-seed", ProjectID: "coupon", ChannelID: "direct",
-		ToActors: []string{"reviewer"}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"handoff"}`),
+		ToActors: []string{sourceActor}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"handoff"}`),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -201,20 +214,20 @@ func TestUnixAPIAdoptionFencesSourceAndReportsFreshContinuityIdentity(t *testing
 		t.Fatal(err)
 	}
 	if _, err := target.AdoptActor(ctx, bus.AdoptRequest{
-		SourceActor: "reviewer", ProjectID: "coupon", IdempotencyKey: "api-terminal-handoff",
+		SourceActor: sourceActor, ProjectID: "coupon", IdempotencyKey: "api-terminal-handoff",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if items, err := source.CheckInbox(ctx, "reviewer", 10); err != nil || len(items) != 0 {
+	if items, err := source.CheckInbox(ctx, sourceActor, 10); err != nil || len(items) != 0 {
 		t.Fatalf("stale source inbox = %+v, err = %v", items, err)
 	}
-	if _, err := source.Claim(ctx, "reviewer", "", time.Minute); !errors.Is(err, bus.ErrNoMessage) {
+	if _, err := source.Claim(ctx, sourceActor, "", time.Minute); !errors.Is(err, bus.ErrNoMessage) {
 		t.Fatalf("stale source claim error = %v", err)
 	}
-	if _, err := source.HeartbeatRegistrations(ctx, "reviewer", "source-run", time.Hour); !errors.Is(err, bus.ErrActorAdopted) {
+	if _, err := source.HeartbeatRegistrations(ctx, sourceActor, "source-run", time.Hour); !errors.Is(err, bus.ErrActorAdopted) {
 		t.Fatalf("stale source heartbeat error = %v", err)
 	}
-	if _, err := source.MonitorAttach(ctx, "reviewer", "source-run", "source-session", "hook-long-poll", time.Hour); !errors.Is(err, bus.ErrActorAdopted) {
+	if _, err := source.MonitorAttach(ctx, sourceActor, "source-run", "source-session", "hook-long-poll", time.Hour); !errors.Is(err, bus.ErrActorAdopted) {
 		t.Fatalf("stale source monitor attach error = %v", err)
 	}
 	if _, err := source.Send(ctx, bus.SendRequest{
@@ -223,16 +236,16 @@ func TestUnixAPIAdoptionFencesSourceAndReportsFreshContinuityIdentity(t *testing
 	}); !errors.Is(err, bus.ErrActorAdopted) {
 		t.Fatalf("stale source send error = %v", err)
 	}
-	if _, err := source.SetActorProfile(ctx, "reviewer", "source-run", "coupon", bus.ActorProfileRequest{
+	if _, err := source.SetActorProfile(ctx, sourceActor, "source-run", "coupon", bus.ActorProfileRequest{
 		RoleText: "retired actor",
 	}); !errors.Is(err, bus.ErrActorAdopted) {
 		t.Fatalf("stale source profile error = %v", err)
 	}
-	if err := source.RecordHydration(ctx, "coupon", "reviewer", "source-run", "claude", "source-session", 0); !errors.Is(err, bus.ErrActorAdopted) {
+	if err := source.RecordHydration(ctx, "coupon", sourceActor, "source-run", "claude", "source-session", 0); !errors.Is(err, bus.ErrActorAdopted) {
 		t.Fatalf("stale source hydration error = %v", err)
 	}
 	legacy, err := api.Dial(ctx, socket, api.Identity{
-		Actor: "reviewer", RunID: "source-run", Client: "legacy-test",
+		Actor: sourceActor, RunID: "source-run", Client: "legacy-test",
 	})
 	if err != nil {
 		t.Fatalf("legacy diagnostic connection: %v", err)
@@ -241,7 +254,7 @@ func TestUnixAPIAdoptionFencesSourceAndReportsFreshContinuityIdentity(t *testing
 	if _, err := legacy.Who(ctx, 10); err != nil {
 		t.Fatalf("legacy retired-source diagnostic: %v", err)
 	}
-	if err := legacy.ExpireRegistration(ctx, "reviewer", "source-run", "source-session", "post-adoption-session-end"); err != nil {
+	if err := legacy.ExpireRegistration(ctx, sourceActor, "source-run", "source-session", "post-adoption-session-end"); err != nil {
 		t.Fatalf("legacy retired-source cleanup: %v", err)
 	}
 	events, err := db.ListEvents(ctx, "coupon", "operational", 0, 100)
@@ -250,7 +263,7 @@ func TestUnixAPIAdoptionFencesSourceAndReportsFreshContinuityIdentity(t *testing
 	}
 	foundCleanup := false
 	for _, event := range events {
-		if event.Kind == "session.stale" && event.ActorID == "reviewer" {
+		if event.Kind == "session.stale" && event.ActorID == sourceActor {
 			foundCleanup = true
 		}
 	}
@@ -258,7 +271,7 @@ func TestUnixAPIAdoptionFencesSourceAndReportsFreshContinuityIdentity(t *testing
 		t.Fatalf("retired source cleanup event missing: %+v", events)
 	}
 	if exact, err := api.Dial(ctx, socket, api.Identity{
-		Actor: "reviewer", RunID: "exact-reuse", Client: "test", NameMode: bus.NameModeExact,
+		Actor: sourceActor, RunID: "exact-reuse", Client: "test", NameMode: bus.NameModeExact,
 		ProjectID: "coupon",
 	}); !errors.Is(err, bus.ErrActorAdopted) {
 		if exact != nil {
@@ -274,7 +287,7 @@ func TestUnixAPIAdoptionFencesSourceAndReportsFreshContinuityIdentity(t *testing
 		t.Fatal(err)
 	}
 	defer fresh.Close()
-	if identity := fresh.Identity(); identity.Actor != "reviewer-2" || identity.AdoptedPredecessor != "reviewer" || identity.Provisional {
+	if identity := fresh.Identity(); identity.Actor == sourceActor || identity.AdoptedPredecessor != sourceActor || identity.Provisional || !strings.HasPrefix(identity.Actor, "reviewer-") {
 		t.Fatalf("fresh API identity = %+v", identity)
 	}
 }
@@ -709,19 +722,18 @@ func TestUnixAPIAllocatesAndReclaimsActorsBeforeStampingRequests(t *testing.T) {
 
 	first := dialAllocated("run-1", "launch:test:first")
 	second := dialAllocated("run-2", "launch:test:second")
-	if got := first.Identity().Actor; got != "reviewer" {
-		t.Fatalf("first actor = %q", got)
-	}
-	if got := second.Identity().Actor; got != "reviewer-2" {
-		t.Fatalf("second actor = %q", got)
+	firstActor := first.Identity().Actor
+	secondActor := second.Identity().Actor
+	if !strings.HasPrefix(firstActor, "reviewer-") || !strings.HasPrefix(secondActor, "reviewer-") || firstActor == secondActor {
+		t.Fatalf("allocated actors = %q, %q", firstActor, secondActor)
 	}
 	registration, err := second.RegisterSession(ctx, bus.RegistrationRequest{
-		Actor: "reviewer-2", RunID: "run-2", Harness: "test", SessionID: "session-2", ProjectID: "coupon", Lease: time.Hour,
+		Actor: secondActor, RunID: "run-2", Harness: "test", SessionID: "session-2", ProjectID: "coupon", Lease: time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if registration.Actor != "reviewer-2" || registration.RunID != "run-2" {
+	if registration.Actor != secondActor || registration.RunID != "run-2" {
 		t.Fatalf("server-stamped registration = %+v", registration)
 	}
 	sent, err := second.Send(ctx, bus.SendRequest{
@@ -731,12 +743,12 @@ func TestUnixAPIAllocatesAndReclaimsActorsBeforeStampingRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sent.Message.FromActor != "reviewer-2" || sent.Message.FromRun != "run-2" {
+	if sent.Message.FromActor != secondActor || sent.Message.FromRun != "run-2" {
 		t.Fatalf("server-stamped send = %+v", sent.Message)
 	}
 
 	reclaimed := dialAllocated("run-3", "launch:test:second")
-	if got := reclaimed.Identity().Actor; got != "reviewer-2" {
+	if got := reclaimed.Identity().Actor; got != secondActor {
 		t.Fatalf("reclaimed actor = %q", got)
 	}
 }
@@ -784,14 +796,15 @@ func TestUnixAPISupersededRunGetsTerminalStaleBindingError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.Close()
+	firstActor := first.Identity().Actor
 	if _, err := first.RegisterSession(ctx, bus.RegistrationRequest{
-		Actor: "reviewer", RunID: "run-a", Harness: "codex", SessionID: "session-a",
+		Actor: firstActor, RunID: "run-a", Harness: "codex", SessionID: "session-a",
 		ProjectID: "coupon", Lease: time.Hour,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	winner, err := api.Dial(ctx, socket, api.Identity{
-		Actor: "reviewer", RunID: "run-b", Client: "test", NameMode: bus.NameModeExact,
+		Actor: firstActor, RunID: "run-b", Client: "test", NameMode: bus.NameModeExact,
 		ProjectID: "coupon", Takeover: true,
 	})
 	if err != nil {
@@ -799,7 +812,7 @@ func TestUnixAPISupersededRunGetsTerminalStaleBindingError(t *testing.T) {
 	}
 	defer winner.Close()
 	if _, err := winner.RegisterSession(ctx, bus.RegistrationRequest{
-		Actor: "reviewer", RunID: "run-b", Harness: "codex", SessionID: "session-b",
+		Actor: firstActor, RunID: "run-b", Harness: "codex", SessionID: "session-b",
 		ProjectID: "coupon", Lease: time.Hour,
 	}); err != nil {
 		t.Fatal(err)
@@ -815,7 +828,7 @@ func TestUnixAPISupersededRunGetsTerminalStaleBindingError(t *testing.T) {
 	if !errors.Is(err, bus.ErrBindingStale) {
 		t.Fatalf("stale binding API error = %v", err)
 	}
-	live, err := winner.LiveRegistrations(ctx, "reviewer")
+	live, err := winner.LiveRegistrations(ctx, firstActor)
 	if err != nil || len(live) != 1 || live[0].RunID != "run-b" {
 		t.Fatalf("winner registrations after stale hello = %+v, err = %v", live, err)
 	}
@@ -840,7 +853,8 @@ func TestUnixAPIProvisionalConnectionFollowsSessionResumeReconciliation(t *testi
 		t.Fatal(err)
 	}
 	defer provisional.Close()
-	if identity := provisional.Identity(); identity.Actor != "reviewer-2" || !identity.Provisional {
+	provisionalActor := provisional.Identity().Actor
+	if identity := provisional.Identity(); identity.Actor == first.Identity().Actor || !strings.HasPrefix(identity.Actor, "reviewer-") || !identity.Provisional {
 		t.Fatalf("provisional identity = %+v", identity)
 	}
 	hook, err := api.Dial(ctx, socket, api.Identity{
@@ -851,20 +865,20 @@ func TestUnixAPIProvisionalConnectionFollowsSessionResumeReconciliation(t *testi
 		t.Fatal(err)
 	}
 	defer hook.Close()
-	if hook.Identity().Actor != "reviewer" {
+	if hook.Identity().Actor != first.Identity().Actor {
 		t.Fatalf("hook reclaimed %q", hook.Identity().Actor)
 	}
 	if _, err := provisional.Who(ctx, 10); err != nil {
 		t.Fatalf("provisional client did not reconnect after reconciliation: %v", err)
 	}
-	if identity := provisional.Identity(); identity.Actor != "reviewer" || identity.Provisional {
+	if identity := provisional.Identity(); identity.Actor != first.Identity().Actor || identity.Actor == provisionalActor || identity.Provisional {
 		t.Fatalf("reconciled client identity = %+v", identity)
 	}
 	sent, err := provisional.Send(ctx, bus.SendRequest{
 		IdempotencyKey: "resume-reconciled", ProjectID: "coupon", ChannelID: "direct",
 		ToActors: []string{"peer"}, Type: "MESSAGE", Body: json.RawMessage(`{"text":"resumed"}`),
 	})
-	if err != nil || sent.Message.FromActor != "reviewer" {
+	if err != nil || sent.Message.FromActor != first.Identity().Actor {
 		t.Fatalf("reconciled send = %+v, err = %v", sent, err)
 	}
 }
@@ -901,7 +915,7 @@ func TestUnixAPIReleasesUnusedProvisionalActorOnDisconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer active.Close()
-	if active.Identity().Actor != "worker" {
+	if !strings.HasPrefix(active.Identity().Actor, "worker-") {
 		t.Fatalf("actor after provisional disconnect = %q", active.Identity().Actor)
 	}
 }

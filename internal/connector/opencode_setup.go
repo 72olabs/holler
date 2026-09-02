@@ -53,7 +53,7 @@ func SetupOpenCode(_ context.Context, config OpenCodeSetupConfig, _ ...SetupOpti
 		GuidedActions: []string{
 			"Install OpenCode " + manifest.MinimumClient + " or newer, then rerun doctor; this source build has not yet completed real-client certification.",
 			"The launcher binds OpenCode to a loopback-only random port and generates new HTTP Basic credentials for every run.",
-			"Give concurrently running OpenCode sessions distinct actor names unless you intentionally want competing workers for one inbox.",
+			"Allocated sessions receive distinct opaque actor identities. The first session atomically claims the configured <project>-opencode alias; later sessions remain usable at their exact actor handle and ask before changing routes.",
 		},
 	}
 	if config.AttentionMode == AttentionStartupOnly {

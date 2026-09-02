@@ -183,6 +183,12 @@ func TestCapabilityBridgeSurvivesDaemonUpgradeWithoutReplacingMCPServer(t *testi
 		callMCP(toolCall(7, "holler_read", map[string]interface{}{
 			"capability": "alias.resolve", "arguments": map[string]interface{}{"alias": "reviewer"},
 		})),
+		callMCP(toolCall(8, "holler_write", map[string]interface{}{
+			"capability": "message.send.v2", "arguments": map[string]interface{}{
+				"to_actor": "recipient-a7f3c2", "body": "typed send without restarting MCP",
+				"idempotency_key": "bridge-typed-send",
+			},
+		})),
 	}
 	if !capabilityNamed(t, responses[0], "future.echo") {
 		t.Fatal("unchanged MCP server did not discover upgraded daemon capability")
@@ -200,6 +206,11 @@ func TestCapabilityBridgeSurvivesDaemonUpgradeWithoutReplacingMCPServer(t *testi
 	}
 	if got := nestedString(t, responses[5], "result", "structuredContent", "project_id"); got != "coupon" {
 		t.Fatalf("alias.resolve through bridge project = %q", got)
+	}
+	message := nestedValue(t, responses[6], "result", "structuredContent", "message").(map[string]interface{})
+	recipients := message["to_actors"].([]interface{})
+	if len(recipients) != 1 || recipients[0] != "recipient-a7f3c2" {
+		t.Fatalf("message.send.v2 result = %+v", message)
 	}
 }
 
@@ -457,11 +468,33 @@ func TestMCPAliasToolsRouteToCanonicalActor(t *testing.T) {
 		t.Fatal(err)
 	}
 	responses = exchange(t, sender, toolCall(1, "bus_send", map[string]interface{}{
-		"to": "skillbank", "body": "review", "idempotency_key": "mcp-alias-send",
+		"to_alias": "skillbank", "body": "review", "idempotency_key": "mcp-alias-send",
 	}))
 	recipients := nestedSlice(t, responses[0], "result", "structuredContent", "to")
 	if len(recipients) != 1 || recipients[0] != "claude" {
 		t.Fatalf("canonical recipients = %+v", recipients)
+	}
+	if got := nestedString(t, responses[0], "result", "structuredContent", "route_kind"); got != "alias" {
+		t.Fatalf("route kind = %q", got)
+	}
+	if got := nestedString(t, responses[0], "result", "structuredContent", "requested_route"); got != "skillbank" {
+		t.Fatalf("requested route = %q", got)
+	}
+
+	messageID := nestedString(t, responses[0], "result", "structuredContent", "message_id")
+	reviewer, err := mcp.New(db, mcp.Config{Actor: "claude", RunID: "claude-run", ProjectID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses = exchange(t, reviewer, toolCall(1, "bus_send", map[string]interface{}{
+		"reply_to": messageID, "body": "approved", "idempotency_key": "mcp-reply-send",
+	}))
+	if got := nestedString(t, responses[0], "result", "structuredContent", "route_kind"); got != "reply" {
+		t.Fatalf("reply route kind = %q", got)
+	}
+	recipients = nestedSlice(t, responses[0], "result", "structuredContent", "canonical_recipients")
+	if len(recipients) != 1 || recipients[0] != "codex" {
+		t.Fatalf("reply canonical recipients = %+v", recipients)
 	}
 }
 
@@ -474,7 +507,7 @@ func TestToolSurfaceIdentityIsStable(t *testing.T) {
 	if got := strings.Join(mcp.ToolNames(), ","); got != strings.Join(wantNames, ",") {
 		t.Fatalf("tool names = %q", got)
 	}
-	const wantHash = "sha256:e1eae352b2d6000bd8ad564424b3d3b7d25ebf4c24eb5f88add5e380d6973b23"
+	const wantHash = "sha256:b0514237f023357701db6274a7597aa227fa0f1b9890abc890dbccea9055982a"
 	if got := mcp.ToolSurfaceHash(); got != wantHash {
 		t.Fatalf("tool surface hash = %q, want %q; connector reauthorization is required for an intentional schema change", got, wantHash)
 	}

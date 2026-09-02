@@ -2,6 +2,8 @@ package connector
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 )
 
 type Store interface {
+	ClaimAliasIfAbsent(context.Context, bus.AliasClaimRequest) (bus.AliasClaimResult, error)
 	RegisterSession(context.Context, bus.RegistrationRequest) (bus.Registration, error)
 	LiveRegistrations(context.Context, string) ([]bus.Registration, error)
 	CheckInbox(context.Context, string, int) ([]bus.InboxItem, error)
@@ -119,6 +122,7 @@ type SessionConfig struct {
 	AttentionMode  string
 	DeliveryHandle string
 	WorkingDir     string
+	NameMode       bus.NameMode
 }
 
 type HookOutput struct {
@@ -156,6 +160,24 @@ func (r *Runtime) SessionStart(ctx context.Context, config SessionConfig, input 
 	if err != nil {
 		return HookOutput{}, err
 	}
+	aliasContext := ""
+	if config.NameMode == bus.NameModeAllocate {
+		alias := config.ProjectID + "-" + strings.ToLower(config.Harness)
+		digest := sha256.Sum256([]byte(config.Actor + "\x00" + alias))
+		claim, claimErr := r.store.ClaimAliasIfAbsent(ctx, bus.AliasClaimRequest{
+			Alias: alias, Actor: config.Actor, PolicyID: "setup:default-workstream-alias",
+			Harness: config.Harness, UpdatedByActor: config.Actor, UpdatedByRun: config.RunID,
+			ProjectID: config.ProjectID, IdempotencyKey: "default-alias-" + hex.EncodeToString(digest[:8]),
+		})
+		switch {
+		case claimErr != nil:
+			aliasContext = fmt.Sprintf(" The configured default alias %q was not claimed: %v. Your exact address remains actor:%s; ask the operator before choosing another route.", alias, claimErr, config.Actor)
+		case claim.Alias.Actor == config.Actor:
+			aliasContext = fmt.Sprintf(" Your default route alias is %q.", alias)
+		default:
+			aliasContext = fmt.Sprintf(" The configured default alias %q already points to actor:%s. Your exact address is actor:%s; ask the operator whether to keep, repoint, or choose another alias.", alias, claim.Alias.Actor, config.Actor)
+		}
+	}
 	items, err := r.store.CheckInbox(ctx, config.Actor, 100)
 	if err != nil {
 		return HookOutput{}, err
@@ -180,6 +202,7 @@ func (r *Runtime) SessionStart(ctx context.Context, config SessionConfig, input 
 			config.Actor, config.RunID, len(items), available,
 		)
 	}
+	contextText += aliasContext
 	return HookOutput{HookSpecificOutput: HookSpecificOutput{
 		HookEventName: "SessionStart", AdditionalContext: contextText,
 	}}, nil

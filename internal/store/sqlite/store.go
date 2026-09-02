@@ -24,7 +24,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const migrationVersion = 10
+const migrationVersion = 11
 
 const (
 	migrationRetryWindow = 5 * time.Second
@@ -352,15 +352,20 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 	if err := assertActorNotAdoptedTx(ctx, tx, req.FromActor); err != nil {
 		return bus.SendResult{}, err
 	}
-	req.RequestedToActors = append([]string(nil), req.ToActors...)
-	resolved, resolutions, err := resolveRecipientsTx(ctx, tx, req.ToActors)
-	if err != nil {
-		return bus.SendResult{}, err
+	legacyRecipients := append([]string(nil), req.ToActors...)
+	req.RequestedToActors = append([]string(nil), legacyRecipients...)
+	if len(req.Destinations) > 0 {
+		req.RequestedRoutes = append([]bus.Route(nil), req.Destinations...)
+	} else if req.InReplyTo == "" {
+		req.RequestedRoutes, err = classifyLegacyRoutesTx(ctx, tx, legacyRecipients)
+		if err != nil {
+			return bus.SendResult{}, err
+		}
 	}
-	req.ToActors = resolved
 
+	var parent bus.Message
 	if req.InReplyTo != "" {
-		parent, err := getMessageByIDTx(ctx, tx, req.InReplyTo)
+		parent, err = getMessageByIDTx(ctx, tx, req.InReplyTo)
 		if err != nil {
 			if errors.Is(err, bus.ErrNotFound) {
 				return bus.SendResult{}, &bus.ValidationError{Field: "in_reply_to", Problem: "message does not exist"}
@@ -375,6 +380,7 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 		} else if req.ThreadID != parent.ThreadID {
 			return bus.SendResult{}, &bus.ValidationError{Field: "thread_id", Problem: "does not match in_reply_to message"}
 		}
+		req.RequestedRoutes = []bus.Route{{Kind: bus.RouteReply, Value: parent.ID}}
 	}
 	existing, err := getMessageByIdempotencyTx(ctx, tx, req.FromActor, req.IdempotencyKey)
 	if err == nil {
@@ -386,6 +392,33 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 	if !errors.Is(err, bus.ErrNotFound) {
 		return bus.SendResult{}, err
 	}
+
+	var resolved []string
+	var resolutions map[string]string
+	if req.InReplyTo != "" {
+		if len(legacyRecipients) > 0 {
+			legacyRoutes, err := classifyLegacyRoutesTx(ctx, tx, legacyRecipients)
+			if err != nil {
+				return bus.SendResult{}, err
+			}
+			legacyResolved, _, err := resolveRoutesTx(ctx, tx, legacyRoutes)
+			if err != nil {
+				return bus.SendResult{}, err
+			}
+			if len(legacyResolved) != 1 || legacyResolved[0] != parent.FromActor {
+				return bus.SendResult{}, &bus.ValidationError{
+					Field: "to_actors", Problem: "does not match the immutable sender of in_reply_to; omit it when replying",
+				}
+			}
+		}
+		resolved = []string{parent.FromActor}
+	} else {
+		resolved, resolutions, err = resolveRoutesTx(ctx, tx, req.RequestedRoutes)
+		if err != nil {
+			return bus.SendResult{}, err
+		}
+	}
+	req.ToActors = resolved
 
 	messageID, err := s.newID("msg")
 	if err != nil {
@@ -409,13 +442,14 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 		CreatedAt:         now,
 		ExpiresAt:         req.ExpiresAt,
 		RequestedToActors: append([]string(nil), req.RequestedToActors...),
+		RequestedRoutes:   append([]bus.Route(nil), req.RequestedRoutes...),
 	}
 
 	var expires interface{}
 	if req.ExpiresAt != nil {
 		expires = req.ExpiresAt.UnixNano()
 	}
-	requestedRecipients, err := json.Marshal(req.RequestedToActors)
+	requestedRecipients, err := json.Marshal(req.RequestedRoutes)
 	if err != nil {
 		return bus.SendResult{}, fmt.Errorf("encode requested recipients: %w", err)
 	}
@@ -975,8 +1009,16 @@ func getMessageByIDTx(ctx context.Context, tx *sql.Tx, messageID string) (bus.Me
 		return bus.Message{}, fmt.Errorf("iterate recipients: %w", err)
 	}
 	if len(requestedRecipients) > 0 {
-		if err := json.Unmarshal(requestedRecipients, &message.RequestedToActors); err != nil {
-			return bus.Message{}, fmt.Errorf("decode requested recipients: %w", err)
+		if err := json.Unmarshal(requestedRecipients, &message.RequestedRoutes); err != nil {
+			// Rows written before typed routes contain a JSON string array. Keep
+			// accepting it so durable idempotency survives an in-place upgrade.
+			if legacyErr := json.Unmarshal(requestedRecipients, &message.RequestedToActors); legacyErr != nil {
+				return bus.Message{}, fmt.Errorf("decode requested recipients: typed=%v legacy=%w", err, legacyErr)
+			}
+		} else {
+			for _, route := range message.RequestedRoutes {
+				message.RequestedToActors = append(message.RequestedToActors, route.Value)
+			}
 		}
 	}
 	return message, nil

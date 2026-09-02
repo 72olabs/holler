@@ -80,7 +80,7 @@ func SetupCodex(ctx context.Context, config CodexSetupConfig, options ...SetupOp
 			"On first launch, inspect the Holler SessionStart and SessionEnd hooks when Codex asks for trust, then approve the exact installed package hash.",
 			"Do not use --dangerously-bypass-hook-trust for normal sessions; it is reserved for disposable certification canaries after package validation.",
 			"After hook trust and MCP policy admission, plain Codex sessions load the persisted connector binding and derive one immutable run from the Codex process. Use connector launch for the dedicated least-privilege profile or explicit identity overrides.",
-			"Give concurrently running Codex sessions distinct actor names unless you intentionally want competing workers for one inbox.",
+			"Allocated sessions receive distinct opaque actor identities. The first session atomically claims the configured <project>-codex alias; later sessions remain usable at their exact actor handle and ask before changing routes.",
 		},
 	}
 	if config.GlobalPolicy {

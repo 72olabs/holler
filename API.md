@@ -93,7 +93,8 @@ Build metadata is an additive protocol-v1 hello field. A new client first sends 
 
 Holler clients may explicitly negotiate actor allocation by adding capability
 `actor-allocation-v1`, `name_mode`, and continuity metadata to `hello`. Current
-clients also advertise `actor-alias-v1`. The daemon ready response advertises
+clients also advertise `actor-alias-v1`, `typed-routes-v1`, and
+`alias-claim-if-absent-v1`. The daemon ready response advertises
 `capability-bridge-v1` when it supports the stable discovery and invocation
 operations described below:
 
@@ -103,15 +104,16 @@ operations described below:
   "client": "codex-connector/0.2",
   "actor": "codex-reviewer",
   "run_id": "run-07",
-  "capabilities": ["actor-allocation-v1", "actor-alias-v1"],
+  "capabilities": ["actor-allocation-v1", "actor-alias-v1", "typed-routes-v1", "alias-claim-if-absent-v1"],
   "name_mode": "allocate",
   "continuity_handles": ["session:codex:thread-07", "launch:codex:tab-07"],
   "project_id": "coupon"
 }
 ```
 
-`allocate` transactionally reclaims an existing continuity binding or mints the
-first unused actor (`codex-reviewer`, `codex-reviewer-2`, ...). `exact` refuses
+`allocate` transactionally reclaims an existing continuity binding or mints a
+visibly opaque actor (`codex-reviewer-a7f3c2`, never a sequential suffix).
+`exact` refuses
 another live run unless the launcher sets `takeover: true`. Takeover is an
 operator/launcher capability, never an MCP tool. The ready response returns the
 assigned actor; all later requests are stamped with it. Omitting every naming
@@ -122,10 +124,11 @@ run from reclaiming the superseded actor through continuity, returning the
 non-retryable `binding_stale` error. Ended or lapsed runs may still be resumed
 by a successor run.
 
-An active alias reserves its name in the same namespace as canonical actors.
-Allocation skips a reserved alias, and any handshake that tries to bind an
-alias as an actor fails with `alias_conflict`. This prevents an alias from
-silently turning into a second inbox.
+Every live or removed alias reserves its name in the same namespace as canonical
+actors, and every live or retired actor reserves its name against aliases. A
+handshake that tries to bind an alias as an actor fails with `alias_conflict`.
+A legacy untyped send to a removed alias fails with `alias_tombstoned` instead
+of silently turning the old route into a new raw-actor inbox.
 
 Adoption is a terminal transfer of the source actor name. An `exact` hello for
 an adopted source returns `actor_adopted`. A plain protocol connection may
@@ -161,6 +164,7 @@ This implemented slice does not yet perform the Ed25519 challenge-response speci
 - `set_actor_profile {project_id, role_text, accepts}`
 - `who {limit}`
 - `adopt_actor {source_actor, project_id, idempotency_key}`
+- `claim_alias_if_absent {alias, actor, policy_id, harness, project_id, idempotency_key}`
 - `set_alias {alias, actor, project_id, idempotency_key}`
 - `remove_alias {alias, project_id, idempotency_key}`
 - `list_aliases {}`
@@ -209,6 +213,13 @@ targets both the adopter and an adopted source, the adopter's direct delivery
 wins. The source delivery remains an immutable audit row but is not separately
 claimable.
 
+`claim_alias_if_absent` is the atomic startup operation for the installed
+`setup:default-workstream-alias` policy. It permits only
+`<project_id>-<harness>`, never repoints an existing alias, returns the current
+winner to a losing caller, and durably records both winning and losing outcomes
+so retries cannot change the race result. A removed alias is tombstoned and
+requires an explicit operator restore rather than an automatic claim.
+
 `set_alias` creates or repoints one durable human-friendly name to an existing
 canonical actor. `remove_alias` retires the pointer; both operations stamp the
 connection-bound actor and run as the updater, require a stable idempotency key,
@@ -218,11 +229,15 @@ connectors only behind explicit user approval. `list_aliases` and
 is durable. Alias names cannot shadow any known actor, and actor allocation
 cannot mint a reserved alias.
 
-`send` resolves every alias inside its transaction before creating the message
-and delivery rows. The public message records only canonical `to_actors`.
-Holler privately retains the original recipient expression for idempotency
-comparison, so retrying the same send after an alias is repointed returns the
-original message rather than retargeting it.
+`send` accepts typed `destinations` entries with kind `alias` or `actor`.
+Aliases resolve inside the send transaction; canonical `to_actors` and the
+typed `requested_routes` provenance are stamped on the durable message. A send
+with `in_reply_to` may omit destinations: Holler derives the recipient from the
+parent message's immutable `from_actor`, so an alias repoint cannot redirect a
+reply. Typed destinations and `in_reply_to` are mutually exclusive. During the
+compatibility window, legacy `to_actors` resolves active alias, then alias
+tombstone error, then raw actor. Holler retains the requested route for
+idempotency, so retrying after a repoint returns the original message.
 
 `list_capabilities` returns a daemon-owned catalog whose entries contain
 `name`, enforced `mode` (`read` or `write`), `description`, `input_schema`, and
@@ -243,6 +258,11 @@ tradeoff for restart-free capability additions. A generic write is not
 automatically retried after transport failure; each write capability must
 define its own idempotency contract.
 
+The daemon-owned `message.send.v2` write capability exposes typed alias, actor,
+and reply routes to an already-running 0.6.1 MCP process. Fresh 0.7.0 connector
+sessions also receive `to_alias` and `to_actor` directly on `bus_send`; the
+bridge is the restart-free upgrade path.
+
 This cannot retrofit the bridge into a 0.6.0 process image that is already
 running. Moving from 0.6.0 to 0.6.1 is therefore the one-time MCP bootstrap
 boundary; future daemon-owned capabilities can use the fixed bridge.
@@ -260,7 +280,7 @@ Requests have bounded dial and operation deadlines.
 - `holler who` lists known actors; `holler profile` publishes the caller's
   advisory role metadata.
 - `holler adopt` performs an explicitly authorized inactive-inbox handoff.
-- `holler alias set|list|resolve|remove` manages durable actor aliases through
+- `holler alias claim|set|list|resolve|remove` manages durable actor aliases through
   the daemon API.
 - `holler mcp` translates MCP stdio calls into this API.
 - `holler hook` and `holler session-end` use this API for lifecycle integration.

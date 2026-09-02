@@ -67,10 +67,10 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 		fmt.Fprintf(stderr, "warning: existing Codex connector selection is invalid and will be replaced only after confirmation; its first backup is preserved: %v\n", err)
 	}
 	defaultAttention := connector.AttentionHookLongPoll
-	defaultActor, defaultPeer := "claude", "codex"
+	defaultActor, defaultPeerHarness := "claude", "codex"
 	if harness == "codex" {
 		defaultAttention = connector.AttentionNativeQueue
-		defaultActor, defaultPeer = "codex", "claude"
+		defaultActor, defaultPeerHarness = "codex", "claude"
 	}
 	workingDirectory, _ := os.Getwd()
 	defaultNameMode := existingNameMode
@@ -83,7 +83,7 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 	nameMode := flags.String("name-mode", defaultNameMode, "actor naming: exact or allocate; new installations default to allocate")
 	actor := flags.String("actor", firstNonEmptyString(existingActor, defaultActor), "durable inbox identity")
 	role := flags.String("role", firstNonEmptyString(existingRole, "assistant"), "actor role")
-	peer := flags.String("peer", firstNonEmptyString(existingPeer, defaultPeer), "default peer actor")
+	peer := flags.String("peer", existingPeer, "default peer alias; new setups derive <project>-<peer-harness>")
 	project := flags.String("project", firstNonEmptyString(existingProject, "default"), "Holler project/partition")
 	projectRoot := flags.String("project-root", firstNonEmptyString(existingRoot, workingDirectory), "Codex working tree used by the optional connector launcher")
 	channel := flags.String("channel", firstNonEmptyString(existingChannel, "direct"), "Holler channel")
@@ -107,6 +107,9 @@ func runProductSetup(ctx context.Context, args []string, stdin io.Reader, stdout
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected setup arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if strings.TrimSpace(*peer) == "" {
+		*peer = strings.TrimSpace(*project) + "-" + defaultPeerHarness
 	}
 
 	executable, err := os.Executable()

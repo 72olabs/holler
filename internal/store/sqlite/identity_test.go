@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -40,7 +41,8 @@ func TestAllocateActorIsAtomicAndContinuitySafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Actor != "coupon-reviewer" || !first.Minted || first.ContinuityReclaimed {
+	assertOpaqueActor(t, first.Actor, "coupon-reviewer")
+	if !first.Minted || first.ContinuityReclaimed {
 		t.Fatalf("first allocation = %+v", first)
 	}
 	retry, err := db.BindActor(ctx, request)
@@ -57,7 +59,8 @@ func TestAllocateActorIsAtomicAndContinuitySafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Actor != "coupon-reviewer-2" || !second.Minted {
+	assertOpaqueActor(t, second.Actor, "coupon-reviewer")
+	if second.Actor == first.Actor || !second.Minted {
 		t.Fatalf("second allocation = %+v", second)
 	}
 	events, err := db.ListEvents(ctx, "coupon", "durable", 0, 100)
@@ -264,38 +267,41 @@ func TestSessionContinuityReconcilesMCPFirstResumeWithoutPhantomActor(t *testing
 		RequestedActor: "reviewer", RunID: "run-1", NameMode: bus.NameModeAllocate,
 		ContinuityHandles: []string{"process:codex:run-1", "session:codex:session-1"}, ProjectID: "coupon",
 	})
-	if err != nil || first.Actor != "reviewer" || !first.Minted || first.Provisional {
+	if err != nil || !first.Minted || first.Provisional {
 		t.Fatalf("first binding = %+v, err = %v", first, err)
 	}
+	assertOpaqueActor(t, first.Actor, "reviewer")
 	reservation, err := db.BindActor(ctx, bus.ActorBindRequest{
 		RequestedActor: "reviewer", RunID: "run-2", NameMode: bus.NameModeAllocate,
 		ContinuityHandles: []string{"process:codex:run-2"}, ProjectID: "coupon",
 	})
-	if err != nil || reservation.Actor != "reviewer-2" || reservation.Minted || !reservation.Provisional {
+	if err != nil || reservation.Actor == first.Actor || reservation.Minted || !reservation.Provisional {
 		t.Fatalf("process-only reservation = %+v, err = %v", reservation, err)
 	}
+	assertOpaqueActor(t, reservation.Actor, "reviewer")
 	directory, err := db.Who(ctx, 10)
-	if err != nil || len(directory.Actors) != 1 || directory.Actors[0].Actor != "reviewer" {
+	if err != nil || len(directory.Actors) != 1 || directory.Actors[0].Actor != first.Actor {
 		t.Fatalf("directory exposed provisional reservation = %+v, err = %v", directory, err)
 	}
 	reclaimed, err := db.BindActor(ctx, bus.ActorBindRequest{
 		RequestedActor: "reviewer", RunID: "run-2", NameMode: bus.NameModeAllocate,
 		ContinuityHandles: []string{"process:codex:run-2", "session:codex:session-1"}, ProjectID: "coupon",
 	})
-	if err != nil || reclaimed.Actor != "reviewer" || !reclaimed.ContinuityReclaimed || reclaimed.Minted || reclaimed.Provisional {
+	if err != nil || reclaimed.Actor != first.Actor || !reclaimed.ContinuityReclaimed || reclaimed.Minted || reclaimed.Provisional {
 		t.Fatalf("reconciled binding = %+v, err = %v", reclaimed, err)
 	}
 	current, err := db.CurrentActorForContinuity(ctx, []string{"process:codex:run-2"})
-	if err != nil || current != "reviewer" {
+	if err != nil || current != first.Actor {
 		t.Fatalf("reconciled process handle = %q, err = %v", current, err)
 	}
 	second, err := db.BindActor(ctx, bus.ActorBindRequest{
 		RequestedActor: "reviewer", RunID: "run-3", NameMode: bus.NameModeAllocate,
 		ContinuityHandles: []string{"launch:codex:worker-3"}, ProjectID: "coupon",
 	})
-	if err != nil || second.Actor != "reviewer-2" || !second.Minted {
+	if err != nil || second.Actor == first.Actor || !second.Minted {
 		t.Fatalf("released suffix allocation = %+v, err = %v", second, err)
 	}
+	assertOpaqueActor(t, second.Actor, "reviewer")
 	events, err := db.ListEvents(ctx, "coupon", "durable", 0, 100)
 	if err != nil {
 		t.Fatal(err)
@@ -322,9 +328,10 @@ func TestDaemonRestartDropsUnusedProcessOnlyReservation(t *testing.T) {
 		RequestedActor: "worker", RunID: "run-1", NameMode: bus.NameModeAllocate,
 		ContinuityHandles: []string{"process:codex:run-1"}, ProjectID: "test",
 	})
-	if err != nil || reservation.Actor != "worker" || !reservation.Provisional {
+	if err != nil || !reservation.Provisional {
 		t.Fatalf("reservation = %+v, err = %v", reservation, err)
 	}
+	assertOpaqueActor(t, reservation.Actor, "worker")
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +344,23 @@ func TestDaemonRestartDropsUnusedProcessOnlyReservation(t *testing.T) {
 		RequestedActor: "worker", RunID: "run-2", NameMode: bus.NameModeAllocate,
 		ContinuityHandles: []string{"launch:codex:worker-2"}, ProjectID: "test",
 	})
-	if err != nil || active.Actor != "worker" || !active.Minted {
+	if err != nil || !active.Minted {
 		t.Fatalf("allocation after restart = %+v, err = %v", active, err)
+	}
+	assertOpaqueActor(t, active.Actor, "worker")
+}
+
+func assertOpaqueActor(t *testing.T, actor, base string) {
+	t.Helper()
+	prefix := base + "-"
+	if !strings.HasPrefix(actor, prefix) {
+		t.Fatalf("actor %q does not have opaque base %q", actor, base)
+	}
+	suffix := strings.TrimPrefix(actor, prefix)
+	if len(suffix) != 6 {
+		t.Fatalf("actor %q suffix length = %d, want 6", actor, len(suffix))
+	}
+	if _, err := hex.DecodeString(suffix); err != nil {
+		t.Fatalf("actor %q suffix is not hexadecimal: %v", actor, err)
 	}
 }

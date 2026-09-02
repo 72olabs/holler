@@ -883,9 +883,10 @@ func TestMigrationV7AddsActorBindingsWithoutLosingProfiles(t *testing.T) {
 		RequestedActor: "codex", RunID: "run-2", NameMode: bus.NameModeAllocate,
 		ContinuityHandles: []string{"launch:codex:migration"}, ProjectID: "migration",
 	})
-	if err != nil || binding.Actor != "codex-2" {
+	if err != nil {
 		t.Fatalf("binding after migration = %+v, err = %v", binding, err)
 	}
+	assertOpaqueActor(t, binding.Actor, "codex")
 	directory, err := db.Who(ctx, 10)
 	if err != nil || len(directory.Actors) != 2 {
 		t.Fatalf("directory after migration = %+v, err = %v", directory, err)

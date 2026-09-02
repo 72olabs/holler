@@ -68,15 +68,18 @@ New product setup defaults to `--name-mode allocate`; rerunning an existing
 setup preserves its prior choice. Advanced setup can omit `--name-mode` to keep
 the original shared-inbox behavior. `--name-mode exact` refuses another live run for the
 same actor; launcher-only `--takeover` records and supersedes the old presence.
-`--name-mode allocate` treats the configured actor as a base and atomically
-mints a suffix when necessary. A harness session ID automatically reclaims the
+`--name-mode allocate` treats the configured actor as a base and always mints
+an opaque canonical identity such as `claude-a7f3c2`. A harness session ID automatically reclaims the
 same allocation on resume, while `--launch-tag <stable-tag>` provides the same
 continuity to an external supervisor. Separately launched workers in one
 working directory remain isolated because continuity never depends on cwd.
 
 Allocation, continuity binding, and the mint event commit in one daemon
-transaction. Reserved aliases are skipped by allocation and cannot shadow an
-actor identity. The ready handshake returns the assigned actor before hooks or MCP
+transaction. Live and removed aliases share a reserved namespace with live and
+retired actors. The first authoritative SessionStart atomically claims the
+installed `<project>-<harness>` default alias if absent; a concurrent loser
+keeps its exact opaque actor address and receives an actionable route-choice
+prompt. The ready handshake returns the assigned actor before hooks or MCP
 operations are accepted, and every later operation uses that immutable bound
 identity. Naming flags are setup/launcher controls and are not exposed as agent
 tools.
@@ -130,7 +133,7 @@ open after its response is complete.
 
 For custom identity, attention, scope, or policy destinations, `scripts/setup-claude.sh` and `holler connector setup --harness claude` retain the advanced preview/`--apply` workflow.
 
-An actor is a durable inbox identity, not a session name. Legacy concurrent sessions using the same actor are intentional competing consumers: the first successful `bus_inbox` claim owns the lease. Prefer allocate mode when parallel sessions must each be independently talkable.
+An actor is a durable inbox identity, not a session name. Legacy concurrent sessions using the same actor are intentional competing consumers: the first successful `bus_inbox` claim owns the lease. Prefer allocate mode when parallel sessions must each be independently talkable. Directory-discovered opaque handles are candidates, not routing authority; an agent must ask the operator before using one unless the operator supplied the exact handle.
 
 ## OpenCode setup and launch
 

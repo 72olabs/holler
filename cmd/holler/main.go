@@ -510,7 +510,7 @@ func runAdopt(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 
 func runAlias(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: holler alias set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS")
+		fmt.Fprintln(stderr, "usage: holler alias claim ALIAS ACTOR --policy-id ID --harness HARNESS | set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS")
 		return flag.ErrHelp
 	}
 	action := args[0]
@@ -520,6 +520,8 @@ func runAlias(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	runID := flags.String("run", "operator-alias", "operator run recorded in alias history")
 	project := flags.String("project", environmentOr("HOLLER_PROJECT", "default"), "project/partition")
 	idempotencyKey := flags.String("idempotency-key", "", "stable key for this alias mutation")
+	policyID := flags.String("policy-id", "", "installed naming policy authorizing claim-if-absent")
+	harness := flags.String("harness", "", "harness used by the installed naming policy")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -529,6 +531,28 @@ func runAlias(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	}
 	defer client.Close()
 	switch action {
+	case "claim":
+		if flags.NArg() != 2 {
+			return &bus.ValidationError{Field: "alias claim", Problem: "requires ALIAS and ACTOR"}
+		}
+		if strings.TrimSpace(*policyID) == "" {
+			return &bus.ValidationError{Field: "policy_id", Problem: "is required"}
+		}
+		if strings.TrimSpace(*harness) == "" {
+			return &bus.ValidationError{Field: "harness", Problem: "is required"}
+		}
+		key := *idempotencyKey
+		if key == "" {
+			key = fmt.Sprintf("alias-claim-%d", time.Now().UTC().UnixNano())
+		}
+		result, err := client.ClaimAliasIfAbsent(ctx, bus.AliasClaimRequest{
+			Alias: flags.Arg(0), Actor: flags.Arg(1), PolicyID: *policyID, Harness: *harness,
+			ProjectID: *project, IdempotencyKey: key,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, result)
 	case "set":
 		if flags.NArg() != 2 {
 			return &bus.ValidationError{Field: "alias set", Problem: "requires ALIAS and ACTOR"}
@@ -588,7 +612,9 @@ func runSend(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	from := flags.String("actor", os.Getenv("HOLLER_ACTOR"), "sender actor bound to the API session")
 	runID := flags.String("run", "", "immutable sender run")
 	role := flags.String("role", "", "sender role")
-	to := flags.String("to", "", "comma-separated recipient actors")
+	to := flags.String("to", "", "legacy comma-separated recipients")
+	toAlias := flags.String("to-alias", "", "comma-separated human-facing aliases")
+	toActor := flags.String("to-actor", "", "comma-separated exact canonical actor handles")
 	project := flags.String("project", "default", "project/partition")
 	channel := flags.String("channel", "direct", "channel")
 	thread := flags.String("thread", "", "optional thread")
@@ -601,6 +627,15 @@ func runSend(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	routeFlags := 0
+	for _, value := range []string{*to, *toAlias, *toActor} {
+		if strings.TrimSpace(value) != "" {
+			routeFlags++
+		}
+	}
+	if routeFlags > 1 {
+		return &bus.ValidationError{Field: "send", Problem: "use exactly one of --to-alias, --to-actor, or legacy --to"}
+	}
 	var expiresAt *time.Time
 	if *expires > 0 {
 		value := time.Now().UTC().Add(*expires)
@@ -611,7 +646,7 @@ func runSend(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return err
 	}
 	defer client.Close()
-	result, err := client.Send(ctx, bus.SendRequest{
+	request := bus.SendRequest{
 		IdempotencyKey:  *idempotencyKey,
 		ProjectID:       *project,
 		ChannelID:       *channel,
@@ -619,13 +654,28 @@ func runSend(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		FromActor:       *from,
 		FromRun:         *runID,
 		FromRole:        *role,
-		ToActors:        strings.Split(*to, ","),
 		Type:            *messageType,
 		DeliveryRequest: bus.DeliveryRequest(*delivery),
 		InReplyTo:       *replyTo,
 		Body:            json.RawMessage(*body),
 		ExpiresAt:       expiresAt,
-	})
+	}
+	appendRoutes := func(kind bus.RouteKind, raw string) {
+		for _, value := range strings.Split(raw, ",") {
+			if value = strings.TrimSpace(value); value != "" {
+				request.Destinations = append(request.Destinations, bus.Route{Kind: kind, Value: value})
+			}
+		}
+	}
+	switch {
+	case strings.TrimSpace(*toAlias) != "":
+		appendRoutes(bus.RouteAlias, *toAlias)
+	case strings.TrimSpace(*toActor) != "":
+		appendRoutes(bus.RouteActor, *toActor)
+	case strings.TrimSpace(*to) != "":
+		request.ToActors = strings.Split(*to, ",")
+	}
+	result, err := client.Send(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -864,6 +914,7 @@ func runHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	*actor = client.Identity().Actor
 	output, err := connector.New(client).SessionStart(hookCtx, connector.SessionConfig{
 		Actor: *actor, RunID: *runID, Harness: *harness, ProjectID: *project, AttentionMode: attentionMode,
+		NameMode: binding.NameMode,
 	}, bytes.NewReader(payload))
 	if err != nil {
 		return writeDegradedHook(stdout, stderr, err)
@@ -1317,7 +1368,7 @@ Usage:
   holler who [--socket PATH] [--limit 100]
   holler profile --actor ACTOR --run RUN --role TEXT [--accepts KIND,KIND]
   holler adopt --actor LIVE_ACTOR --run RUN --from INACTIVE_ACTOR --idempotency-key KEY
-  holler alias set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS
+  holler alias claim ALIAS ACTOR --policy-id ID --harness HARNESS | set ALIAS ACTOR | list | resolve ALIAS | remove ALIAS
   holler send   --socket PATH --actor ACTOR --run RUN --to ACTOR[,ACTOR] --idempotency-key KEY [options]
   holler inbox  --socket PATH --actor ACTOR
   holler claim  --socket PATH --actor ACTOR [--message ID] [--lease 5m]

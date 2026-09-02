@@ -159,6 +159,19 @@ CREATE TABLE IF NOT EXISTS actor_alias_history (
 CREATE INDEX IF NOT EXISTS actor_alias_history_updated
     ON actor_alias_history(updated_at_ns, alias, revision);
 
+CREATE TABLE IF NOT EXISTS actor_alias_claim_requests (
+    updated_by_actor TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+	 harness TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    result_json BLOB NOT NULL,
+    created_at_ns INTEGER NOT NULL,
+    PRIMARY KEY (updated_by_actor, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS partition_counters (
     partition_id TEXT NOT NULL,
     stream TEXT NOT NULL,

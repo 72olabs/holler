@@ -285,9 +285,10 @@ func TestAdoptedSourceIdentityIsFencedAndContinuityMovesToFreshActor(t *testing.
 		RequestedActor: "reviewer-old", RunID: "old-run", NameMode: bus.NameModeAllocate,
 		ContinuityHandles: handles, ProjectID: "coupon",
 	})
-	if err != nil || source.Actor != "reviewer-old" {
+	if err != nil {
 		t.Fatalf("source binding = %+v, err = %v", source, err)
 	}
+	assertOpaqueActor(t, source.Actor, "reviewer-old")
 	if _, err := db.RegisterSession(ctx, bus.RegistrationRequest{
 		Actor: source.Actor, RunID: "old-run", Harness: "codex", SessionID: "old-session",
 		ProjectID: "coupon", Lease: time.Hour,
@@ -332,7 +333,8 @@ func TestAdoptedSourceIdentityIsFencedAndContinuityMovesToFreshActor(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh.Actor != "reviewer-old-2" || fresh.AdoptedPredecessor != source.Actor ||
+	assertOpaqueActor(t, fresh.Actor, "reviewer-old")
+	if fresh.Actor == source.Actor || fresh.AdoptedPredecessor != source.Actor ||
 		fresh.ContinuityReclaimed || !fresh.Minted || fresh.Provisional {
 		t.Fatalf("fresh binding after adoption = %+v", fresh)
 	}

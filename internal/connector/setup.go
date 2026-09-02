@@ -104,7 +104,7 @@ func SetupClaude(ctx context.Context, config ClaudeSetupConfig, options ...Setup
 	}
 	plan.GuidedActions = append(plan.GuidedActions,
 		"After setup, plain Claude sessions load the persisted connector binding and derive one immutable run from the Claude process. Use connector launch only for explicit per-session identity overrides.",
-		"Give concurrently running Claude sessions distinct actor names unless you intentionally want them to compete as workers for one inbox.",
+		"Allocated sessions receive distinct opaque actor identities. The first session atomically claims the configured <project>-claude alias; later sessions remain usable at their exact actor handle and ask before changing routes.",
 	)
 	if !config.Apply {
 		return plan, nil

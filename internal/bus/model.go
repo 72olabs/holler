@@ -38,6 +38,7 @@ var (
 	ErrActorAdopted         = errors.New("actor identity was permanently adopted")
 	ErrAliasConflict        = errors.New("alias conflicts with an actor identity")
 	ErrAliasNotFound        = errors.New("actor alias not found")
+	ErrAliasTombstoned      = errors.New("actor alias was removed and is reserved")
 	ErrAliasTargetUnknown   = errors.New("alias target is not a known actor")
 	ErrDatabaseOwned        = errors.New("another hollerd already owns this database")
 )
@@ -66,6 +67,22 @@ const (
 	DeliveryDeadLettered DeliveryState = "dead-lettered"
 )
 
+// RouteKind distinguishes a mutable human-facing route from an immutable
+// canonical actor identity. Reply routes are stamped by the store from the
+// parent message and are never accepted as a caller-supplied destination.
+type RouteKind string
+
+const (
+	RouteAlias RouteKind = "alias"
+	RouteActor RouteKind = "actor"
+	RouteReply RouteKind = "reply"
+)
+
+type Route struct {
+	Kind  RouteKind `json:"kind"`
+	Value string    `json:"value"`
+}
+
 type Message struct {
 	ID              string          `json:"message_id"`
 	SchemaVersion   int             `json:"schema_version"`
@@ -77,6 +94,7 @@ type Message struct {
 	FromRun         string          `json:"from_run"`
 	FromRole        string          `json:"from_role,omitempty"`
 	ToActors        []string        `json:"to_actors"`
+	RequestedRoutes []Route         `json:"requested_routes,omitempty"`
 	Type            string          `json:"type"`
 	DeliveryRequest DeliveryRequest `json:"delivery_request"`
 	InReplyTo       string          `json:"in_reply_to,omitempty"`
@@ -98,6 +116,7 @@ type SendRequest struct {
 	FromRun         string          `json:"from_run,omitempty"`
 	FromRole        string          `json:"from_role,omitempty"`
 	ToActors        []string        `json:"to_actors"`
+	Destinations    []Route         `json:"destinations,omitempty"`
 	Type            string          `json:"type"`
 	DeliveryRequest DeliveryRequest `json:"delivery_request"`
 	InReplyTo       string          `json:"in_reply_to,omitempty"`
@@ -105,6 +124,9 @@ type SendRequest struct {
 	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
 	// RequestedToActors is populated internally before alias resolution.
 	RequestedToActors []string `json:"-"`
+	// RequestedRoutes is populated internally before route resolution and is
+	// persisted as immutable send provenance.
+	RequestedRoutes []Route `json:"-"`
 }
 
 type SendResult struct {
@@ -196,6 +218,24 @@ type AliasSetRequest struct {
 	UpdatedByRun   string `json:"updated_by_run,omitempty"`
 	ProjectID      string `json:"project_id"`
 	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type AliasClaimRequest struct {
+	Alias          string `json:"alias"`
+	Actor          string `json:"actor"`
+	PolicyID       string `json:"policy_id"`
+	Harness        string `json:"harness"`
+	UpdatedByActor string `json:"updated_by_actor,omitempty"`
+	UpdatedByRun   string `json:"updated_by_run,omitempty"`
+	ProjectID      string `json:"project_id"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type AliasClaimResult struct {
+	Alias            ActorAlias `json:"alias"`
+	Claimed          bool       `json:"claimed"`
+	PolicyID         string     `json:"policy_id"`
+	DuplicateRequest bool       `json:"duplicate_request"`
 }
 
 type AliasRemoveRequest struct {
@@ -419,6 +459,45 @@ func NormalizeSendRequest(req SendRequest) (SendRequest, error) {
 		return SendRequest{}, &ValidationError{Field: "delivery_request", Problem: "is not supported"}
 	}
 
+	if len(req.Destinations) > 0 && len(req.ToActors) > 0 {
+		return SendRequest{}, &ValidationError{Field: "destinations", Problem: "cannot be combined with legacy to_actors"}
+	}
+	if len(req.Destinations) > 0 && req.InReplyTo != "" {
+		return SendRequest{}, &ValidationError{Field: "destinations", Problem: "cannot be combined with in_reply_to"}
+	}
+
+	routeSeen := make(map[string]struct{}, len(req.Destinations))
+	routes := make([]Route, 0, len(req.Destinations))
+	for _, route := range req.Destinations {
+		route.Value = strings.TrimSpace(route.Value)
+		switch route.Kind {
+		case RouteAlias, RouteActor:
+		case RouteReply:
+			return SendRequest{}, &ValidationError{Field: "destinations.kind", Problem: "reply routes must use in_reply_to"}
+		default:
+			return SendRequest{}, &ValidationError{Field: "destinations.kind", Problem: "must be alias or actor"}
+		}
+		if route.Value == "" {
+			return SendRequest{}, &ValidationError{Field: "destinations.value", Problem: "is required"}
+		}
+		if err := ValidateTextIdentifier("destinations.value", route.Value, 128); err != nil {
+			return SendRequest{}, err
+		}
+		key := string(route.Kind) + "\x00" + route.Value
+		if _, exists := routeSeen[key]; exists {
+			continue
+		}
+		routeSeen[key] = struct{}{}
+		routes = append(routes, route)
+	}
+	sort.Slice(routes, func(i, j int) bool {
+		if routes[i].Kind == routes[j].Kind {
+			return routes[i].Value < routes[j].Value
+		}
+		return routes[i].Kind < routes[j].Kind
+	})
+	req.Destinations = routes
+
 	seen := make(map[string]struct{}, len(req.ToActors))
 	recipients := make([]string, 0, len(req.ToActors))
 	for _, actor := range req.ToActors {
@@ -435,8 +514,8 @@ func NormalizeSendRequest(req SendRequest) (SendRequest, error) {
 		seen[actor] = struct{}{}
 		recipients = append(recipients, actor)
 	}
-	if len(recipients) == 0 {
-		return SendRequest{}, &ValidationError{Field: "to_actors", Problem: "requires at least one actor"}
+	if len(recipients) == 0 && len(req.Destinations) == 0 && req.InReplyTo == "" {
+		return SendRequest{}, &ValidationError{Field: "destinations", Problem: "requires an alias, actor, or in_reply_to"}
 	}
 	sort.Strings(recipients)
 	req.ToActors = recipients
@@ -461,13 +540,22 @@ func ValidateTextIdentifier(name, value string, max int) error {
 }
 
 func EquivalentRequest(message Message, req SendRequest) bool {
-	messageRecipients := message.RequestedToActors
-	if len(messageRecipients) == 0 {
-		messageRecipients = message.ToActors
+	messageRoutes := message.RequestedRoutes
+	if len(messageRoutes) == 0 {
+		messageRoutes = legacyRoutes(message.RequestedToActors)
+		if len(messageRoutes) == 0 {
+			messageRoutes = legacyRoutes(message.ToActors)
+		}
 	}
-	requestRecipients := req.RequestedToActors
-	if len(requestRecipients) == 0 {
-		requestRecipients = req.ToActors
+	requestRoutes := req.RequestedRoutes
+	if len(requestRoutes) == 0 {
+		requestRoutes = req.Destinations
+	}
+	if len(requestRoutes) == 0 {
+		requestRoutes = legacyRoutes(req.RequestedToActors)
+		if len(requestRoutes) == 0 {
+			requestRoutes = legacyRoutes(req.ToActors)
+		}
 	}
 	if message.IdempotencyKey != req.IdempotencyKey ||
 		message.ProjectID != req.ProjectID ||
@@ -480,13 +568,36 @@ func EquivalentRequest(message Message, req SendRequest) bool {
 		message.DeliveryRequest != req.DeliveryRequest ||
 		message.InReplyTo != req.InReplyTo ||
 		!bytes.Equal(message.Body, req.Body) ||
-		!equalStrings(messageRecipients, requestRecipients) {
+		!equalRoutes(messageRoutes, requestRoutes) {
 		return false
 	}
 	if message.ExpiresAt == nil || req.ExpiresAt == nil {
 		return message.ExpiresAt == nil && req.ExpiresAt == nil
 	}
 	return message.ExpiresAt.Equal(*req.ExpiresAt)
+}
+
+func legacyRoutes(values []string) []Route {
+	routes := make([]Route, 0, len(values))
+	for _, value := range values {
+		// An older row recorded only the raw compatibility string. An empty
+		// kind preserves that uncertainty while still making retries compare by
+		// the exact caller-supplied value.
+		routes = append(routes, Route{Value: value})
+	}
+	return routes
+}
+
+func equalRoutes(a, b []Route) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Value != b[i].Value || (a[i].Kind != "" && b[i].Kind != "" && a[i].Kind != b[i].Kind) {
+			return false
+		}
+	}
+	return true
 }
 
 func equalStrings(a, b []string) bool {

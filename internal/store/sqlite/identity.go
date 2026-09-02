@@ -2,13 +2,15 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/72olabs/holler/internal/bus"
 )
@@ -74,7 +76,7 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 					return bus.ActorBindResult{}, err
 				}
 				provisional := !hasAuthoritativeContinuity(req.ContinuityHandles)
-				actor, _, err := allocateActorTx(ctx, tx, bindingBase, true, now)
+				actor, _, err := s.allocateActorTx(ctx, tx, bindingBase, true, now)
 				if err != nil {
 					return bus.ActorBindResult{}, err
 				}
@@ -94,7 +96,7 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			}
 		} else {
 			provisional := !hasAuthoritativeContinuity(req.ContinuityHandles)
-			actor, _, err := allocateActorTx(ctx, tx, req.RequestedActor, true, now)
+			actor, _, err := s.allocateActorTx(ctx, tx, req.RequestedActor, true, now)
 			if err != nil {
 				return bus.ActorBindResult{}, err
 			}
@@ -475,12 +477,26 @@ func actorProvisionalTx(ctx context.Context, tx *sql.Tx, actor string) (bool, er
 	return provisional != 0, nil
 }
 
-func allocateActorTx(ctx context.Context, tx *sql.Tx, base string, provisional bool, now time.Time) (string, int, error) {
-	for ordinal := 1; ordinal <= 1_000_000; ordinal++ {
-		candidate := base
-		if ordinal > 1 {
-			candidate = base + "-" + strconv.Itoa(ordinal)
+func (s *Store) allocateActorTx(ctx context.Context, tx *sql.Tx, base string, provisional bool, now time.Time) (string, int, error) {
+	const suffixBytes = 6
+	for len(base) > 128-suffixBytes-1 {
+		_, size := utf8.DecodeLastRuneInString(base)
+		base = base[:len(base)-size]
+	}
+	var firstOrdinal int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(ordinal), 0) + 1 FROM actor_allocations WHERE base_actor = ?`, base).
+		Scan(&firstOrdinal); err != nil {
+		return "", 0, fmt.Errorf("allocate actor ordinal: %w", err)
+	}
+	for attempt := 1; attempt <= 256; attempt++ {
+		seed, err := s.newID("actor")
+		if err != nil {
+			return "", 0, fmt.Errorf("generate opaque actor id: %w", err)
 		}
+		digest := sha256.Sum256([]byte(seed))
+		candidate := base + "-" + hex.EncodeToString(digest[:suffixBytes/2])
+		ordinal := firstOrdinal + attempt - 1
 		if err := bus.ValidateTextIdentifier("allocated_actor", candidate, 128); err != nil {
 			return "", 0, err
 		}
@@ -537,7 +553,7 @@ func actorNameReservedTx(ctx context.Context, tx *sql.Tx, actor string) (bool, e
 			UNION ALL SELECT 1 FROM registrations WHERE actor = ?
 			UNION ALL SELECT 1 FROM messages WHERE from_actor = ?
 			UNION ALL SELECT 1 FROM deliveries WHERE recipient_actor = ?
-			UNION ALL SELECT 1 FROM actor_aliases WHERE alias = ?
+			UNION ALL SELECT 1 FROM actor_alias_history WHERE alias = ?
 			UNION ALL SELECT 1 FROM actor_names WHERE actor = ?
 			UNION ALL SELECT 1 FROM actor_alias_history WHERE updated_by_actor = ?
 		)`, actor, actor, actor, actor, actor, actor, actor, actor).Scan(&exists)
@@ -568,7 +584,7 @@ func actorIdentityExistsTx(ctx context.Context, tx *sql.Tx, actor string) (bool,
 
 func assertActorNameNotAliasTx(ctx context.Context, tx *sql.Tx, actor string) error {
 	var exists int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_aliases WHERE alias = ?)`, actor).Scan(&exists); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_alias_history WHERE alias = ?)`, actor).Scan(&exists); err != nil {
 		return fmt.Errorf("check alias reservation: %w", err)
 	}
 	if exists != 0 {
