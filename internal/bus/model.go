@@ -414,7 +414,7 @@ type ActorDirectoryEntry struct {
 	SessionsTruncated      bool           `json:"sessions_truncated,omitempty"`
 	UnclaimedMessages      int            `json:"unclaimed_messages"`
 	OldestUnreadAt         *time.Time     `json:"oldest_unread_at,omitempty"`
-	OldestUnreadAgeSeconds int64          `json:"oldest_unread_age_seconds"`
+	OldestUnreadAgeSeconds *int64         `json:"oldest_unread_age_seconds,omitempty"`
 	ActiveClaims           int            `json:"active_claims"`
 	EarliestLeaseExpiryAt  *time.Time     `json:"earliest_lease_expiry_at,omitempty"`
 	StaleUnreadCondition   ConditionState `json:"stale_unread_condition,omitempty"`

@@ -211,7 +211,7 @@ func TestWhoExposesUnreadAgeClaimsAndStaleConditionState(t *testing.T) {
 	}
 	reviewer := directoryActor(t, directory, "reviewer")
 	if reviewer.UnclaimedMessages != 1 || reviewer.OldestUnreadAt == nil || !reviewer.OldestUnreadAt.Equal(oldestAt) ||
-		reviewer.OldestUnreadAgeSeconds != 120 {
+		reviewer.OldestUnreadAgeSeconds == nil || *reviewer.OldestUnreadAgeSeconds != 120 {
 		t.Fatalf("unread observation = %+v", reviewer)
 	}
 	wantExpiry := claim.LeaseExpiresAt
@@ -221,6 +221,14 @@ func TestWhoExposesUnreadAgeClaimsAndStaleConditionState(t *testing.T) {
 	}
 	if reviewer.StaleUnreadCondition != bus.ConditionActiveVisible {
 		t.Fatalf("stale condition = %q, want %q", reviewer.StaleUnreadCondition, bus.ConditionActiveVisible)
+	}
+	sender := directoryActor(t, directory, "implementer")
+	encodedSender, err := json.Marshal(sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sender.OldestUnreadAgeSeconds != nil || strings.Contains(string(encodedSender), "oldest_unread_age_seconds") {
+		t.Fatalf("actor without unread mail exposed an age: %s", encodedSender)
 	}
 
 	condition, err := db.ListConditions(ctx, false, 10)

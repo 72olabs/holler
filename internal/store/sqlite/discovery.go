@@ -374,7 +374,8 @@ func (s *Store) who(ctx context.Context, limit int, includeArchived bool) (bus.A
 		}
 		entry.UnclaimedMessages = count
 		entry.OldestUnreadAt = &oldest
-		entry.OldestUnreadAgeSeconds = int64(age)
+		ageSeconds := int64(age)
+		entry.OldestUnreadAgeSeconds = &ageSeconds
 	}
 	if err := unclaimedRows.Close(); err != nil {
 		return bus.ActorDirectory{}, fmt.Errorf("close actor unclaimed rows: %w", err)
