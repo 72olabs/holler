@@ -32,9 +32,22 @@ daemon-attested harness-instance binding and the new startup behavior.
 
 ## Validation
 
-Release-candidate validation is in progress on the local release branch. The
-release will not be pushed until the full unit, vet, race, sandbox-lab, packaged
-artifact, upgrade, and live connector checks pass.
+The local release candidate passed:
+
+- the full Go test suite, `go vet`, and the race detector;
+- the required executable OpenCode plugin test and a Linux amd64 cross-build;
+- schema-11 to schema-14 migration with queued-mail preservation;
+- all seven isolated certification-lab scenarios, including daemon restart,
+  alias resume, immutable reply routing, and a three-agent/two-thread handoff,
+  with zero orphan processes;
+- checksum, clean build identity, extracted-layout setup discovery, and the same
+  seven scenarios from the packaged release artifact; and
+- packaged CLI smoke coverage for alias preflight, conditions, guarded archival
+  with unread mail, archived discovery, and the read-only bare-harness migration
+  plan.
+
+The branch and artifact remain local until the live connector canary and release
+review are complete.
 
 ---
 
