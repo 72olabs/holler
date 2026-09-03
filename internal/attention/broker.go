@@ -139,6 +139,10 @@ func (b *Broker) Notify(registration bus.Registration, message bus.Message) (str
 	}
 	select {
 	case waiter.result <- waitResult{notice: notice}:
+		// Acceptance consumes this exact parked wait. Remove it while holding
+		// the broker lock so a second notification cannot be accepted into the
+		// channel after the first receiver wakes but before Wait cleans up.
+		delete(b.waiters, key)
 		b.mu.Unlock()
 		return waiter.adapter, true
 	default:

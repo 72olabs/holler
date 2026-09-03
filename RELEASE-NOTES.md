@@ -1,3 +1,34 @@
+# Holler 0.7.1
+
+Holler 0.7.1 hardens Claude's hook-long-poll adapter against duplicate wake
+acceptance and recursive Stop continuations.
+
+## Fixes
+
+- A Claude turn started by an `asyncRewake` notice no longer receives the same
+  unread reference again when its Stop hook rearms. The continuation monitor
+  stays parked and still wakes for later message IDs.
+- A parked attention waiter is now consumed atomically with its first accepted
+  notice. A racing second notification remains retryable until the monitor has
+  actually rearmed instead of being recorded as accepted into an abandoned
+  waiter channel.
+
+## Validation
+
+- Full Go tests, `go vet`, the executable OpenCode plugin behavior tests, and a
+  source build pass.
+- A real Claude Code 2.1.259 MCP startup connected, reconciled its allocated
+  identity, and called `bus_status` successfully.
+- The minimum supported Claude Code 2.1.247 build emitted
+  `stop_hook_active` and passed the same two-wake unavailable-MCP probe.
+- The isolated hard-crash and resume probe delivered only to each successor,
+  preserved the resumed Claude session ID, and left zero orphan monitors.
+- With the Claude MCP intentionally unavailable, two distinct wakes each
+  produced exactly one Stop continuation; after each one Claude remained alive
+  with exactly one hook-long-poll monitor parked.
+
+---
+
 # Holler 0.7.0
 
 Holler 0.7.0 makes session routing explicit and failure states visible while

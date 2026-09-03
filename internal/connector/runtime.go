@@ -216,20 +216,36 @@ func (r *Runtime) SessionEnd(ctx context.Context, config SessionConfig, input io
 	return r.store.ExpireRegistration(ctx, config.Actor, config.RunID, sessionID, "session_end")
 }
 
-func LifecycleSessionID(input io.Reader) (string, error) {
+type LifecycleInput struct {
+	SessionID      string
+	StopHookActive bool
+}
+
+// ParseLifecycleInput extracts the shared session identity and Claude's Stop
+// continuation marker while leaving unrelated harness fields opaque.
+func ParseLifecycleInput(input io.Reader) (LifecycleInput, error) {
 	var payload struct {
-		SessionID    string `json:"session_id"`
-		SessionIDAlt string `json:"sessionId"`
-		ThreadID     string `json:"thread_id"`
+		SessionID      string `json:"session_id"`
+		SessionIDAlt   string `json:"sessionId"`
+		ThreadID       string `json:"thread_id"`
+		StopHookActive bool   `json:"stop_hook_active"`
 	}
 	if err := json.NewDecoder(input).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decode lifecycle input: %w", err)
+		return LifecycleInput{}, fmt.Errorf("decode lifecycle input: %w", err)
 	}
 	sessionID := firstNonEmpty(payload.SessionID, payload.SessionIDAlt, payload.ThreadID)
 	if sessionID == "" {
-		return "", &bus.ValidationError{Field: "session_id", Problem: "is required in lifecycle input"}
+		return LifecycleInput{}, &bus.ValidationError{Field: "session_id", Problem: "is required in lifecycle input"}
 	}
-	return sessionID, nil
+	return LifecycleInput{SessionID: sessionID, StopHookActive: payload.StopHookActive}, nil
+}
+
+func LifecycleSessionID(input io.Reader) (string, error) {
+	payload, err := ParseLifecycleInput(input)
+	if err != nil {
+		return "", err
+	}
+	return payload.SessionID, nil
 }
 
 func (r *Runtime) Notify(ctx context.Context, recipient string, message bus.Message) ([]bus.NotificationAttempt, error) {
