@@ -30,6 +30,9 @@ func TestBrokerRoutesReferenceToExactSession(t *testing.T) {
 	if adapter, accepted := broker.Notify(registration, message); !accepted || adapter != "hook-long-poll" {
 		t.Fatal("exact session did not accept attention notice")
 	}
+	if _, accepted := broker.Notify(registration, bus.Message{ID: "msg-raced"}); accepted {
+		t.Fatal("second notice was accepted into a waiter already consumed by the first notice")
+	}
 	select {
 	case notice := <-result:
 		if notice.MessageID != message.ID || notice.FromActor != "codex" || notice.ThreadID != "thread-1" {

@@ -458,7 +458,7 @@ func TestCLIClaudeMonitorExitsTwoWithReferenceOnlyWake(t *testing.T) {
 	}
 }
 
-func TestCLIClaudeMonitorReconcilesDurableInboxBeforeParking(t *testing.T) {
+func TestCLIClaudeMonitorReconcilesDurableInboxDuringUnrelatedStopContinuation(t *testing.T) {
 	isolateClaudeConnectorConfig(t)
 	socket := startAPIServerWithOptions(t, api.WithAttentionBroker(attention.NewBroker()))
 	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
@@ -484,11 +484,118 @@ func TestCLIClaudeMonitorReconcilesDurableInboxBeforeParking(t *testing.T) {
 	var stdout bytes.Buffer
 	stderrWriter, finishStderr := startPipeCapture(t)
 	exit := run(context.Background(), []string{"monitor", "--harness", "claude", "--wait", "1s"},
-		strings.NewReader(`{"session_id":"session-1"}`), &stdout, stderrWriter)
+		strings.NewReader(`{"session_id":"session-1","stop_hook_active":true}`), &stdout, stderrWriter)
 	_ = stderrWriter.Close()
 	stderr := finishStderr()
 	if exit != 2 || !strings.Contains(stderr, sent.Message.ID) || strings.Contains(stderr, "secret body") {
 		t.Fatalf("exit=%d stderr=%q", exit, stderr)
+	}
+}
+
+func TestCLIClaudeMonitorStopContinuationSuppressesOldWakeButParksForNewWake(t *testing.T) {
+	isolateClaudeConnectorConfig(t)
+	broker := attention.NewBroker()
+	socket := startAPIServerWithOptions(t, api.WithAttentionBroker(broker))
+	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHookLongPoll)
+	t.Setenv("HOLLER_SOCKET", socket)
+	t.Setenv("HOLLER_ACTOR", "claude")
+	t.Setenv("HOLLER_RUN", "claude-run")
+	client, err := api.Dial(context.Background(), socket, api.Identity{Actor: "claude", RunID: "claude-run", Client: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	registration, err := client.RegisterSession(context.Background(), bus.RegistrationRequest{
+		Actor: "claude", RunID: "claude-run", Harness: "claude", AttentionMode: connector.AttentionHookLongPoll,
+		SessionID: "session-1", DeliveryHandle: "session-1", ProjectID: "experiment", Lease: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentRaw := invoke(t, context.Background(), "send", "--socket", socket, "--actor", "observer", "--run", "observer-run",
+		"--to", "claude", "--project", "experiment", "--idempotency-key", "old-wake", "--type", "QUESTION",
+		"--body", `{"text":"old secret"}`)
+	var old bus.SendResult
+	decode(t, sentRaw, &old)
+	var firstStdout bytes.Buffer
+	firstStderrWriter, finishFirstStderr := startPipeCapture(t)
+	firstExit := run(context.Background(), []string{"monitor", "--harness", "claude", "--wait", "1s"},
+		strings.NewReader(`{"session_id":"session-1","stop_hook_active":false}`), &firstStdout, firstStderrWriter)
+	_ = firstStderrWriter.Close()
+	firstStderr := finishFirstStderr()
+	if firstExit != 2 || !strings.Contains(firstStderr, old.Message.ID) {
+		t.Fatalf("first monitor exit=%d stderr=%q", firstExit, firstStderr)
+	}
+
+	type monitorResult struct {
+		exit   int
+		stderr string
+	}
+	done := make(chan monitorResult, 1)
+	stderrWriter, finishStderr := startPipeCapture(t)
+	go func() {
+		var stdout bytes.Buffer
+		exit := run(context.Background(), []string{"monitor", "--harness", "claude", "--wait", "1s"},
+			strings.NewReader(`{"session_id":"session-1","stop_hook_active":true}`), &stdout, stderrWriter)
+		_ = stderrWriter.Close()
+		done <- monitorResult{exit: exit, stderr: finishStderr()}
+	}()
+
+	oldNotice := bus.Message{ID: old.Message.ID, ThreadID: "thread-old", FromActor: "observer", Type: "QUESTION", DeliveryRequest: bus.DeliveryWake}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, accepted := broker.Notify(registration, oldNotice); accepted {
+			break
+		}
+		select {
+		case result := <-done:
+			t.Fatalf("monitor exited for already-surfaced wake: %+v", result)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("continuation monitor did not park")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	newNotice := bus.Message{ID: "msg-new", ThreadID: "thread-new", FromActor: "observer", Type: "QUESTION", DeliveryRequest: bus.DeliveryWake}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if _, accepted := broker.Notify(registration, newNotice); accepted {
+			break
+		}
+		select {
+		case result := <-done:
+			t.Fatalf("monitor exited before new wake: %+v", result)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("continuation monitor did not re-park after suppressing old wake")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case result := <-done:
+		if result.exit != 2 || !strings.Contains(result.stderr, newNotice.ID) || strings.Contains(result.stderr, old.Message.ID) {
+			t.Fatalf("monitor result = %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation monitor did not wake for new message")
+	}
+
+	// A normal user turn ends the continuation chain. It must clear every
+	// remembered ID so an unread message can be surfaced again rather than
+	// remaining muted for the rest of the session.
+	thirdCtx, cancelThird := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancelThird()
+	var thirdStdout bytes.Buffer
+	thirdStderrWriter, finishThirdStderr := startPipeCapture(t)
+	thirdExit := run(thirdCtx, []string{"monitor", "--harness", "claude", "--wait", "100ms"},
+		strings.NewReader(`{"session_id":"session-1","stop_hook_active":false}`), &thirdStdout, thirdStderrWriter)
+	_ = thirdStderrWriter.Close()
+	thirdStderr := finishThirdStderr()
+	if thirdExit != 2 || !strings.Contains(thirdStderr, old.Message.ID) {
+		t.Fatalf("fresh-turn monitor exit=%d stderr=%q", thirdExit, thirdStderr)
 	}
 }
 

@@ -14,6 +14,16 @@ import (
 	store "github.com/72olabs/holler/internal/store/sqlite"
 )
 
+func TestParseLifecycleInputIncludesClaudeStopState(t *testing.T) {
+	input, err := connector.ParseLifecycleInput(strings.NewReader(`{"session_id":"session-1","stop_hook_active":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.SessionID != "session-1" || !input.StopHookActive {
+		t.Fatalf("lifecycle input = %+v", input)
+	}
+}
+
 func TestSessionStartRegistersAndHydratesWithoutConsuming(t *testing.T) {
 	ctx := context.Background()
 	db := openStore(t)

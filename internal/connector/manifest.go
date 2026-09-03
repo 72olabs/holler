@@ -9,7 +9,7 @@ import (
 	"github.com/72olabs/holler/internal/mcp"
 )
 
-const ConnectorVersion = "0.7.0"
+const ConnectorVersion = "0.7.1"
 
 type ReadinessState string
 
@@ -111,12 +111,12 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:f3391c0bd0b7952354d499eada53bc6f0b3cedfcec064ec6d5afbbef3f56d754"
+		base.PackageHash = "sha256:a2a5be5c714fecd74b54666a709347024313542f7e54c7ea3138b7ff6c9b2323"
 	case "claude":
 		base.PluginID = DefaultClaudePluginID
 		base.ClientCommand = "claude"
 		base.MinimumClient = "2.1.247"
-		base.TestedClient = "2.1.258"
+		base.TestedClient = "2.1.259"
 		base.LifecycleEvents = []string{"startup", "resume", "clear", "compact", "fork", "stop", "stop_failure", "end"}
 		base.NotificationMode = AttentionHookLongPoll
 		base.NotificationFallback = "startup-only"
@@ -127,7 +127,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:385dc5d5bc08c3a54a5d049e59fb0ed9d7214072b125edd1951422747508ebfd"
+		base.PackageHash = "sha256:106278dd9fef3c3c920519646762cce204b40d826e3e4a4f5568fa2a3c19ce46"
 	case "opencode":
 		base.PluginID = DefaultOpenCodePluginID
 		base.ClientCommand = "opencode"
