@@ -291,6 +291,7 @@ func (s *Store) backupBeforeMigration(ctx context.Context, conn *sql.Conn, curre
 	if closeErr != nil {
 		return "", migrationBackupError(target, fmt.Errorf("close temporary backup: %w", closeErr))
 	}
+	published := false
 	if err := os.Link(temporary, target); err != nil {
 		if !errors.Is(err, os.ErrExist) {
 			return "", migrationBackupError(target, fmt.Errorf("publish backup atomically: %w", err))
@@ -298,12 +299,31 @@ func (s *Store) backupBeforeMigration(ctx context.Context, conn *sql.Conn, curre
 		if err := verifyMigrationBackup(ctx, target, current); err != nil {
 			return "", migrationBackupError(target, fmt.Errorf("concurrent backup is invalid: %w", err))
 		}
+	} else {
+		published = true
+	}
+	if published {
+		if err := syncDirectory(filepath.Dir(target)); err != nil {
+			return "", migrationBackupError(target, fmt.Errorf("sync published backup directory: %w", err))
+		}
 	}
 	if err := os.Remove(temporary); err != nil {
 		return "", migrationBackupError(target, fmt.Errorf("remove temporary backup link: %w", err))
 	}
+	if err := syncDirectory(filepath.Dir(target)); err != nil {
+		return "", migrationBackupError(target, fmt.Errorf("sync backup directory after cleanup: %w", err))
+	}
 	removeTemporary = false
 	return target, nil
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func verifyMigrationBackup(ctx context.Context, path string, expectedVersion int) error {
