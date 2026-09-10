@@ -65,7 +65,8 @@ attachment.
   must fall back truthfully to `startup-only`; Holler cannot detect policy
   denial from its stdout write and must not report `READY` without host evidence.
 - Existing hook-long-poll and startup-only behavior must remain unchanged.
-- Host-injected wake text is Holler-generated, fixed, ID-only, and explicitly
+- Host-injected wake text is Holler-generated, fixed, contains no message data,
+  and is explicitly
   labeled synthetic/agent-originated in both the SDK input and T3 UI. It must
   never be rendered or persisted as human-authored input.
 
@@ -150,22 +151,46 @@ Holler changes:
 
 - Add a small host-facing attention wait API/CLI that attaches to one exact
   actor, run, and session, blocks for an attention notice, and emits structured
-  JSON containing only the durable message ID. It must never claim messages,
-  inject content, or manufacture a registration after startup grace.
-- Require explicit daemon-proven attachment identity. Do not allow an arbitrary
-  session ID alone to select another actor's waiter. For the proof of concept,
-  T3 should generate a unique launch handle shared with SessionStart and the
-  waiter; a later protocol may replace this with an opaque attachment token.
+  JSON containing only `{message_id}`. This is a strict projection of the
+  broker's internal `AttentionNotice`: thread, sender, type, delivery request,
+  and all other peer-controlled fields must not cross the host API. The waiter
+  must never claim messages, inject content, or manufacture a registration
+  after startup grace.
+- Treat the launch handle as correlation only, never as authority. It is present
+  in Claude's environment and can therefore be read by model-spawned processes.
+  When a trusted lifecycle hook or MCP attachment binds the harness instance,
+  record the daemon-verified Claude PID and process start time with the exact
+  actor/run/session registration.
+- On host attach, use the handle only to find the candidate registration, then
+  verify the connecting peer's PID and start time through the daemon. That
+  process must be a strict ancestor of the recorded Claude process. A sibling,
+  Claude itself, or a descendant such as model-spawned Bash must be rejected
+  even when it presents the correct handle. Include start times in the proof so
+  PID reuse fails closed.
+- A later opaque attachment token may be minted only after this host ancestry
+  proof succeeds. It must be bound to the connection and must never be placed
+  in Claude's environment.
 - Make cancellation authoritative: when T3 closes the query or waiter pipe, the
-  wait detaches immediately and presence cannot remain live by lease renewal.
+  host attachment detaches immediately. A host attachment never creates,
+  renews, or extends registration presence; the MCP heartbeat remains the
+  registration lease authority.
 
 T3 changes:
 
 - Start one waiter with the long-lived Claude query, cancel it before or with
   `query.close()`, and restart it only after the exact session reattaches.
-- On a notice, enqueue exactly one fixed input such as `Holler message <id> is
-  available; call bus_inbox`, marked synthetic with agent/system provenance.
-  Render a system event in T3; never display it as a user message.
+- On a notice, enqueue the fixed input `Holler has unread messages; call
+  bus_inbox`. Keep the message ID only in host state for deduplication; do not
+  put it or any body, sender, type, or thread in the SDK input.
+- Construct the SDK input with `isSynthetic: true`,
+  `origin: {kind: "peer", from: "holler"}`, no `fromMode`,
+  `priority: "later"`, and `shouldQuery: true`. The fixed `from` value names
+  the integration, not the actual sending actor. Preserve this provenance
+  after query resume and render only a system event in T3, never a user message.
+- Maintain at most one pending synthetic wake per session. Coalesce additional
+  notices while it is pending, and inject at most once per message ID for the
+  lifetime of one attachment as a loop guard. The later inbox drain, not the
+  number of injected frames, determines the work to process.
 - While Claude is busy, queue and coalesce wake hints without claiming or
   dropping durable messages. A subsequent `bus_inbox` call remains the only
   authority for what Claude processes.
@@ -180,10 +205,11 @@ The output pipe is not sufficient proof that Claude is alive. A shell or `cat`
 process can inherit the descriptor, become reparented to launchd, and keep a
 monitor renewing a phantom registration after the harness exits.
 
-- Bind the monitor to the verified Claude harness ancestor observed during API
-  attachment, expose that process identity without trusting caller-supplied
-  metadata, and cancel the monitor when that ancestor exits. On macOS prefer a
-  kqueue `NOTE_EXIT` watch; retain a bounded portable polling fallback.
+- Bind the monitor and host attachment to the verified Claude process identity
+  recorded during API attachment, expose that identity without trusting
+  caller-supplied metadata, and cancel them when that process exits. Use one
+  shared process-liveness primitive: on macOS prefer a kqueue `NOTE_EXIT`
+  watch; retain a bounded portable polling fallback.
 - Do not let a standalone monitor create a replacement registration after
   startup grace unless daemon-verified lifecycle-hook provenance authorizes the
   fallback. A host attention waiter never self-registers.
@@ -239,9 +265,12 @@ the only processing authority.
 
 Holler cannot infer Channel readiness from a successful stdout write. T3 must
 report successful activation of the exact configured Holler server and Holler
-must observe the matching live attachment. If the SDK cannot distinguish policy
-denial from activation, report wake as unverified/off until a canary event is
-claimed; never infer `READY`.
+must observe the matching live attachment. For `host-injected`, `READY` requires
+the daemon to have admitted a live host connection with reverse-ancestry proof
+for the exact registration; knowing a launch handle or starting a waiter is not
+readiness evidence. If the SDK cannot distinguish Channel policy denial from
+activation, report wake as unverified/off until a canary event is claimed; never
+infer `READY`.
 
 Keep detailed states internal. Present one user concept with one remediation:
 
@@ -358,14 +387,32 @@ small public fix; T3 process management is not assumed.
 
 - The host waiter cannot attach with a stale actor, run, session, launch
   handle, or ended registration.
+- A model-spawned Bash process presenting the correct launch handle is rejected;
+  the T3 process that is a strict ancestor of the recorded Claude PID is
+  admitted. Reusing the same PID with a different process start time is
+  rejected.
+- The launch handle performs lookup only. Any opaque token is minted after the
+  ancestry check, remains outside Claude's environment, and expires with the
+  host connection.
+- The public host notice is exactly `{message_id}`. Broker thread, sender, type,
+  delivery-request, and message-body fields are absent even when populated with
+  hostile values.
 - Closing the T3 query cancels the waiter before readiness can renew; keeping
-  stdout open cannot manufacture or extend presence.
+  stdout open cannot manufacture or extend presence. The host attachment never
+  heartbeats or renews the registration lease.
 - Kill Claude while the waiter's output pipe remains open. The waiter exits and
-  the exact registration becomes non-live within the bounded teardown window.
-- An idle query receives one fixed, ID-only synthetic input, claims and
+  the exact registration becomes non-live through the shared `NOTE_EXIT`
+  watcher within the bounded teardown window.
+- An idle query receives one fixed, data-free synthetic input, claims and
   acknowledges the corresponding inbox item, and produces one agent turn.
+- The SDK frame has `isSynthetic: true`, fixed peer origin `holler`, no
+  `fromMode`, `priority: "later"`, and `shouldQuery: true`. Those fields remain
+  non-human after query resume, and T3 records a system event rather than a user
+  message.
 - Busy queries queue multiple notices without interruption; the next synthetic
-  turn drains durable inbox state once with no loss, replay, or reordering.
+  turn drains durable inbox state once with no loss, replay, or reordering. At
+  most one synthetic wake is pending per session, and each message ID causes at
+  most one injection per attachment.
 - T3 renders the wake as a system/agent event and the transcript never labels
   it human-authored. Peer body, sender, type, and thread metadata do not appear
   in the injected SDK input.
@@ -373,6 +420,8 @@ small public fix; T3 process management is not assumed.
   durable messages and never leave duplicate waiters.
 - All real-client canaries use a temporary socket and database. No experiment
   may register actors or conditions in the operator's production daemon.
+  Teardown uses exact existing identities and must not allocate replacement
+  actors while attempting cleanup.
 
 ### Security tests
 
