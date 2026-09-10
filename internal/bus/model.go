@@ -15,34 +15,50 @@ const SchemaVersion = 1
 const MaxBodyBytes = 1 << 20
 
 var (
-	ErrInvalid              = errors.New("invalid request")
-	ErrNotFound             = errors.New("not found")
-	ErrNoMessage            = errors.New("no claimable message")
-	ErrAttentionWaiterBusy  = errors.New("attention waiter already active")
-	ErrAttentionUnavailable = errors.New("attention waiting is unavailable")
-	ErrSessionEnded         = errors.New("session ended")
-	ErrPresenceSuperseded   = errors.New("attention presence superseded")
-	ErrRegistrationExpired  = errors.New("registration expired")
-	ErrIdempotencyConflict  = errors.New("idempotency key reused for different message")
-	ErrLeaseTokenMismatch   = errors.New("lease token mismatch")
-	ErrLeaseExpired         = errors.New("lease expired")
-	ErrDeliveryTerminal     = errors.New("delivery is already terminal")
-	ErrActorLive            = errors.New("actor already has a live presence")
-	ErrBindingStale         = errors.New("actor binding is stale: this run was superseded and cannot reclaim the actor")
-	ErrContinuityConflict   = errors.New("continuity handles resolve to different actors")
-	ErrBindingReassigned    = errors.New("provisional actor binding was reassigned")
-	ErrAdoptionConflict     = errors.New("actor inbox was already adopted by another actor")
-	ErrAdoptionBusy         = errors.New("actor inbox has an active claim")
-	ErrActorNotLive         = errors.New("adopting actor has no live presence")
-	ErrRunNotLive           = errors.New("adopting run has no live presence")
-	ErrActorAdopted         = errors.New("actor identity was permanently adopted")
-	ErrAliasConflict        = errors.New("actor and alias namespaces conflict")
-	ErrAliasNotFound        = errors.New("actor alias not found")
-	ErrAliasTombstoned      = errors.New("actor alias was removed and is reserved")
-	ErrAliasTargetUnknown   = errors.New("alias target is not a known actor")
-	ErrDatabaseOwned        = errors.New("another hollerd already owns this database")
-	ErrActorArchived        = errors.New("actor is archived")
+	ErrInvalid                  = errors.New("invalid request")
+	ErrNotFound                 = errors.New("not found")
+	ErrNoMessage                = errors.New("no claimable message")
+	ErrAttentionWaiterBusy      = errors.New("attention waiter already active")
+	ErrAttentionUnavailable     = errors.New("attention waiting is unavailable")
+	ErrSessionEnded             = errors.New("session ended")
+	ErrPresenceSuperseded       = errors.New("attention presence superseded")
+	ErrRegistrationExpired      = errors.New("registration expired")
+	ErrIdempotencyConflict      = errors.New("idempotency key reused for different message")
+	ErrLeaseTokenMismatch       = errors.New("lease token mismatch")
+	ErrLeaseExpired             = errors.New("lease expired")
+	ErrDeliveryTerminal         = errors.New("delivery is already terminal")
+	ErrActorLive                = errors.New("actor already has a live presence")
+	ErrBindingStale             = errors.New("actor binding is stale: this run was superseded and cannot reclaim the actor")
+	ErrContinuityConflict       = errors.New("continuity handles resolve to different actors")
+	ErrBindingReassigned        = errors.New("provisional actor binding was reassigned")
+	ErrIdentityRebound          = errors.New("requested identity does not match the connection-bound identity")
+	ErrHostAttentionUnavailable = errors.New("host attention is unavailable")
+	ErrAdoptionConflict         = errors.New("actor inbox was already adopted by another actor")
+	ErrAdoptionBusy             = errors.New("actor inbox has an active claim")
+	ErrActorNotLive             = errors.New("adopting actor has no live presence")
+	ErrRunNotLive               = errors.New("adopting run has no live presence")
+	ErrActorAdopted             = errors.New("actor identity was permanently adopted")
+	ErrAliasConflict            = errors.New("actor and alias namespaces conflict")
+	ErrAliasNotFound            = errors.New("actor alias not found")
+	ErrAliasTombstoned          = errors.New("actor alias was removed and is reserved")
+	ErrAliasTargetUnknown       = errors.New("alias target is not a known actor")
+	ErrDatabaseOwned            = errors.New("another hollerd already owns this database")
+	ErrActorArchived            = errors.New("actor is archived")
 )
+
+type HostAttentionUnavailableError struct {
+	ReasonCode string
+	Problem    string
+}
+
+func (e *HostAttentionUnavailableError) Error() string {
+	if strings.TrimSpace(e.Problem) == "" {
+		return ErrHostAttentionUnavailable.Error()
+	}
+	return ErrHostAttentionUnavailable.Error() + ": " + e.Problem
+}
+
+func (e *HostAttentionUnavailableError) Unwrap() error { return ErrHostAttentionUnavailable }
 
 type NameMode string
 
@@ -346,29 +362,51 @@ type AliasPreflight struct {
 }
 
 type Registration struct {
-	Actor          string    `json:"actor"`
-	RunID          string    `json:"run_id"`
-	Harness        string    `json:"harness"`
-	AttentionMode  string    `json:"attention_mode,omitempty"`
-	SessionID      string    `json:"session_id"`
-	DeliveryHandle string    `json:"delivery_handle"`
-	ProjectID      string    `json:"project_id"`
-	WorkingDir     string    `json:"working_directory,omitempty"`
-	Epoch          int64     `json:"epoch"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	Actor                 string    `json:"actor"`
+	RunID                 string    `json:"run_id"`
+	Harness               string    `json:"harness"`
+	AttentionMode         string    `json:"attention_mode,omitempty"`
+	SessionID             string    `json:"session_id"`
+	DeliveryHandle        string    `json:"delivery_handle"`
+	ProjectID             string    `json:"project_id"`
+	WorkingDir            string    `json:"working_directory,omitempty"`
+	Epoch                 int64     `json:"epoch"`
+	UpdatedAt             time.Time `json:"updated_at"`
+	LeaseExpiresAt        time.Time `json:"lease_expires_at"`
+	HostAttentionAdmitted bool      `json:"-"`
 }
 
 type RegistrationRequest struct {
-	Actor          string        `json:"actor,omitempty"`
-	RunID          string        `json:"run_id,omitempty"`
-	Harness        string        `json:"harness"`
-	AttentionMode  string        `json:"attention_mode,omitempty"`
-	SessionID      string        `json:"session_id"`
-	DeliveryHandle string        `json:"delivery_handle"`
-	ProjectID      string        `json:"project_id"`
-	WorkingDir     string        `json:"working_directory,omitempty"`
-	Lease          time.Duration `json:"lease"`
+	Actor          string                `json:"actor,omitempty"`
+	RunID          string                `json:"run_id,omitempty"`
+	Harness        string                `json:"harness"`
+	AttentionMode  string                `json:"attention_mode,omitempty"`
+	SessionID      string                `json:"session_id"`
+	DeliveryHandle string                `json:"delivery_handle"`
+	ProjectID      string                `json:"project_id"`
+	WorkingDir     string                `json:"working_directory,omitempty"`
+	Lease          time.Duration         `json:"lease"`
+	HostAttention  *HostAttentionBinding `json:"-"`
+}
+
+// ProcessIdentity is daemon-derived OS process evidence. It is never accepted
+// from the public registration protocol.
+type ProcessIdentity struct {
+	PID              int
+	StartFingerprint string
+}
+
+// HostAttentionBinding persists the exact Claude child and direct host process
+// associated with one host-injected registration. HarnessHandle is used only to
+// verify the registration against the daemon-owned harness-instance binding.
+type HostAttentionBinding struct {
+	HarnessHandle string
+	Harness       ProcessIdentity
+	Host          ProcessIdentity
+	Actor         string
+	RunID         string
+	SessionID     string
+	Admitted      bool
 }
 
 // ActorProfile is model-authored discovery metadata. It is descriptive only:

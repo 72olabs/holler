@@ -295,6 +295,9 @@ func (r *Runtime) Notify(ctx context.Context, recipient string, message bus.Mess
 			if registration.AttentionMode == AttentionStartupOnly {
 				attempt.Result = "unsupported"
 				attempt.Detail = "Claude session selected startup-only attention"
+			} else if registration.AttentionMode == AttentionHostInjected && !registration.HostAttentionAdmitted {
+				attempt.Result = "unsupported"
+				attempt.Detail = "experimental Claude host attention has never admitted its host"
 			} else if r.claude == nil {
 				attempt.Result = "unsupported"
 				attempt.Detail = "Claude attention broker is unavailable"

@@ -24,7 +24,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const migrationVersion = 14
+const migrationVersion = 15
 
 const (
 	migrationRetryWindow = 5 * time.Second
@@ -33,9 +33,11 @@ const (
 )
 
 type Store struct {
-	db    *sql.DB
-	now   func() time.Time
-	newID func(string) (string, error)
+	db                  *sql.DB
+	path                string
+	migrationBackupPath string
+	now                 func() time.Time
+	newID               func(string) (string, error)
 }
 
 type Option func(*Store)
@@ -84,7 +86,7 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	// all contenders deadlock until their retry windows expire.
 	db.SetMaxIdleConns(0)
 
-	store := &Store{db: db, now: time.Now, newID: randomID}
+	store := &Store{db: db, path: abs, now: time.Now, newID: randomID}
 	for _, option := range options {
 		option(store)
 	}
@@ -173,6 +175,20 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = 100`); err != nil {
 		return fmt.Errorf("configure migration busy timeout: %w", err)
 	}
+	current, initialized, err := migrationState(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if current > migrationVersion {
+		return fmt.Errorf("database schema version %d is newer than supported version %d", current, migrationVersion)
+	}
+	if initialized && current < migrationVersion && s.migrationBackupPath == "" {
+		backupPath, err := s.backupBeforeMigration(ctx, conn, current)
+		if err != nil {
+			return err
+		}
+		s.migrationBackupPath = backupPath
+	}
 	// The advisory flock serializes cooperating Holler processes. BEGIN
 	// IMMEDIATE remains a second ownership boundary for non-Holler SQLite
 	// writers and filesystems that do not preserve local flock semantics.
@@ -195,6 +211,150 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	committed = true
 	return nil
+}
+
+func migrationState(ctx context.Context, conn *sql.Conn) (current int, initialized bool, err error) {
+	var migrationsTable int
+	if err := conn.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&migrationsTable); err != nil {
+		return 0, false, fmt.Errorf("inspect schema migrations: %w", err)
+	}
+	if migrationsTable != 0 {
+		initialized = true
+		if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
+			return 0, false, fmt.Errorf("read schema version: %w", err)
+		}
+		return current, initialized, nil
+	}
+	var tables int
+	if err := conn.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&tables); err != nil {
+		return 0, false, fmt.Errorf("inspect legacy schema: %w", err)
+	}
+	return 0, tables != 0, nil
+}
+
+func (s *Store) backupBeforeMigration(ctx context.Context, conn *sql.Conn, current int) (string, error) {
+	timestamp := s.now().UTC().Format("20060102T150405.000000000Z")
+	target := fmt.Sprintf("%s.pre-v%d.%s.bak", s.path, migrationVersion, timestamp)
+	if _, err := os.Lstat(target); err == nil {
+		return "", migrationBackupError(target, errors.New("timestamped backup path already exists"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", migrationBackupError(target, fmt.Errorf("inspect backup path: %w", err))
+	}
+
+	temporaryDirectory, err := os.MkdirTemp(filepath.Dir(s.path), "."+filepath.Base(target)+".tmp-")
+	if err != nil {
+		return "", migrationBackupError(target, fmt.Errorf("create private temporary backup directory: %w", err))
+	}
+	if err := os.Chmod(temporaryDirectory, 0o700); err != nil {
+		_ = os.Remove(temporaryDirectory)
+		return "", migrationBackupError(target, fmt.Errorf("secure temporary backup directory: %w", err))
+	}
+	temporary := filepath.Join(temporaryDirectory, "snapshot.sqlite3")
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = os.Remove(temporary)
+			_ = os.Remove(temporaryDirectory)
+		}
+	}()
+
+	quoted := "'" + strings.ReplaceAll(temporary, "'", "''") + "'"
+	if _, err := conn.ExecContext(ctx, `VACUUM INTO `+quoted); err != nil {
+		return "", migrationBackupError(target, fmt.Errorf("SQLite VACUUM INTO failed: %w", err))
+	}
+	if err := os.Chmod(temporary, 0o600); err != nil {
+		return "", migrationBackupError(target, fmt.Errorf("secure temporary backup: %w", err))
+	}
+	if err := verifyMigrationBackup(ctx, temporary, current); err != nil {
+		return "", migrationBackupError(target, err)
+	}
+	backupFile, err := os.Open(temporary)
+	if err != nil {
+		return "", migrationBackupError(target, fmt.Errorf("open temporary backup for sync: %w", err))
+	}
+	syncErr := backupFile.Sync()
+	closeErr := backupFile.Close()
+	if syncErr != nil {
+		return "", migrationBackupError(target, fmt.Errorf("sync temporary backup: %w", syncErr))
+	}
+	if closeErr != nil {
+		return "", migrationBackupError(target, fmt.Errorf("close temporary backup: %w", closeErr))
+	}
+	published := false
+	if err := os.Link(temporary, target); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return "", migrationBackupError(target, fmt.Errorf("publish backup atomically: %w", err))
+		}
+		if err := verifyMigrationBackup(ctx, target, current); err != nil {
+			return "", migrationBackupError(target, fmt.Errorf("concurrent backup is invalid: %w", err))
+		}
+	} else {
+		published = true
+	}
+	if published {
+		if err := syncDirectory(filepath.Dir(target)); err != nil {
+			return "", migrationBackupError(target, fmt.Errorf("sync published backup directory: %w", err))
+		}
+	}
+	if err := os.Remove(temporary); err != nil {
+		return "", migrationBackupError(target, fmt.Errorf("remove temporary backup link: %w", err))
+	}
+	if err := os.Remove(temporaryDirectory); err != nil {
+		return "", migrationBackupError(target, fmt.Errorf("remove temporary backup directory: %w", err))
+	}
+	if err := syncDirectory(filepath.Dir(target)); err != nil {
+		return "", migrationBackupError(target, fmt.Errorf("sync backup directory after cleanup: %w", err))
+	}
+	removeTemporary = false
+	return target, nil
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
+func verifyMigrationBackup(ctx context.Context, path string, expectedVersion int) error {
+	dsn := (&url.URL{Scheme: "file", Path: path}).String() + "?mode=ro"
+	backup, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("open backup verification database: %w", err)
+	}
+	defer backup.Close()
+	var check string
+	if err := backup.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&check); err != nil {
+		return fmt.Errorf("run backup quick_check: %w", err)
+	}
+	if check != "ok" {
+		return fmt.Errorf("backup quick_check returned %q", check)
+	}
+	if expectedVersion > 0 {
+		var version int
+		if err := backup.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+			return fmt.Errorf("read backup schema version: %w", err)
+		}
+		if version != expectedVersion {
+			return fmt.Errorf("backup schema version is %d, expected %d", version, expectedVersion)
+		}
+	}
+	return nil
+}
+
+func migrationBackupError(path string, cause error) error {
+	detail := ""
+	var stats unix.Statfs_t
+	if err := unix.Statfs(filepath.Dir(path), &stats); err == nil {
+		detail = fmt.Sprintf("; filesystem free_bytes=%d", uint64(stats.Bavail)*uint64(stats.Bsize))
+	}
+	return fmt.Errorf("create pre-migration backup %s%s: %w", path, detail, cause)
 }
 
 func (s *Store) retainExclusiveLock(ctx context.Context) error {
@@ -226,21 +386,6 @@ func (s *Store) retainExclusiveLock(ctx context.Context) error {
 }
 
 func (s *Store) applyMigrations(ctx context.Context, conn *sql.Conn) error {
-	var migrationsTable int
-	if err := conn.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM sqlite_master
-		WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&migrationsTable); err != nil {
-		return fmt.Errorf("inspect schema migrations: %w", err)
-	}
-	var current int
-	if migrationsTable != 0 {
-		if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
-			return fmt.Errorf("read schema version: %w", err)
-		}
-		if current > migrationVersion {
-			return fmt.Errorf("database schema version %d is newer than supported version %d", current, migrationVersion)
-		}
-	}
 	if _, err := conn.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
@@ -255,6 +400,7 @@ func (s *Store) applyMigrations(ctx context.Context, conn *sql.Conn) error {
 		{"registrations", "working_directory", "working_directory TEXT NOT NULL DEFAULT ''"},
 		{"actor_allocations", "provisional", "provisional INTEGER NOT NULL DEFAULT 0"},
 		{"messages", "requested_recipients_json", "requested_recipients_json BLOB"},
+		{"host_attention_bindings", "admitted_at_ns", "admitted_at_ns INTEGER"},
 	} {
 		hasColumn, err := columnExists(ctx, conn, addition.table, addition.column)
 		if err != nil {

@@ -50,3 +50,16 @@ func TestRPCErrorContextDoesNotDuplicateSentinelText(t *testing.T) {
 		t.Fatalf("decoded error = %q, want %q", got, want)
 	}
 }
+
+func TestIdentityLookalikeRPCErrorIsNotMarkedAsLocalRebind(t *testing.T) {
+	decoded := errorFromRPC(&RPCError{
+		Code:    "invalid_request",
+		Message: "actor: does not match the authenticated API session",
+	})
+	if !errors.Is(decoded, bus.ErrInvalid) {
+		t.Fatalf("decoded error = %v, want ErrInvalid", decoded)
+	}
+	if errors.Is(decoded, bus.ErrIdentityRebound) {
+		t.Fatalf("daemon-returned error gained local identity marker: %v", decoded)
+	}
+}

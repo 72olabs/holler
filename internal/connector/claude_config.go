@@ -11,6 +11,7 @@ import (
 
 const (
 	AttentionHookLongPoll = "hook-long-poll"
+	AttentionHostInjected = "host-injected"
 	AttentionStartupOnly  = "startup-only"
 )
 
@@ -35,6 +36,8 @@ func ValidateClaudeAttentionMode(mode string) error {
 	switch strings.TrimSpace(mode) {
 	case AttentionHookLongPoll, AttentionStartupOnly:
 		return nil
+	case AttentionHostInjected:
+		return fmt.Errorf("unsupported Claude attention mode %q in the public connector", mode)
 	default:
 		return fmt.Errorf("unsupported Claude attention mode %q (expected hook-long-poll or startup-only)", mode)
 	}

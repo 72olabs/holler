@@ -68,10 +68,23 @@ func (s *Store) DeliveryReceipts(ctx context.Context, message bus.Message) ([]bu
 		} else {
 			receipt.AttentionCapability = "enabled"
 			receipt.AttentionAttachment = "attached"
-			if enabled.Harness == "claude" && enabled.AttentionMode == "hook-long-poll" {
-				receipt.AttentionAttachment = "reconnecting"
-				receipt.AttentionReason = "monitor_reconnecting"
-				receipt.AttentionDetail = "Claude attention is configured; the active monitor attachment is checked by the daemon"
+			if enabled.Harness == "claude" &&
+				(enabled.AttentionMode == "hook-long-poll" || enabled.AttentionMode == "host-injected") {
+				if enabled.AttentionMode == "host-injected" && !enabled.HostAttentionAdmitted {
+					receipt.AttentionCapability = "integration_missing"
+					receipt.AttentionAttachment = "unavailable"
+					receipt.AttentionReason = "host_not_attached"
+					receipt.AttentionDetail = "experimental Claude host attention has never admitted its host; the message remains durable"
+					receipt.SenderAction = "inform_operator"
+				} else if enabled.AttentionMode == "host-injected" {
+					receipt.AttentionAttachment = "reconnecting"
+					receipt.AttentionReason = "host_reconnecting"
+					receipt.AttentionDetail = "Claude host attention is configured; the admitted host attachment is checked by the daemon"
+				} else {
+					receipt.AttentionAttachment = "reconnecting"
+					receipt.AttentionReason = "monitor_reconnecting"
+					receipt.AttentionDetail = "Claude attention is configured; the active monitor attachment is checked by the daemon"
+				}
 			}
 		}
 		applyAttentionCondition(&receipt, conditionReason, conditionSummary)
@@ -161,7 +174,11 @@ func applyAttentionCondition(receipt *bus.DeliveryReceipt, reason, summary strin
 	default:
 		receipt.AttentionCapability = "integration_missing"
 	}
-	receipt.AttentionAttachment = "detached"
+	if reason == "host_not_attached" {
+		receipt.AttentionAttachment = "unavailable"
+	} else {
+		receipt.AttentionAttachment = "detached"
+	}
 	receipt.AttentionReason = reason
 	receipt.AttentionDetail = summary
 	receipt.SenderAction = "inform_operator"

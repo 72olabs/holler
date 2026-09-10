@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,6 +101,228 @@ func TestMCPQuestionClaimAckRoundTrip(t *testing.T) {
 	if got := nestedNumber(t, responses[1], "result", "structuredContent", "unread"); got != 0 {
 		t.Fatalf("unread after ack = %v", got)
 	}
+}
+
+func TestMCPAdvertisesClaudeChannelOnlyWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, test := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "default"},
+		{name: "explicitly enabled", enabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, err := mcp.New(db, mcp.Config{
+				Actor: "reviewer", RunID: "reviewer-run", ProjectID: "experiment",
+				EnableClaudeChannel: test.enabled,
+			})
+			if err != nil {
+				t.Fatalf("new MCP server: %v", err)
+			}
+			responses := exchange(t, server,
+				request(1, "initialize", map[string]interface{}{"protocolVersion": "2024-11-05"}),
+			)
+			result := nestedValue(t, responses[0], "result").(map[string]interface{})
+			capabilities := result["capabilities"].(map[string]interface{})
+			experimental, advertised := capabilities["experimental"]
+			if !test.enabled {
+				if advertised {
+					t.Fatalf("default initialization advertised experimental capabilities: %+v", experimental)
+				}
+				if _, exists := result["instructions"]; exists {
+					t.Fatalf("default initialization returned Channel instructions: %+v", result)
+				}
+				return
+			}
+
+			channelCapabilities := experimental.(map[string]interface{})
+			if _, exists := channelCapabilities["claude/channel"]; !exists {
+				t.Fatalf("Channel capability missing: %+v", channelCapabilities)
+			}
+			if permission, exists := channelCapabilities["claude/channel/permission"]; exists {
+				t.Fatalf("Holler must never advertise Channel permission relay: %+v", permission)
+			}
+			instructions, ok := result["instructions"].(string)
+			if !ok || !strings.Contains(instructions, "bus_inbox") || !strings.Contains(instructions, "bus_ack") {
+				t.Fatalf("Channel instructions = %#v", result["instructions"])
+			}
+		})
+	}
+}
+
+func TestMCPNegotiatesOnlySupportedProtocolVersions(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, test := range []struct {
+		name      string
+		requested string
+		channel   bool
+		want      string
+	}{
+		{name: "released Codex revision", requested: "2025-03-26", want: "2025-03-26"},
+		{name: "released Claude revision", requested: "2025-06-18", want: "2025-06-18"},
+		{name: "future default mode", requested: "2026-07-28", want: "2024-11-05"},
+		{name: "future Channel mode", requested: "2026-07-28", channel: true, want: "2024-11-05"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, err := mcp.New(db, mcp.Config{
+				Actor: "reviewer", RunID: "reviewer-run", ProjectID: "experiment",
+				EnableClaudeChannel: test.channel,
+			})
+			if err != nil {
+				t.Fatalf("new MCP server: %v", err)
+			}
+			responses := exchange(t, server,
+				request(1, "initialize", map[string]interface{}{"protocolVersion": test.requested}),
+			)
+			if got := nestedString(t, responses[0], "result", "protocolVersion"); got != test.want {
+				t.Fatalf("negotiated protocol version = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMCPInboxRetriesPreOperationIdentityMismatchAfterRebind(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	rebinding := &reboundIdentityStore{
+		Store: db, actor: "reviewer-provisional", runID: "run-provisional",
+	}
+	server, err := mcp.New(rebinding, mcp.Config{
+		Actor: "reviewer-provisional", RunID: "run-provisional", ProjectID: "experiment",
+	})
+	if err != nil {
+		t.Fatalf("new MCP server: %v", err)
+	}
+	responses := exchange(t, server,
+		toolCall(1, "bus_inbox", map[string]interface{}{}),
+	)
+	if responseErr := responses[0]["error"]; responseErr != nil {
+		t.Fatalf("bus_inbox failed across identity rebind: %+v", responseErr)
+	}
+	if got := nestedString(t, responses[0], "result", "structuredContent", "actor"); got != "reviewer-canonical" {
+		t.Fatalf("bound actor after retry = %q, want reviewer-canonical", got)
+	}
+	if calls := rebinding.checkInboxCalls(); calls != 2 {
+		t.Fatalf("check inbox calls = %d, want one failed validation plus one retry", calls)
+	}
+}
+
+func TestMCPDoesNotRetryDaemonIdentityMismatchLookalike(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	lookalike := &daemonIdentityLookalikeStore{
+		Store: db, actor: "reviewer-provisional", runID: "run-provisional",
+	}
+	server, err := mcp.New(lookalike, mcp.Config{
+		Actor: "reviewer-provisional", RunID: "run-provisional", ProjectID: "experiment",
+	})
+	if err != nil {
+		t.Fatalf("new MCP server: %v", err)
+	}
+	responses := exchange(t, server,
+		toolCall(1, "bus_check_inbox", map[string]interface{}{}),
+	)
+	if responseErr := responses[0]["error"]; responseErr == nil {
+		t.Fatal("daemon identity-lookalike error was unexpectedly hidden")
+	}
+	if calls := lookalike.checkInboxCalls(); calls != 1 {
+		t.Fatalf("check inbox calls = %d, want no retry for daemon error", calls)
+	}
+}
+
+type reboundIdentityStore struct {
+	mcp.Store
+	mu         sync.Mutex
+	actor      string
+	runID      string
+	inboxCalls int
+}
+
+func (s *reboundIdentityStore) BoundIdentity() (string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.actor, s.runID
+}
+
+func (s *reboundIdentityStore) CheckInbox(ctx context.Context, actor string, limit int) ([]bus.InboxItem, error) {
+	s.mu.Lock()
+	s.inboxCalls++
+	if s.inboxCalls == 1 {
+		s.actor = "reviewer-canonical"
+		s.runID = "run-canonical"
+		s.mu.Unlock()
+		return nil, errors.Join(
+			&bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"},
+			bus.ErrIdentityRebound,
+		)
+	}
+	currentActor := s.actor
+	s.mu.Unlock()
+	if actor != currentActor {
+		return nil, errors.Join(
+			&bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"},
+			bus.ErrIdentityRebound,
+		)
+	}
+	return s.Store.CheckInbox(ctx, actor, limit)
+}
+
+func (s *reboundIdentityStore) checkInboxCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inboxCalls
+}
+
+type daemonIdentityLookalikeStore struct {
+	mcp.Store
+	mu         sync.Mutex
+	actor      string
+	runID      string
+	inboxCalls int
+}
+
+func (s *daemonIdentityLookalikeStore) BoundIdentity() (string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.actor, s.runID
+}
+
+func (s *daemonIdentityLookalikeStore) CheckInbox(context.Context, string, int) ([]bus.InboxItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inboxCalls++
+	s.actor = "reviewer-canonical"
+	s.runID = "run-canonical"
+	return nil, fmt.Errorf("actor: does not match the authenticated API session: %w", bus.ErrInvalid)
+}
+
+func (s *daemonIdentityLookalikeStore) checkInboxCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inboxCalls
 }
 
 func TestCapabilityBridgeSurvivesDaemonUpgradeWithoutReplacingMCPServer(t *testing.T) {

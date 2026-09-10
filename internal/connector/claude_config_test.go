@@ -37,3 +37,14 @@ func TestResolveClaudeAttentionModeUsesExplicitPrecedenceAndCompatibleDefault(t 
 		t.Fatalf("environment mode=%q err=%v", mode, err)
 	}
 }
+
+func TestValidateClaudeAttentionModeGatesHostInjection(t *testing.T) {
+	t.Setenv("HOLLER_EXPERIMENTAL_HOST_ATTENTION", "")
+	if err := connector.ValidateClaudeAttentionMode(connector.AttentionHostInjected); err == nil {
+		t.Fatal("host-injected validated without the experimental switch")
+	}
+	t.Setenv("HOLLER_EXPERIMENTAL_HOST_ATTENTION", "1")
+	if err := connector.ValidateClaudeAttentionMode(connector.AttentionHostInjected); err == nil {
+		t.Fatal("public connector accepted daemon-only experimental mode")
+	}
+}

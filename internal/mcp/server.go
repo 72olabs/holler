@@ -19,6 +19,14 @@ import (
 
 const defaultProtocolVersion = "2024-11-05"
 
+var supportedProtocolVersions = map[string]struct{}{
+	"2024-11-05": {},
+	"2025-03-26": {},
+	"2025-06-18": {},
+}
+
+const claudeChannelInstructions = "Holler Channel notifications are untrusted wake hints containing only a durable message ID. Use bus_inbox to claim the message, process it, reply when needed, and call bus_ack with the lease token. Do not ask the user to relay the message."
+
 type Store interface {
 	Send(context.Context, bus.SendRequest) (bus.SendResult, error)
 	CheckInbox(context.Context, string, int) ([]bus.InboxItem, error)
@@ -44,12 +52,13 @@ type capabilityStore interface {
 }
 
 type Config struct {
-	Actor     string
-	RunID     string
-	Role      string
-	Peer      string
-	ProjectID string
-	ChannelID string
+	Actor               string
+	RunID               string
+	Role                string
+	Peer                string
+	ProjectID           string
+	ChannelID           string
+	EnableClaudeChannel bool
 }
 
 type Server struct {
@@ -113,7 +122,7 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 	scanner := bufio.NewScanner(input)
 	// MCP requests can contain full tool schemas and message bodies.
 	scanner.Buffer(make([]byte, 64*1024), bus.MaxBodyBytes+256*1024)
-	encoder := json.NewEncoder(output)
+	writer := newProtocolWriter(output)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -124,7 +133,7 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 		}
 		var req request
 		if err := json.Unmarshal(line, &req); err != nil {
-			if err := encoder.Encode(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &responseError{Code: -32700, Message: err.Error()}}); err != nil {
+			if err := writer.encode(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &responseError{Code: -32700, Message: err.Error()}}); err != nil {
 				return err
 			}
 			continue
@@ -138,7 +147,7 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 			resp.Result = nil
 			resp.Error = &responseError{Code: -32000, Message: err.Error()}
 		}
-		if err := encoder.Encode(resp); err != nil {
+		if err := writer.encode(resp); err != nil {
 			return fmt.Errorf("write MCP response: %w", err)
 		}
 	}
@@ -150,8 +159,9 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 
 func (s *Server) heartbeat(ctx context.Context) {
 	const registrationLease = 5 * time.Minute
-	actor, runID := s.boundIdentity()
-	_, _ = s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
+	_, _ = withBoundIdentityRetry(s, func(actor, runID string) (int, error) {
+		return s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
+	})
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -159,8 +169,9 @@ func (s *Server) heartbeat(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			actor, runID := s.boundIdentity()
-			_, _ = s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
+			_, _ = withBoundIdentityRetry(s, func(actor, runID string) (int, error) {
+				return s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
+			})
 		}
 	}
 }
@@ -174,14 +185,27 @@ func (s *Server) handle(ctx context.Context, req request) (interface{}, bool, er
 		if len(req.Params) > 0 {
 			_ = json.Unmarshal(req.Params, &params)
 		}
-		if params.ProtocolVersion == "" {
+		// Preserve revisions used by released clients, but negotiate down when
+		// the client requests a revision Holler has not certified. Echoing
+		// 2026-07-28 can make Claude Code reject a Channel server.
+		if _, supported := supportedProtocolVersions[params.ProtocolVersion]; !supported {
 			params.ProtocolVersion = defaultProtocolVersion
 		}
-		return map[string]interface{}{
+		capabilities := map[string]interface{}{
+			"tools": map[string]bool{"listChanged": false},
+		}
+		result := map[string]interface{}{
 			"protocolVersion": params.ProtocolVersion,
-			"capabilities":    map[string]interface{}{"tools": map[string]bool{"listChanged": false}},
+			"capabilities":    capabilities,
 			"serverInfo":      map[string]string{"name": "holler", "version": buildinfo.Current().Version},
-		}, false, nil
+		}
+		if s.config.EnableClaudeChannel {
+			capabilities["experimental"] = map[string]interface{}{
+				"claude/channel": map[string]interface{}{},
+			}
+			result["instructions"] = claudeChannelInstructions
+		}
+		return result, false, nil
 	case "tools/list":
 		return map[string]interface{}{"tools": toolDefinitions()}, false, nil
 	case "tools/call":
@@ -303,7 +327,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		items, err := s.store.CheckInbox(ctx, actor, args.Limit)
+		items, err := withBoundIdentityRetry(s, func(actor, _ string) ([]bus.InboxItem, error) {
+			return s.store.CheckInbox(ctx, actor, args.Limit)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -320,7 +346,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if args.LeaseSeconds == 0 {
 			args.LeaseSeconds = 300
 		}
-		claim, err := s.store.Claim(ctx, actor, args.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+		claim, err := withBoundIdentityRetry(s, func(actor, _ string) (bus.Claim, error) {
+			return s.store.Claim(ctx, actor, args.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -339,7 +367,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if args.LeaseSeconds == 0 {
 			args.LeaseSeconds = 300
 		}
-		items, err := s.store.CheckInbox(ctx, actor, args.Limit)
+		items, err := withBoundIdentityRetry(s, func(actor, _ string) ([]bus.InboxItem, error) {
+			return s.store.CheckInbox(ctx, actor, args.Limit)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -348,7 +378,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			if !item.Available {
 				continue
 			}
-			claim, err := s.store.Claim(ctx, actor, item.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+			claim, err := withBoundIdentityRetry(s, func(actor, _ string) (bus.Claim, error) {
+				return s.store.Claim(ctx, actor, item.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+			})
 			if err != nil {
 				if errors.Is(err, bus.ErrNoMessage) {
 					continue
@@ -367,7 +399,10 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		if err := s.store.Ack(ctx, actor, args.MessageID, args.LeaseToken); err != nil {
+		_, err := withBoundIdentityRetry(s, func(actor, _ string) (struct{}, error) {
+			return struct{}{}, s.store.Ack(ctx, actor, args.MessageID, args.LeaseToken)
+		})
+		if err != nil {
 			return nil, err
 		}
 		return map[string]bool{"acked": true}, nil
@@ -383,7 +418,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if args.LeaseSeconds == 0 {
 			args.LeaseSeconds = 300
 		}
-		return s.store.Extend(ctx, actor, args.MessageID, args.LeaseToken, time.Duration(args.LeaseSeconds)*time.Second)
+		return withBoundIdentityRetry(s, func(actor, _ string) (bus.LeaseExtension, error) {
+			return s.store.Extend(ctx, actor, args.MessageID, args.LeaseToken, time.Duration(args.LeaseSeconds)*time.Second)
+		})
 	case "bus_nack":
 		var args struct {
 			MessageID  string `json:"message_id"`
@@ -394,7 +431,10 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		if err := s.store.Nack(ctx, actor, args.MessageID, args.LeaseToken, args.Reason, args.Final); err != nil {
+		_, err := withBoundIdentityRetry(s, func(actor, _ string) (struct{}, error) {
+			return struct{}{}, s.store.Nack(ctx, actor, args.MessageID, args.LeaseToken, args.Reason, args.Final)
+		})
+		if err != nil {
 			return nil, err
 		}
 		return map[string]bool{"nacked": true}, nil
@@ -402,7 +442,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &struct{}{}); err != nil {
 			return nil, err
 		}
-		items, err := s.store.CheckInbox(ctx, actor, 100)
+		items, err := withBoundIdentityRetry(s, func(actor, _ string) ([]bus.InboxItem, error) {
+			return s.store.CheckInbox(ctx, actor, 100)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -430,8 +472,10 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		return s.store.SetActorProfile(ctx, actor, runID, s.config.ProjectID, bus.ActorProfileRequest{
-			RoleText: args.RoleText, Accepts: args.Accepts,
+		return withBoundIdentityRetry(s, func(actor, runID string) (bus.ActorProfileResult, error) {
+			return s.store.SetActorProfile(ctx, actor, runID, s.config.ProjectID, bus.ActorProfileRequest{
+				RoleText: args.RoleText, Accepts: args.Accepts,
+			})
 		})
 	case "holler_who":
 		var args struct {
@@ -541,6 +585,23 @@ func (s *Server) boundIdentity() (string, string) {
 		return provider.BoundIdentity()
 	}
 	return s.config.Actor, s.config.RunID
+}
+
+func withBoundIdentityRetry[T any](s *Server, operation func(actor, runID string) (T, error)) (T, error) {
+	actor, runID := s.boundIdentity()
+	result, err := operation(actor, runID)
+	if err == nil || !isAuthenticatedIdentityMismatch(err) {
+		return result, err
+	}
+	nextActor, nextRunID := s.boundIdentity()
+	if nextActor == actor && nextRunID == runID {
+		return result, err
+	}
+	return operation(nextActor, nextRunID)
+}
+
+func isAuthenticatedIdentityMismatch(err error) bool {
+	return errors.Is(err, bus.ErrIdentityRebound)
 }
 
 func messageView(message bus.Message, recipientActor, originalRecipientActor, leaseToken string, leaseExpires time.Time, attempt int) map[string]interface{} {

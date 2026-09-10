@@ -754,6 +754,250 @@ func TestStoreRefusesNewerSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestMigrationCreatesSecureRollbackBackup(t *testing.T) {
+	ctx := context.Background()
+	migrationTime := time.Date(2026, 9, 10, 18, 0, 0, 123456789, time.UTC)
+	db, path := openTestStore(t)
+	sent, err := db.Send(ctx, testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE host_attention_bindings`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (14, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(ctx, path, store.WithClock(func() time.Time { return migrationTime }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backups, err := filepath.Glob(path + ".pre-v15.*.bak")
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("migration backups = %v, err=%v", backups, err)
+	}
+	info, err := os.Stat(backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup mode = %v", info.Mode().Perm())
+	}
+	reopened, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	afterReopen, err := os.Stat(backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterReopen.Size() != info.Size() || !afterReopen.ModTime().Equal(info.ModTime()) {
+		t.Fatal("second start replaced the pre-v15 backup")
+	}
+	backup, err := sql.Open("sqlite", "file:"+backups[0]+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	var version int
+	if err := backup.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 14 {
+		t.Fatalf("backup schema version=%d err=%v", version, err)
+	}
+	var messageID string
+	if err := backup.QueryRow(`SELECT message_id FROM messages WHERE message_id = ?`, sent.Message.ID).Scan(&messageID); err != nil || messageID != sent.Message.ID {
+		t.Fatalf("backup message=%q err=%v", messageID, err)
+	}
+	var hostTables int
+	if err := backup.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='host_attention_bindings'`).Scan(&hostTables); err != nil || hostTables != 0 {
+		t.Fatalf("backup host table count=%d err=%v", hostTables, err)
+	}
+}
+
+func TestMigrationCreatesNewBackupAfterRollbackAndReupgrade(t *testing.T) {
+	ctx := context.Background()
+	firstMigration := time.Date(2026, 9, 10, 18, 0, 0, 1, time.UTC)
+	secondMigration := firstMigration.Add(24 * time.Hour)
+	db, path := openTestStore(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE host_attention_bindings`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (14, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(ctx, path, store.WithClock(func() time.Time { return firstMigration }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backups, err := filepath.Glob(path + ".pre-v15.*.bak")
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("first migration backups = %v, err=%v", backups, err)
+	}
+	firstBackup := backups[0]
+	firstSnapshot, err := os.ReadFile(firstBackup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".first-v15"); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(path + "-wal")
+	_ = os.Remove(path + "-shm")
+	if err := os.WriteFile(path, firstSnapshot, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+		INSERT INTO messages (
+			message_id, schema_version, idempotency_key, project_id, channel_id,
+			from_actor, from_run, message_type, delivery_request, body, created_at_ns
+		) VALUES ('msg_after_rollback', 1, 'after-rollback', 'default', 'direct',
+			'sender', 'run-after-rollback', 'MESSAGE', 'non-blocking', '{}', 2)`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(ctx, path, store.WithClock(func() time.Time { return secondMigration }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backups, err = filepath.Glob(path + ".pre-v15.*.bak")
+	if err != nil || len(backups) != 2 {
+		t.Fatalf("second migration backups = %v, err=%v", backups, err)
+	}
+	firstAfter, err := os.ReadFile(firstBackup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstSnapshot, firstAfter) {
+		t.Fatal("second migration modified the first rollback backup")
+	}
+	secondBackup := backups[0]
+	if secondBackup == firstBackup {
+		secondBackup = backups[1]
+	}
+	backup, err := sql.Open("sqlite", "file:"+secondBackup+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	var messageID string
+	if err := backup.QueryRow(`SELECT message_id FROM messages WHERE message_id = 'msg_after_rollback'`).Scan(&messageID); err != nil || messageID != "msg_after_rollback" {
+		t.Fatalf("second rollback backup message=%q err=%v", messageID, err)
+	}
+}
+
+func TestMigrationBackupFailureLeavesPriorSchemaUntouched(t *testing.T) {
+	ctx := context.Background()
+	migrationTime := time.Date(2026, 9, 10, 18, 0, 0, 123456789, time.UTC)
+	db, path := openTestStore(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE host_attention_bindings`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (14, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := path + ".pre-v15." + migrationTime.Format("20060102T150405.000000000Z") + ".bak"
+	if err := os.Mkdir(backupPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if migrated, err := store.Open(ctx, path, store.WithClock(func() time.Time { return migrationTime })); err == nil {
+		migrated.Close()
+		t.Fatal("migration succeeded without a valid rollback backup")
+	} else if !strings.Contains(err.Error(), ".pre-v15.") || !strings.Contains(err.Error(), "free_bytes=") {
+		t.Fatalf("backup failure was not actionable: %v", err)
+	}
+	raw, err = sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var version int
+	if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 14 {
+		t.Fatalf("schema version after backup failure=%d err=%v", version, err)
+	}
+	var hostTables int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='host_attention_bindings'`).Scan(&hostTables); err != nil || hostTables != 0 {
+		t.Fatalf("host table count after backup failure=%d err=%v", hostTables, err)
+	}
+}
+
+func TestFreshStoreDoesNotCreateRollbackBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backups, err := filepath.Glob(path + ".pre-v*.bak*")
+	if err != nil || len(backups) != 0 {
+		t.Fatalf("fresh-store backups = %v, err=%v", backups, err)
+	}
+}
+
 func TestMigrationV5AddsSupersessionWithoutLosingRegistration(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "holler.sqlite3")

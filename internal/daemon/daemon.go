@@ -22,15 +22,16 @@ import (
 )
 
 type Config struct {
-	DatabasePath            string
-	SocketPath              string
-	CodexBinary             string
-	CodexBinaryResolver     func() string
-	NotificationTimeout     time.Duration
-	Clock                   func() time.Time
-	HarnessInstanceResolver api.HarnessInstanceResolver
-	StaleUnreadAfter        time.Duration
-	ArchiveAfter            time.Duration
+	DatabasePath              string
+	SocketPath                string
+	CodexBinary               string
+	CodexBinaryResolver       func() string
+	NotificationTimeout       time.Duration
+	Clock                     func() time.Time
+	HarnessInstanceResolver   api.HarnessInstanceResolver
+	ExperimentalHostAttention bool
+	StaleUnreadAfter          time.Duration
+	ArchiveAfter              time.Duration
 }
 
 func Run(ctx context.Context, config Config, ready io.Writer) error {
@@ -111,6 +112,7 @@ func Run(ctx context.Context, config Config, ready io.Writer) error {
 		runNotificationWorker(workerCtx, db, notifier, config.StaleUnreadAfter, config.ArchiveAfter)
 	}()
 	serverOptions := []api.ServerOption{api.WithAttentionBroker(attentionBroker)}
+	serverOptions = append(serverOptions, api.WithExperimentalHostAttention(config.ExperimentalHostAttention))
 	if config.HarnessInstanceResolver != nil {
 		serverOptions = append(serverOptions, api.WithHarnessInstanceResolver(config.HarnessInstanceResolver))
 	}
@@ -208,6 +210,8 @@ func observeNotificationCondition(ctx context.Context, observer conditionObserve
 		switch {
 		case strings.Contains(detailLower, "startup-only"):
 			reason = "startup_only_selected"
+		case strings.Contains(detailLower, "never admitted"):
+			reason = "host_not_attached"
 		case strings.Contains(detailLower, "unavailable") || strings.Contains(detailLower, "missing"):
 			reason = "host_attention_adapter_missing"
 		}

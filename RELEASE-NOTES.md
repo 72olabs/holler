@@ -1,3 +1,91 @@
+# Holler 0.7.2
+
+Holler 0.7.2 hardens connector identity reconciliation and adds dormant,
+security-reviewed foundations for future Claude SDK attention. Public Claude
+behavior remains `hook-long-poll` with durable startup hydration fallback;
+SDK-host live wake is not supported by this release.
+
+## Fixes
+
+- MCP operations now retry only the typed, pre-operation identity-rebound race
+  that can occur when SessionStart reconciles a provisional process identity.
+  Ambiguous writes and daemon-returned lookalike errors are never retried.
+- MCP initialization negotiates unknown protocol revisions down to one Holler
+  implements (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of echoing a
+  revision that can make Claude reject the server.
+- Host-attention registration conflicts degrade truthfully to `startup-only`
+  and record a reason-coded operator condition instead of losing registration.
+
+## Experimental foundations
+
+- The daemon contains an authenticated, ID-only `host-attention-v1` protocol
+  foundation for a future SDK host integration. It is disabled by default,
+  absent from READY and the packaged connector manifest, rejected by public
+  setup/config validation, and unsupported for production use.
+- Isolated development requires `HOLLER_EXPERIMENTAL_HOST_ATTENTION=1` in
+  `hollerd`'s own environment. Client, MCP, hook, and handshake inputs cannot
+  enable it. Exact Claude PID generation, direct-parent process identity, and
+  actor/run/session registration must all match before admission.
+- A never-admitted experimental host reports `host_not_attached` and requires
+  operator attention. After one verified admission, a temporary disconnect is
+  reported as reconnecting. Only admission resolves the unavailable condition.
+- Claude Channel protocol groundwork remains disabled and unsupported. No
+  production path enables its experimental MCP capability.
+- The T3 integration is a discussion proposal only. This release contains no
+  T3 code, patch, or supported T3 live-wake path.
+
+## Database upgrade and rollback
+
+The wire protocol remains version 1. The database advances from schema 14 to
+schema 15 to store daemon-verified host process bindings and whether an exact
+host was ever admitted.
+
+Before applying any schema change to an existing database, Holler uses SQLite
+`VACUUM INTO` while holding its migration ownership lock, verifies the snapshot
+with `PRAGMA quick_check`, syncs it, sets mode `0600`, and publishes a new,
+immutable timestamped snapshot atomically beside the database as
+`holler.sqlite3.pre-v15.<UTC-timestamp>.bak`. Fresh installs do not create a
+backup. Every upgrade from an older schema creates a new snapshot without
+overwriting or deleting earlier backups; backup creation or verification
+failure aborts before schema DDL and reports the path, cause, and detectable
+free space.
+
+Holler 0.7.1 correctly refuses a schema-15 database. To downgrade:
+
+1. Stop the Holler daemon service.
+2. Move the schema-15 `holler.sqlite3` and any matching `-wal` and `-shm` files
+   aside; do not copy or reuse them with 0.7.1.
+3. Copy the newest `holler.sqlite3.pre-v15.*.bak` to `holler.sqlite3` and keep it
+   mode `0600`.
+4. Reinstall Holler 0.7.1 and restart its daemon/setup.
+
+Restoring the backup discards every message and state change committed after
+the 0.7.2 upgrade. Preserve the moved schema-15 files until the rollback is
+verified.
+
+## Known limitation
+
+Claude hook monitors are not yet tied to a shared process-exit (`NOTE_EXIT`)
+watcher. If Claude exits while a descendant deliberately retains the hook
+output pipe, the monitor can report phantom presence until its registration
+lease lapses. Durable messages are not lost, but live-wake status can be stale.
+Process-exit hardening remains scheduled follow-up work.
+
+## Validation
+
+- Full Go tests, `go vet`, the executable OpenCode plugin tests, and the full
+  race-detector suite pass.
+- All seven isolated certification labs pass with empty durable inboxes, every
+  message acknowledged, zero orphan processes, isolated paths, and removed
+  sockets.
+- Schema-14 migration creates a verified `0600` backup containing the original
+  messages; injected backup failure applies no schema DDL; repeat starts do not
+  replace the backup; fresh databases create none.
+- The exact-version release artifact passes packaged build-identity, migration,
+  lab, restore, and 0.7.1 rollback compatibility checks.
+
+---
+
 # Holler 0.7.1
 
 Holler 0.7.1 hardens Claude's hook-long-poll adapter against duplicate wake

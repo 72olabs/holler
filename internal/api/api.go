@@ -36,12 +36,17 @@ const (
 	TypedRoutesCapability        = "typed-routes-v1"
 	AliasClaimCapability         = "alias-claim-if-absent-v1"
 	HarnessInstanceCapability    = "harness-instance-v1"
+	HostAttentionCapability      = "host-attention-v1"
 	OperatorConditionsCapability = "operator-conditions-v1"
 	ActorLifecycleCapability     = "actor-lifecycle-v1"
 )
 
-func protocolCapabilities() []string {
-	return []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, HarnessInstanceCapability, OperatorConditionsCapability, ActorLifecycleCapability, CapabilityBridgeCapability}
+func protocolCapabilities(experimentalHostAttention bool) []string {
+	capabilities := []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, HarnessInstanceCapability, OperatorConditionsCapability, ActorLifecycleCapability, CapabilityBridgeCapability}
+	if experimentalHostAttention {
+		capabilities = append(capabilities, HostAttentionCapability)
+	}
+	return capabilities
 }
 
 type Identity struct {
@@ -59,6 +64,20 @@ type Identity struct {
 	Provisional        bool
 	AdoptedPredecessor string
 	PendingPredecessor string
+	harnessProcess     *HarnessProcessIdentity
+}
+
+// ProcessIdentity identifies one OS process without trusting caller-supplied
+// metadata. StartFingerprint prevents a recycled PID from inheriting authority.
+type ProcessIdentity = bus.ProcessIdentity
+
+// HarnessProcessIdentity is daemon-derived evidence for one live harness and
+// the host process that launched it. Handle is correlation only; Host is the
+// sole process identity eligible for a host-attention attachment.
+type HarnessProcessIdentity struct {
+	Handle  string
+	Harness ProcessIdentity
+	Host    ProcessIdentity
 }
 
 type Request struct {
@@ -93,6 +112,13 @@ type rpcResponseError struct{ err error }
 func (e *rpcResponseError) Error() string { return e.err.Error() }
 func (e *rpcResponseError) Unwrap() error { return e.err }
 
+type identityReboundError struct{ validation *bus.ValidationError }
+
+func (e *identityReboundError) Error() string { return e.validation.Error() }
+func (e *identityReboundError) Unwrap() []error {
+	return []error{e.validation, bus.ErrIdentityRebound}
+}
+
 type Store interface {
 	Send(context.Context, bus.SendRequest) (bus.SendResult, error)
 	CheckInbox(context.Context, string, int) ([]bus.InboxItem, error)
@@ -102,6 +128,8 @@ type Store interface {
 	Nack(context.Context, string, string, string, string, bool) error
 	ListEvents(context.Context, string, string, int64, int) ([]bus.Event, error)
 	RegisterSession(context.Context, bus.RegistrationRequest) (bus.Registration, error)
+	HostAttentionBinding(context.Context, int, string) (bus.HostAttentionBinding, error)
+	MarkHostAttentionAdmitted(context.Context, bus.HostAttentionBinding) error
 	AttachMonitor(context.Context, string, string, string, string, string, time.Duration) (bus.Registration, error)
 	RearmAcceptedNotifications(context.Context, string) error
 	LiveRegistrations(context.Context, string) ([]bus.Registration, error)
@@ -148,14 +176,30 @@ type attentionAttachmentInspector interface {
 }
 
 type Server struct {
-	store                  Store
-	build                  buildinfo.Info
-	attention              AttentionBroker
-	capabilities           map[string]registeredCapability
-	capabilityErr          error
-	resolveHarnessInstance HarnessInstanceResolver
-	connectionsMu          sync.Mutex
-	identityConnections    map[authenticatedIdentity]map[net.Conn]struct{}
+	store                     Store
+	build                     buildinfo.Info
+	attention                 AttentionBroker
+	capabilities              map[string]registeredCapability
+	capabilityErr             error
+	resolveHarnessInstance    HarnessInstanceResolver
+	resolveHarnessProcess     HarnessProcessResolver
+	resolvePeerProcess        PeerProcessResolver
+	resolveProcessStart       ProcessStartResolver
+	connectionsMu             sync.Mutex
+	identityConnections       map[authenticatedIdentity]map[net.Conn]struct{}
+	hostAttentionMu           sync.Mutex
+	hostConnections           map[hostAttentionKey]hostAttentionConnection
+	experimentalHostAttention bool
+}
+
+type hostAttentionKey struct {
+	pid              int
+	startFingerprint string
+}
+
+type hostAttentionConnection struct {
+	connection              net.Conn
+	actor, runID, sessionID string
 }
 
 type authenticatedIdentity struct {
@@ -167,15 +211,46 @@ type ServerOption func(*Server)
 
 type HarnessInstanceResolver func(net.Conn, string) (string, error)
 
+type HarnessProcessResolver func(net.Conn, string) (HarnessProcessIdentity, error)
+
+type PeerProcessResolver func(net.Conn) (ProcessIdentity, error)
+
+type ProcessStartResolver func(int) (string, error)
+
 func WithHarnessInstanceResolver(resolver HarnessInstanceResolver) ServerOption {
-	return func(server *Server) { server.resolveHarnessInstance = resolver }
+	return func(server *Server) {
+		server.resolveHarnessInstance = resolver
+		server.resolveHarnessProcess = nil
+	}
+}
+
+func WithHarnessProcessResolver(resolver HarnessProcessResolver) ServerOption {
+	return func(server *Server) {
+		server.resolveHarnessProcess = resolver
+		server.resolveHarnessInstance = nil
+	}
+}
+
+func WithPeerProcessResolver(resolver PeerProcessResolver) ServerOption {
+	return func(server *Server) { server.resolvePeerProcess = resolver }
+}
+
+func WithProcessStartResolver(resolver ProcessStartResolver) ServerOption {
+	return func(server *Server) { server.resolveProcessStart = resolver }
+}
+
+func WithExperimentalHostAttention(enabled bool) ServerOption {
+	return func(server *Server) { server.experimentalHostAttention = enabled }
 }
 
 func NewServer(store Store, options ...ServerOption) *Server {
 	server := &Server{
 		store: store, build: buildinfo.Current(),
-		capabilities: make(map[string]registeredCapability), resolveHarnessInstance: localHarnessInstance,
+		capabilities: make(map[string]registeredCapability), resolveHarnessProcess: localHarnessProcessIdentity,
+		resolvePeerProcess:  localPeerProcessIdentity,
+		resolveProcessStart: processStart,
 		identityConnections: make(map[authenticatedIdentity]map[net.Conn]struct{}),
+		hostConnections:     make(map[hostAttentionKey]hostAttentionConnection),
 	}
 	server.installDefaultCapabilities()
 	for _, option := range options {
@@ -185,34 +260,70 @@ func NewServer(store Store, options ...ServerOption) *Server {
 }
 
 func localHarnessInstance(connection net.Conn, harness string) (string, error) {
+	identity, err := localHarnessProcessIdentity(connection, harness)
+	return identity.Handle, err
+}
+
+func localHarnessProcessIdentity(connection net.Conn, harness string) (HarnessProcessIdentity, error) {
 	harness = strings.ToLower(strings.TrimSpace(harness))
 	switch harness {
 	case "claude", "codex", "opencode":
 	default:
-		return "", &bus.ValidationError{Field: "harness", Problem: "must be claude, codex, or opencode"}
+		return HarnessProcessIdentity{}, &bus.ValidationError{Field: "harness", Problem: "must be claude, codex, or opencode"}
 	}
 	pid, err := peerProcessID(connection)
 	if err != nil {
-		return "", err
+		return HarnessProcessIdentity{}, err
 	}
 	const maximumAncestorDepth = 64
 	for depth := 0; pid > 1 && depth < maximumAncestorDepth; depth++ {
 		parent, command, err := processIdentity(pid)
 		if err != nil {
-			return "", err
+			return HarnessProcessIdentity{}, err
 		}
 		name := strings.ToLower(filepath.Base(command))
 		if strings.Contains(name, harness) && !strings.Contains(name, "holler") {
 			start, err := processStart(pid)
 			if err != nil {
-				return "", err
+				return HarnessProcessIdentity{}, err
+			}
+			parentStart, err := processStart(parent)
+			if err != nil {
+				return HarnessProcessIdentity{}, err
 			}
 			digest := sha256.Sum256([]byte(harness + "\x00" + strconv.Itoa(pid) + "\x00" + start))
-			return "hin_" + hex.EncodeToString(digest[:16]), nil
+			return HarnessProcessIdentity{
+				Handle:  "hin_" + hex.EncodeToString(digest[:16]),
+				Harness: ProcessIdentity{PID: pid, StartFingerprint: start},
+				Host:    ProcessIdentity{PID: parent, StartFingerprint: parentStart},
+			}, nil
 		}
 		pid = parent
 	}
-	return "", fmt.Errorf("could not prove a live %s harness ancestor", harness)
+	return HarnessProcessIdentity{}, fmt.Errorf("could not prove a live %s harness ancestor", harness)
+}
+
+func authorizeHostPeer(harness HarnessProcessIdentity, peer ProcessIdentity) error {
+	if harness.Host.PID <= 1 || strings.TrimSpace(harness.Host.StartFingerprint) == "" {
+		return &bus.ValidationError{Field: "host_attention", Problem: "registered harness has no eligible direct parent"}
+	}
+	if peer.PID != harness.Host.PID || strings.TrimSpace(peer.StartFingerprint) == "" ||
+		peer.StartFingerprint != harness.Host.StartFingerprint {
+		return &bus.ValidationError{Field: "host_attention", Problem: "connecting process is not the registered harness direct parent"}
+	}
+	return nil
+}
+
+func localPeerProcessIdentity(connection net.Conn) (ProcessIdentity, error) {
+	pid, err := peerProcessID(connection)
+	if err != nil {
+		return ProcessIdentity{}, err
+	}
+	start, err := processStart(pid)
+	if err != nil {
+		return ProcessIdentity{}, err
+	}
+	return ProcessIdentity{PID: pid, StartFingerprint: start}, nil
 }
 
 func processIdentity(pid int) (int, string, error) {
@@ -312,6 +423,14 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	if err != nil {
 		return
 	}
+	if request.Op == "host_attention_hello" {
+		if !s.experimentalHostAttention {
+			_ = writeResponse(connection, failure(request.ID, "bad_request", "unknown operation: host_attention_hello", false))
+			return
+		}
+		s.serveHostAttentionConnection(connectionCtx, connection, reader, request)
+		return
+	}
 	if request.Op != "hello" {
 		_ = writeResponse(connection, failure(request.ID, "unauthenticated", "first operation must be hello", false))
 		return
@@ -366,6 +485,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	featureIdentity := hello.NameMode != "" || len(hello.ContinuityHandles) > 0 || hello.Takeover
 	instanceState := "legacy"
 	harnessInstance := ""
+	var harnessProcess *HarnessProcessIdentity
 	if hello.Harness != "" {
 		if !containsString(hello.Capabilities, HarnessInstanceCapability) {
 			_ = writeResponse(connection, failure(request.ID, "capability_required", "harness identity requires capability "+HarnessInstanceCapability, false))
@@ -378,7 +498,17 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 			return
 		}
 		instanceState = "unreconciled"
-		if s.resolveHarnessInstance != nil {
+		if s.resolveHarnessProcess != nil {
+			if resolved, resolveErr := s.resolveHarnessProcess(connection, hello.Harness); resolveErr == nil && strings.TrimSpace(resolved.Handle) != "" {
+				resolved.Handle = strings.TrimSpace(resolved.Handle)
+				harnessInstance = resolved.Handle
+				harnessProcess = &resolved
+				if featureIdentity && (hello.NameMode == bus.NameModeAllocate || hello.NameMode == bus.NameModeExact) {
+					hello.ContinuityHandles = append(hello.ContinuityHandles, "instance:"+harnessInstance)
+				}
+				instanceState = "bound"
+			}
+		} else if s.resolveHarnessInstance != nil {
 			if resolved, resolveErr := s.resolveHarnessInstance(connection, hello.Harness); resolveErr == nil && strings.TrimSpace(resolved) != "" {
 				harnessInstance = strings.TrimSpace(resolved)
 				if featureIdentity && (hello.NameMode == bus.NameModeAllocate || hello.NameMode == bus.NameModeExact) {
@@ -467,7 +597,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	ready, _ := json.Marshal(map[string]interface{}{
 		"protocol": ProtocolVersion, "daemon": "hollerd/0.1", "actor": assignedActor,
 		"requested_actor": hello.Actor, "run_id": assignedRunID, "server_time": time.Now().UTC(), "build": s.build,
-		"capabilities": protocolCapabilities(), "minted": binding.Minted,
+		"capabilities": s.protocolCapabilities(), "minted": binding.Minted,
 		"continuity_reclaimed": binding.ContinuityReclaimed, "provisional": binding.Provisional,
 		"adopted_predecessor": binding.AdoptedPredecessor, "harness_instance": harnessInstance,
 		"pending_predecessor": binding.PendingPredecessor, "instance_state": instanceState,
@@ -482,6 +612,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		Provisional:        binding.Provisional,
 		AdoptedPredecessor: binding.AdoptedPredecessor,
 		PendingPredecessor: binding.PendingPredecessor,
+		harnessProcess:     harnessProcess,
 	}
 	s.trackIdentityConnection(connection, identity.Actor, identity.RunID)
 	defer s.untrackIdentityConnection(connection, identity.Actor, identity.RunID)
@@ -528,6 +659,173 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 			return
 		}
 	}
+}
+
+func (s *Server) serveHostAttentionConnection(ctx context.Context, connection net.Conn, reader *bufio.Reader, helloRequest Request) {
+	var hello struct {
+		Protocol  int `json:"protocol"`
+		ClaudePID int `json:"claude_pid"`
+	}
+	if err := decodeStrict(helloRequest.Args, &hello); err != nil {
+		_ = writeResponse(connection, failure(helloRequest.ID, "bad_request", err.Error(), false))
+		return
+	}
+	if hello.Protocol != ProtocolVersion || hello.ClaudePID <= 1 {
+		_ = writeResponse(connection, failure(helloRequest.ID, "unauthenticated", "host attention attachment was not admitted", false))
+		return
+	}
+	if s.resolvePeerProcess == nil || s.resolveProcessStart == nil {
+		_ = writeResponse(connection, failure(helloRequest.ID, "unauthenticated", "host attention attachment was not admitted", false))
+		return
+	}
+	currentHarnessStart, startErr := s.resolveProcessStart(hello.ClaudePID)
+	if startErr != nil || strings.TrimSpace(currentHarnessStart) == "" {
+		_ = writeResponse(connection, failure(helloRequest.ID, "unauthenticated", "host attention attachment was not admitted", false))
+		return
+	}
+	binding, err := s.store.HostAttentionBinding(ctx, hello.ClaudePID, currentHarnessStart)
+	peer, peerErr := s.resolvePeerProcess(connection)
+	harness := HarnessProcessIdentity{Handle: binding.HarnessHandle, Harness: binding.Harness, Host: binding.Host}
+	if err != nil || peerErr != nil || authorizeHostPeer(harness, peer) != nil || !s.hostRegistrationLive(ctx, binding) {
+		_ = writeResponse(connection, failure(helloRequest.ID, "unauthenticated", "host attention attachment was not admitted", false))
+		return
+	}
+	if s.attention == nil {
+		_ = writeResponse(connection, failure(helloRequest.ID, "attention_unavailable", bus.ErrAttentionUnavailable.Error(), false))
+		return
+	}
+	key := hostAttentionKey{pid: binding.Harness.PID, startFingerprint: binding.Harness.StartFingerprint}
+	if !s.claimHostConnection(key, binding, connection) {
+		_ = writeResponse(connection, failure(helloRequest.ID, "attention_waiter_busy", bus.ErrAttentionWaiterBusy.Error(), true))
+		return
+	}
+	defer s.releaseHostConnection(key, connection)
+	if err := s.attention.Attach(binding.Actor, binding.RunID, binding.SessionID, func() error {
+		return s.store.RearmAcceptedNotifications(ctx, binding.Actor)
+	}); err != nil {
+		_ = writeResponse(connection, Response{ID: helloRequest.ID, OK: false, Error: rpcError(err)})
+		return
+	}
+	defer s.attention.Cancel(binding.Actor, binding.RunID, binding.SessionID, bus.ErrAttentionUnavailable)
+	if err := s.store.MarkHostAttentionAdmitted(ctx, binding); err != nil {
+		_ = writeResponse(connection, Response{ID: helloRequest.ID, OK: false, Error: rpcError(err)})
+		return
+	}
+	_ = s.store.ResolveCondition(ctx, "attention_unavailable", binding.Actor)
+	ready, _ := json.Marshal(map[string]interface{}{
+		"protocol": ProtocolVersion, "ready": true, "capability": HostAttentionCapability,
+	})
+	if err := writeResponse(connection, Response{ID: helloRequest.ID, OK: true, Result: ready}); err != nil {
+		return
+	}
+	for {
+		request, err := readRequest(reader)
+		if err != nil {
+			return
+		}
+		response := Response{ID: request.ID}
+		if request.Op != "host_attention_wait" {
+			response.Error = &RPCError{Code: "bad_request", Message: "host connection only supports host_attention_wait"}
+		} else {
+			var args struct {
+				WaitNS int64 `json:"wait_ns"`
+			}
+			if err := decodeStrict(request.Args, &args); err != nil {
+				response.Error = rpcError(err)
+			} else if wait := time.Duration(args.WaitNS); wait <= 0 || wait > MaxAttentionWait {
+				response.Error = rpcError(&bus.ValidationError{Field: "wait", Problem: "must be between 0 and 25s"})
+			} else if !s.hostRegistrationLive(ctx, binding) {
+				response.Error = rpcError(bus.ErrRegistrationExpired)
+			} else {
+				waitCtx, cancel := context.WithTimeout(ctx, wait)
+				notice, waitErr := s.attention.Wait(waitCtx, binding.Actor, binding.RunID, binding.SessionID, "host-injected")
+				cancel()
+				if errors.Is(waitErr, context.DeadlineExceeded) && ctx.Err() == nil {
+					response.OK = true
+					response.Result = json.RawMessage(`{}`)
+				} else if waitErr != nil {
+					response.Error = rpcError(waitErr)
+				} else {
+					response.OK = true
+					response.Result, _ = json.Marshal(struct {
+						MessageID string `json:"message_id"`
+					}{MessageID: notice.MessageID})
+				}
+			}
+		}
+		if err := writeResponse(connection, response); err != nil {
+			return
+		}
+	}
+}
+
+func (s *Server) hostRegistrationLive(ctx context.Context, binding bus.HostAttentionBinding) bool {
+	registrations, err := s.store.LiveRegistrations(ctx, binding.Actor)
+	if err != nil {
+		return false
+	}
+	for _, registration := range registrations {
+		if registration.RunID == binding.RunID && registration.SessionID == binding.SessionID &&
+			registration.Harness == "claude" && registration.AttentionMode == "host-injected" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) protocolCapabilities() []string {
+	return protocolCapabilities(s.experimentalHostAttention)
+}
+
+func (s *Server) claimHostConnection(key hostAttentionKey, binding bus.HostAttentionBinding, connection net.Conn) bool {
+	s.hostAttentionMu.Lock()
+	defer s.hostAttentionMu.Unlock()
+	if _, exists := s.hostConnections[key]; exists {
+		return false
+	}
+	s.hostConnections[key] = hostAttentionConnection{
+		connection: connection, actor: binding.Actor, runID: binding.RunID, sessionID: binding.SessionID,
+	}
+	return true
+}
+
+func (s *Server) releaseHostConnection(key hostAttentionKey, connection net.Conn) {
+	s.hostAttentionMu.Lock()
+	defer s.hostAttentionMu.Unlock()
+	if current, exists := s.hostConnections[key]; exists && current.connection == connection {
+		delete(s.hostConnections, key)
+	}
+}
+
+func (s *Server) hostProcessCanBind(ctx context.Context, binding bus.HostAttentionBinding) bool {
+	key := hostAttentionKey{pid: binding.Harness.PID, startFingerprint: binding.Harness.StartFingerprint}
+	s.hostAttentionMu.Lock()
+	current, exists := s.hostConnections[key]
+	if !exists || (current.actor == binding.Actor && current.runID == binding.RunID && current.sessionID == binding.SessionID) {
+		s.hostAttentionMu.Unlock()
+		return true
+	}
+	s.hostAttentionMu.Unlock()
+
+	currentBinding := bus.HostAttentionBinding{
+		Harness: binding.Harness, Actor: current.actor, RunID: current.runID, SessionID: current.sessionID,
+	}
+	if s.hostRegistrationLive(ctx, currentBinding) {
+		return false
+	}
+
+	s.hostAttentionMu.Lock()
+	defer s.hostAttentionMu.Unlock()
+	latest, stillPresent := s.hostConnections[key]
+	if !stillPresent {
+		return true
+	}
+	if latest.connection != current.connection {
+		return latest.actor == binding.Actor && latest.runID == binding.RunID && latest.sessionID == binding.SessionID
+	}
+	delete(s.hostConnections, key)
+	_ = current.connection.Close()
+	return true
 }
 
 func (s *Server) trackIdentityConnection(connection net.Conn, actor, runID string) {
@@ -615,7 +913,7 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 	case "ping":
 		return DaemonInfo{
 			Protocol: ProtocolVersion, Actor: identity.Actor, PID: os.Getpid(), Build: s.build,
-			Capabilities: protocolCapabilities(),
+			Capabilities: s.protocolCapabilities(),
 		}, nil
 	case "list_capabilities":
 		var args struct{}
@@ -984,18 +1282,83 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		}
 		request.Actor = identity.Actor
 		request.RunID = identity.RunID
+		requestedHostAttention := request.AttentionMode == "host-injected"
+		hostDowngradeReason := ""
+		if requestedHostAttention && !s.experimentalHostAttention {
+			request.AttentionMode = "startup-only"
+			request.DeliveryHandle = ""
+			hostDowngradeReason = "disabled"
+		}
 		if identity.InstanceState == "unreconciled" && request.AttentionMode != "" && request.AttentionMode != "startup-only" {
 			request.AttentionMode = "startup-only"
 			request.DeliveryHandle = ""
+			if requestedHostAttention {
+				hostDowngradeReason = "harness_instance_unreconciled"
+			}
+		}
+		if request.AttentionMode == "host-injected" {
+			if identity.Harness != "claude" || identity.harnessProcess == nil {
+				request.AttentionMode = "startup-only"
+				request.DeliveryHandle = ""
+				hostDowngradeReason = "process_proof_unavailable"
+			} else {
+				binding := bus.HostAttentionBinding{
+					HarnessHandle: "instance:" + identity.harnessProcess.Handle,
+					Harness:       identity.harnessProcess.Harness,
+					Host:          identity.harnessProcess.Host,
+					Actor:         identity.Actor,
+					RunID:         identity.RunID,
+					SessionID:     strings.TrimSpace(request.SessionID),
+				}
+				if !s.hostProcessCanBind(ctx, binding) {
+					request.AttentionMode = "startup-only"
+					request.DeliveryHandle = ""
+					hostDowngradeReason = "binding_in_use"
+				} else {
+					request.HostAttention = &binding
+				}
+			}
 		}
 		registration, err := s.store.RegisterSession(ctx, request)
-		if err == nil && registration.AttentionMode != "startup-only" && identity.InstanceState != "unreconciled" {
+		if requestedHostAttention && errors.Is(err, bus.ErrHostAttentionUnavailable) {
+			var unavailable *bus.HostAttentionUnavailableError
+			if errors.As(err, &unavailable) {
+				hostDowngradeReason = unavailable.ReasonCode
+			} else {
+				hostDowngradeReason = "binding_unavailable"
+			}
+			request.AttentionMode = "startup-only"
+			request.DeliveryHandle = ""
+			request.HostAttention = nil
+			registration, err = s.store.RegisterSession(ctx, request)
+		}
+		if err == nil && registration.AttentionMode == "host-injected" {
+			current, bindingErr := s.store.HostAttentionBinding(ctx, identity.harnessProcess.Harness.PID, identity.harnessProcess.Harness.StartFingerprint)
+			if bindingErr != nil || !current.Admitted {
+				details, _ := json.Marshal(map[string]string{
+					"actor": identity.Actor, "harness": identity.Harness, "reason": "host_not_attached",
+				})
+				_, _ = s.store.ObserveCondition(ctx, bus.ConditionObservation{
+					Kind: "attention_unavailable", Subject: identity.Actor, ReasonCode: "host_not_attached",
+					Summary: "Experimental host attention is registered but no host is admitted for " + identity.Actor,
+					Details: details,
+				})
+			}
+		} else if err == nil && registration.AttentionMode != "startup-only" && identity.InstanceState != "unreconciled" {
 			_ = s.store.ResolveConditionIfReason(ctx, "attention_unavailable", identity.Actor, "startup_only_selected")
 		} else if err == nil && registration.AttentionMode == "startup-only" && identity.InstanceState == "bound" {
-			details, _ := json.Marshal(map[string]string{"actor": identity.Actor, "harness": identity.Harness})
+			reason := "startup_only_selected"
+			summary := "Automatic wake is disabled by configuration for " + identity.Actor
+			if hostDowngradeReason != "" {
+				reason = "host_attention_" + hostDowngradeReason
+				summary = "Host-injected wake is unavailable for " + identity.Actor + "; startup hydration remains enabled"
+			}
+			details, _ := json.Marshal(map[string]string{
+				"actor": identity.Actor, "harness": identity.Harness, "reason": reason,
+			})
 			_, _ = s.store.ObserveCondition(ctx, bus.ConditionObservation{
-				Kind: "attention_unavailable", Subject: identity.Actor, ReasonCode: "startup_only_selected",
-				Summary: "Automatic wake is disabled by configuration for " + identity.Actor, Details: details,
+				Kind: "attention_unavailable", Subject: identity.Actor, ReasonCode: reason,
+				Summary: summary, Details: details,
 			})
 		}
 		return registration, err
@@ -1101,7 +1464,8 @@ func (s *Server) decorateAttentionReceipts(ctx context.Context, receipts []bus.D
 			return err
 		}
 		for _, registration := range registrations {
-			if registration.Harness == "claude" && registration.AttentionMode == "hook-long-poll" &&
+			if registration.Harness == "claude" &&
+				(registration.AttentionMode == "hook-long-poll" || registration.AttentionMode == "host-injected") &&
 				inspector.Attached(registration.Actor, registration.RunID, registration.SessionID) {
 				receipts[index].AttentionAttachment = "attached"
 				receipts[index].AttentionReason = ""
@@ -1124,6 +1488,101 @@ type Client struct {
 	serverCapabilities []string
 	mu                 sync.Mutex
 	nextID             uint64
+}
+
+// HostAttentionClient is a restricted host-side connection. It can only wait
+// for reference-only wake notices and has no actor inbox or messaging authority.
+type HostAttentionClient struct {
+	connection net.Conn
+	reader     *bufio.Reader
+	mu         sync.Mutex
+	nextID     uint64
+}
+
+type HostAttentionNotice struct {
+	MessageID string `json:"message_id,omitempty"`
+}
+
+func DialHostAttention(ctx context.Context, socketPath string, claudePID int) (*HostAttentionClient, error) {
+	dialer := net.Dialer{}
+	connection, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("connect to hollerd at %s: %w", socketPath, err)
+	}
+	client := &HostAttentionClient{connection: connection, reader: bufio.NewReader(connection), nextID: 1}
+	request := Request{ID: client.nextID, Op: "host_attention_hello"}
+	request.Args, err = json.Marshal(map[string]interface{}{
+		"protocol": ProtocolVersion, "claude_pid": claudePID,
+	})
+	if err == nil {
+		err = writeRequest(connection, request)
+	}
+	var response Response
+	if err == nil {
+		response, err = readResponse(client.reader)
+	}
+	if err != nil {
+		_ = connection.Close()
+		return nil, fmt.Errorf("host attention hello: %w", err)
+	}
+	if response.ID != request.ID || !response.OK {
+		_ = connection.Close()
+		if response.Error != nil {
+			return nil, errorFromRPC(response.Error)
+		}
+		return nil, errors.New("hollerd returned invalid host attention response")
+	}
+	var ready struct {
+		Protocol   int    `json:"protocol"`
+		Ready      bool   `json:"ready"`
+		Capability string `json:"capability"`
+	}
+	if err := json.Unmarshal(response.Result, &ready); err != nil || ready.Protocol != ProtocolVersion ||
+		!ready.Ready || ready.Capability != HostAttentionCapability {
+		_ = connection.Close()
+		return nil, errors.New("hollerd returned invalid host attention readiness")
+	}
+	return client, nil
+}
+
+func (c *HostAttentionClient) Wait(ctx context.Context, wait time.Duration) (HostAttentionNotice, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	bounded, cancel := withDefaultTimeout(ctx, wait+2*time.Second)
+	defer cancel()
+	if deadline, ok := bounded.Deadline(); ok {
+		_ = c.connection.SetDeadline(deadline)
+		defer c.connection.SetDeadline(time.Time{})
+	}
+	c.nextID++
+	request := Request{ID: c.nextID, Op: "host_attention_wait"}
+	var err error
+	request.Args, err = json.Marshal(map[string]interface{}{"wait_ns": int64(wait)})
+	if err == nil {
+		err = writeRequest(c.connection, request)
+	}
+	var response Response
+	if err == nil {
+		response, err = readResponse(c.reader)
+	}
+	if err != nil {
+		return HostAttentionNotice{}, err
+	}
+	if response.ID != request.ID || !response.OK {
+		if response.Error != nil {
+			return HostAttentionNotice{}, errorFromRPC(response.Error)
+		}
+		return HostAttentionNotice{}, errors.New("hollerd returned invalid host attention wait response")
+	}
+	var notice HostAttentionNotice
+	if err := json.Unmarshal(response.Result, &notice); err != nil {
+		return HostAttentionNotice{}, fmt.Errorf("decode host attention notice: %w", err)
+	}
+	return notice, nil
+}
+
+func (c *HostAttentionClient) Close() error {
+	return c.connection.Close()
 }
 
 func Dial(ctx context.Context, socketPath string, identity Identity) (*Client, error) {
@@ -1349,7 +1808,7 @@ func (c *Client) WaitAttention(ctx context.Context, actor, runID, sessionID, ada
 		return bus.AttentionNotice{}, err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return bus.AttentionNotice{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return bus.AttentionNotice{}, err
 	}
 	waitCtx, cancel := withDefaultTimeout(ctx, wait+2*time.Second)
 	defer cancel()
@@ -1365,7 +1824,7 @@ func (c *Client) MonitorAttach(ctx context.Context, actor, runID, sessionID, ada
 		return bus.Registration{}, err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return bus.Registration{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return bus.Registration{}, err
 	}
 	var registration bus.Registration
 	err := c.call(ctx, "monitor_attach", map[string]interface{}{
@@ -1423,7 +1882,7 @@ func (c *Client) SetActorProfile(ctx context.Context, actor, runID, projectID st
 		return bus.ActorProfileResult{}, err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return bus.ActorProfileResult{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return bus.ActorProfileResult{}, err
 	}
 	var result bus.ActorProfileResult
 	err := c.call(ctx, "set_actor_profile", map[string]interface{}{
@@ -1614,7 +2073,7 @@ func (c *Client) RecordHydration(ctx context.Context, projectID, actor, runID, h
 		return err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return err
 	}
 	return c.call(ctx, "record_hydration", map[string]interface{}{
 		"project_id": projectID, "run_id": runID, "harness": harness, "session_id": sessionID, "unread": unread,
@@ -1626,7 +2085,7 @@ func (c *Client) ExpireRegistration(ctx context.Context, actor, runID, sessionID
 		return err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return err
 	}
 	return c.call(ctx, "expire_registration", map[string]interface{}{
 		"session_id": sessionID, "reason": reason,
@@ -1638,7 +2097,7 @@ func (c *Client) HeartbeatRegistrations(ctx context.Context, actor, runID string
 		return 0, err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return 0, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return 0, err
 	}
 	var result struct {
 		Renewed int `json:"renewed"`
@@ -1650,7 +2109,7 @@ func (c *Client) HeartbeatRegistrations(ctx context.Context, actor, runID string
 func (c *Client) requireActor(actor string) error {
 	identity := c.Identity()
 	if strings.TrimSpace(actor) != identity.Actor {
-		return &bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"}
+		return &identityReboundError{validation: &bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"}}
 	}
 	return nil
 }
@@ -1660,7 +2119,7 @@ func (c *Client) requireRun(runID string) error {
 	defer c.mu.Unlock()
 	candidate := strings.TrimSpace(runID)
 	if candidate != c.identity.RunID && candidate != c.helloIdentity.RunID {
-		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return &identityReboundError{validation: &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}}
 	}
 	return nil
 }
