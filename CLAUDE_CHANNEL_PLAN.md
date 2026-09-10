@@ -152,6 +152,29 @@ passes.
 
 ## Test plan
 
+### Observed v0.7.1 SDK baseline
+
+The `reviewer-holler` canary established the failure state this work must fix:
+
+- An idle `sdk-ts` Claude session did not receive a live wake. The durable
+  message remained unclaimed for about 49 minutes and was recovered only when
+  a new session reported one unread message during startup hydration.
+- The daemon raised `stale_unread` with
+  `wake_requested_unclaimed_threshold`, which correctly detected the missing
+  processing but did not provide an SDK wake transport.
+- No `holler monitor` process existed for the SDK session. That is consistent
+  with the connector's SDK deadlock guard and confirms this case needs Claude
+  Channel attention rather than another hook continuation change.
+- The first `bus_inbox` call after startup failed because the actor did not
+  match the authenticated API session. `bus_status` observed the new run and a
+  retry succeeded without claiming the message twice. Track this MCP/run
+  rebinding race separately and require the first inbox call to succeed in the
+  Channel canary.
+- No duplicate delivery or recursive Stop continuation was observed.
+
+This baseline means v0.7.1 preserves durable recovery but does not remove the
+SDK live-wake launch blocker.
+
 ### Unit and protocol tests
 
 - Channel capability and instructions are absent by default and present only
@@ -229,4 +252,3 @@ session assigned the `reviewer-holler` alias.
 - A successful stdio notification write is not a client acknowledgement.
 - Public readiness depends on both a Holler release and a compatible T3 release;
   configuration alone is suitable only for the local proof of concept.
-
