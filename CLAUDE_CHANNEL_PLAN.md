@@ -1,6 +1,7 @@
 # Claude Channel Attention Plan
 
-Status: implementation branch (`feature/claude-channel`)
+Status: Holler implementation branch (`feature/claude-channel`); T3 work is
+proposal-only
 
 ## Objective
 
@@ -77,6 +78,10 @@ The launch path should use the smallest supported transport that passes the
 real T3 lifecycle matrix. Claude Channel remains experimental while Anthropic's
 research-preview allowlist excludes third-party plugins for ordinary Pro and
 Max sessions.
+
+Any T3-side work is gated on maintainer discussion. See
+[T3_HOST_ATTENTION_PROPOSAL.md](T3_HOST_ATTENTION_PROPOSAL.md). No T3 patch or
+pull request is part of this Holler branch.
 
 ### 1. Fix MCP identity rebinding first
 
@@ -181,7 +186,7 @@ Holler changes:
   renews, or extends registration presence; the MCP heartbeat remains the
   registration lease authority.
 
-T3 changes:
+Proposed T3 integration contract (discussion only):
 
 - Connect the T3 server itself to the framed host-attention protocol over the
   Unix socket. Do not spawn `holler attention wait` for the product integration:
@@ -311,10 +316,11 @@ The host selects the transport. Users do not choose `hook-long-poll` versus
 6. **Revisit public Channels later:** only after Anthropic offers a viable
    third-party distribution path and the combined packaged canary passes.
 
-Holler and T3 changes should remain separate commits or pull requests linked to
-this contract. Identity reconciliation and the rejected SDK experiment are now
-complete. The next code slice is the host attention-wait API plus a T3 proof of
-concept. Channel dispatch remains behind the development flag.
+Holler changes remain independent of any future T3 work. Identity
+reconciliation and the rejected SDK experiment are now complete. The Holler
+branch may implement and test its host attention API, but T3 remains at the
+proposal stage until its maintainers agree on the integration boundary. Channel
+dispatch remains behind the development flag.
 
 ## Test plan
 
