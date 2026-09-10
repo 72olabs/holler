@@ -1,3 +1,25 @@
+# Holler 0.7.3
+
+Holler 0.7.3 is a release-hygiene update. It removes internal Claude Channel
+and T3 host-attention design documents that were unintentionally included in
+the public 0.7.2 source tree and release archives.
+
+## Changes
+
+- Remove `CLAUDE_CHANNEL_PLAN.md` and `T3_HOST_ATTENTION_PROPOSAL.md` from the
+  public repository.
+- Reserve the gitignored `.docs/` directory for local design documents,
+  proposals, research notes, and other non-release working material.
+
+## Compatibility and validation
+
+- Runtime behavior, wire protocol 1, database schema 15, and the frozen MCP
+  tool surface are unchanged from 0.7.2.
+- Full tests, connector package checks, release packaging, and the seven
+  isolated certification labs pass for the 0.7.3 release candidate.
+
+---
+
 # Holler 0.7.2
 
 Holler 0.7.2 hardens connector identity reconciliation and adds dormant,

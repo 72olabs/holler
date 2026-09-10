@@ -1,6 +1,7 @@
 # Internal product work and local experiments. Shipping connector packages
 # belong in connectors/marketplace, never under these paths.
 /.internal/
+/.docs/
 /experiments/
 /plans/
 /notes/
