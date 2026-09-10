@@ -82,9 +82,10 @@ before another goroutine changes the client identity. Its following
 actor-validated call then fails with `actor: does not match the authenticated
 API session`.
 
-- Make identity snapshot plus actor/run validation atomic for MCP-backed API
-  calls, or retry only the pre-operation identity-mismatch case after fetching
-  the new binding. Never retry an operation whose commit status is ambiguous.
+- Treat the MCP identity lookup as a snapshot, not an atomic transaction with
+  the daemon call. Retry only the typed pre-operation identity-rebound error
+  emitted by the local API guard after fetching the new binding. Never retry an
+  operation whose commit status is ambiguous or a daemon-returned lookalike.
 - Keep the provisional reservation invisible and do not attach attention until
   SessionStart has finalized the canonical actor/run/session registration.
 - Add deterministic tests that reconcile between identity lookup and inbox,

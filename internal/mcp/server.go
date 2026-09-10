@@ -601,14 +601,7 @@ func withBoundIdentityRetry[T any](s *Server, operation func(actor, runID string
 }
 
 func isAuthenticatedIdentityMismatch(err error) bool {
-	var validation *bus.ValidationError
-	if !errors.As(err, &validation) {
-		return false
-	}
-	if validation.Problem != "does not match the authenticated API session" {
-		return false
-	}
-	return validation.Field == "actor" || validation.Field == "run_id"
+	return errors.Is(err, bus.ErrIdentityRebound)
 }
 
 func messageView(message bus.Message, recipientActor, originalRecipientActor, leaseToken string, leaseExpires time.Time, attempt int) map[string]interface{} {

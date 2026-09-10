@@ -93,6 +93,13 @@ type rpcResponseError struct{ err error }
 func (e *rpcResponseError) Error() string { return e.err.Error() }
 func (e *rpcResponseError) Unwrap() error { return e.err }
 
+type identityReboundError struct{ validation *bus.ValidationError }
+
+func (e *identityReboundError) Error() string { return e.validation.Error() }
+func (e *identityReboundError) Unwrap() []error {
+	return []error{e.validation, bus.ErrIdentityRebound}
+}
+
 type Store interface {
 	Send(context.Context, bus.SendRequest) (bus.SendResult, error)
 	CheckInbox(context.Context, string, int) ([]bus.InboxItem, error)
@@ -1349,7 +1356,7 @@ func (c *Client) WaitAttention(ctx context.Context, actor, runID, sessionID, ada
 		return bus.AttentionNotice{}, err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return bus.AttentionNotice{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return bus.AttentionNotice{}, err
 	}
 	waitCtx, cancel := withDefaultTimeout(ctx, wait+2*time.Second)
 	defer cancel()
@@ -1365,7 +1372,7 @@ func (c *Client) MonitorAttach(ctx context.Context, actor, runID, sessionID, ada
 		return bus.Registration{}, err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return bus.Registration{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return bus.Registration{}, err
 	}
 	var registration bus.Registration
 	err := c.call(ctx, "monitor_attach", map[string]interface{}{
@@ -1423,7 +1430,7 @@ func (c *Client) SetActorProfile(ctx context.Context, actor, runID, projectID st
 		return bus.ActorProfileResult{}, err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return bus.ActorProfileResult{}, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return bus.ActorProfileResult{}, err
 	}
 	var result bus.ActorProfileResult
 	err := c.call(ctx, "set_actor_profile", map[string]interface{}{
@@ -1614,7 +1621,7 @@ func (c *Client) RecordHydration(ctx context.Context, projectID, actor, runID, h
 		return err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return err
 	}
 	return c.call(ctx, "record_hydration", map[string]interface{}{
 		"project_id": projectID, "run_id": runID, "harness": harness, "session_id": sessionID, "unread": unread,
@@ -1626,7 +1633,7 @@ func (c *Client) ExpireRegistration(ctx context.Context, actor, runID, sessionID
 		return err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return err
 	}
 	return c.call(ctx, "expire_registration", map[string]interface{}{
 		"session_id": sessionID, "reason": reason,
@@ -1638,7 +1645,7 @@ func (c *Client) HeartbeatRegistrations(ctx context.Context, actor, runID string
 		return 0, err
 	}
 	if err := c.requireRun(runID); err != nil {
-		return 0, &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return 0, err
 	}
 	var result struct {
 		Renewed int `json:"renewed"`
@@ -1650,7 +1657,7 @@ func (c *Client) HeartbeatRegistrations(ctx context.Context, actor, runID string
 func (c *Client) requireActor(actor string) error {
 	identity := c.Identity()
 	if strings.TrimSpace(actor) != identity.Actor {
-		return &bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"}
+		return &identityReboundError{validation: &bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"}}
 	}
 	return nil
 }
@@ -1660,7 +1667,7 @@ func (c *Client) requireRun(runID string) error {
 	defer c.mu.Unlock()
 	candidate := strings.TrimSpace(runID)
 	if candidate != c.identity.RunID && candidate != c.helloIdentity.RunID {
-		return &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}
+		return &identityReboundError{validation: &bus.ValidationError{Field: "run_id", Problem: "does not match the authenticated API session"}}
 	}
 	return nil
 }

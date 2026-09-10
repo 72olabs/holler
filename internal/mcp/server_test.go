@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -224,6 +225,34 @@ func TestMCPInboxRetriesPreOperationIdentityMismatchAfterRebind(t *testing.T) {
 	}
 }
 
+func TestMCPDoesNotRetryDaemonIdentityMismatchLookalike(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	lookalike := &daemonIdentityLookalikeStore{
+		Store: db, actor: "reviewer-provisional", runID: "run-provisional",
+	}
+	server, err := mcp.New(lookalike, mcp.Config{
+		Actor: "reviewer-provisional", RunID: "run-provisional", ProjectID: "experiment",
+	})
+	if err != nil {
+		t.Fatalf("new MCP server: %v", err)
+	}
+	responses := exchange(t, server,
+		toolCall(1, "bus_check_inbox", map[string]interface{}{}),
+	)
+	if responseErr := responses[0]["error"]; responseErr == nil {
+		t.Fatal("daemon identity-lookalike error was unexpectedly hidden")
+	}
+	if calls := lookalike.checkInboxCalls(); calls != 1 {
+		t.Fatalf("check inbox calls = %d, want no retry for daemon error", calls)
+	}
+}
+
 type reboundIdentityStore struct {
 	mcp.Store
 	mu         sync.Mutex
@@ -245,17 +274,52 @@ func (s *reboundIdentityStore) CheckInbox(ctx context.Context, actor string, lim
 		s.actor = "reviewer-canonical"
 		s.runID = "run-canonical"
 		s.mu.Unlock()
-		return nil, &bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"}
+		return nil, errors.Join(
+			&bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"},
+			bus.ErrIdentityRebound,
+		)
 	}
 	currentActor := s.actor
 	s.mu.Unlock()
 	if actor != currentActor {
-		return nil, &bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"}
+		return nil, errors.Join(
+			&bus.ValidationError{Field: "actor", Problem: "does not match the authenticated API session"},
+			bus.ErrIdentityRebound,
+		)
 	}
 	return s.Store.CheckInbox(ctx, actor, limit)
 }
 
 func (s *reboundIdentityStore) checkInboxCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inboxCalls
+}
+
+type daemonIdentityLookalikeStore struct {
+	mcp.Store
+	mu         sync.Mutex
+	actor      string
+	runID      string
+	inboxCalls int
+}
+
+func (s *daemonIdentityLookalikeStore) BoundIdentity() (string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.actor, s.runID
+}
+
+func (s *daemonIdentityLookalikeStore) CheckInbox(context.Context, string, int) ([]bus.InboxItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inboxCalls++
+	s.actor = "reviewer-canonical"
+	s.runID = "run-canonical"
+	return nil, fmt.Errorf("actor: does not match the authenticated API session: %w", bus.ErrInvalid)
+}
+
+func (s *daemonIdentityLookalikeStore) checkInboxCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.inboxCalls
