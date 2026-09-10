@@ -24,7 +24,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const migrationVersion = 14
+const migrationVersion = 15
 
 const (
 	migrationRetryWindow = 5 * time.Second

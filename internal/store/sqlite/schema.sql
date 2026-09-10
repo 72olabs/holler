@@ -130,6 +130,24 @@ CREATE TABLE IF NOT EXISTS harness_instance_bindings (
 CREATE INDEX IF NOT EXISTS harness_instance_bindings_actor
     ON harness_instance_bindings(actor);
 
+CREATE TABLE IF NOT EXISTS host_attention_bindings (
+    harness_pid INTEGER NOT NULL,
+    harness_start TEXT NOT NULL,
+    harness_handle TEXT NOT NULL,
+    host_pid INTEGER NOT NULL,
+    host_start TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at_ns INTEGER NOT NULL,
+    updated_at_ns INTEGER NOT NULL,
+    PRIMARY KEY (harness_pid, harness_start),
+    UNIQUE (actor, run_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS host_attention_bindings_pid
+    ON host_attention_bindings(harness_pid);
+
 CREATE TABLE IF NOT EXISTS actor_adoptions (
     source_actor TEXT PRIMARY KEY,
     adopting_actor TEXT NOT NULL,

@@ -68,6 +68,17 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 			return bus.Registration{}, &bus.ValidationError{Field: "registration.attention_mode", Problem: "must be native-prompt or startup-only for opencode"}
 		}
 	}
+	if req.AttentionMode == "host-injected" {
+		if req.HostAttention == nil {
+			return bus.Registration{}, &bus.ValidationError{Field: "registration.host_attention", Problem: "requires daemon-derived process evidence"}
+		}
+		req.HostAttention.Actor = req.Actor
+		req.HostAttention.RunID = req.RunID
+		req.HostAttention.SessionID = req.SessionID
+		if err := validateHostAttentionBinding(*req.HostAttention); err != nil {
+			return bus.Registration{}, err
+		}
+	}
 
 	now := s.now().UTC()
 	expires := now.Add(req.Lease)
@@ -100,6 +111,11 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 		req.ProjectID, req.WorkingDir, now.UnixNano(), now.UnixNano(), expires.UnixNano()); err != nil {
 		return bus.Registration{}, fmt.Errorf("register session: %w", err)
 	}
+	if req.HostAttention != nil {
+		if err := bindHostAttentionTx(ctx, tx, *req.HostAttention, now); err != nil {
+			return bus.Registration{}, err
+		}
+	}
 	registration, err := getRegistrationTx(ctx, tx, req.Actor, req.RunID, req.SessionID)
 	if err != nil {
 		return bus.Registration{}, err
@@ -120,6 +136,65 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 		return bus.Registration{}, fmt.Errorf("commit registration: %w", err)
 	}
 	return registration, nil
+}
+
+func validateHostAttentionBinding(binding bus.HostAttentionBinding) error {
+	if strings.TrimSpace(binding.HarnessHandle) == "" || binding.Harness.PID <= 1 ||
+		strings.TrimSpace(binding.Harness.StartFingerprint) == "" || binding.Host.PID <= 1 ||
+		strings.TrimSpace(binding.Host.StartFingerprint) == "" {
+		return &bus.ValidationError{Field: "registration.host_attention", Problem: "requires eligible harness and direct-parent process identities"}
+	}
+	return nil
+}
+
+func bindHostAttentionTx(ctx context.Context, tx *sql.Tx, binding bus.HostAttentionBinding, now time.Time) error {
+	var boundActor, boundRun string
+	err := tx.QueryRowContext(ctx, `
+		SELECT actor, run_id FROM harness_instance_bindings WHERE handle = ?`, binding.HarnessHandle).
+		Scan(&boundActor, &boundRun)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &bus.ValidationError{Field: "registration.host_attention", Problem: "harness instance is not daemon-bound"}
+	}
+	if err != nil {
+		return fmt.Errorf("read host attention harness binding: %w", err)
+	}
+	if boundActor != binding.Actor || boundRun != binding.RunID {
+		return &bus.ValidationError{Field: "registration.host_attention", Problem: "actor and run do not match the daemon-bound harness instance"}
+	}
+	var actor, runID, sessionID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT actor, run_id, session_id FROM host_attention_bindings
+		WHERE harness_pid = ? AND harness_start = ?`, binding.Harness.PID, binding.Harness.StartFingerprint).
+		Scan(&actor, &runID, &sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO host_attention_bindings(
+				harness_pid, harness_start, harness_handle, host_pid, host_start,
+				actor, run_id, session_id, created_at_ns, updated_at_ns
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			binding.Harness.PID, binding.Harness.StartFingerprint, binding.HarnessHandle,
+			binding.Host.PID, binding.Host.StartFingerprint, binding.Actor, binding.RunID,
+			binding.SessionID, now.UnixNano(), now.UnixNano())
+		if err != nil {
+			return fmt.Errorf("bind host attention process: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read host attention process binding: %w", err)
+	}
+	if actor != binding.Actor || runID != binding.RunID || sessionID != binding.SessionID {
+		return &bus.ValidationError{Field: "registration.host_attention", Problem: "harness process is already bound to another registration"}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE host_attention_bindings
+		SET harness_handle = ?, host_pid = ?, host_start = ?, updated_at_ns = ?
+		WHERE harness_pid = ? AND harness_start = ?`, binding.HarnessHandle,
+		binding.Host.PID, binding.Host.StartFingerprint, now.UnixNano(),
+		binding.Harness.PID, binding.Harness.StartFingerprint); err != nil {
+		return fmt.Errorf("refresh host attention process binding: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) LiveRegistrations(ctx context.Context, actor string) ([]bus.Registration, error) {
@@ -414,6 +489,11 @@ func (s *Store) ExpireRegistration(ctx context.Context, actor, runID, sessionID,
 		WHERE actor = ? AND run_id = ? AND session_id = ?`,
 		now.UnixNano(), now.UnixNano(), now.UnixNano(), actor, runID, sessionID); err != nil {
 		return fmt.Errorf("expire registration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM host_attention_bindings
+		WHERE actor = ? AND run_id = ? AND session_id = ?`, actor, runID, sessionID); err != nil {
+		return fmt.Errorf("remove host attention binding: %w", err)
 	}
 	if err := s.appendEventTx(ctx, tx, projectID, "operational", "session.stale", "", actor,
 		map[string]interface{}{"run_id": runID, "session_id": sessionID, "reason": reason}, now); err != nil {

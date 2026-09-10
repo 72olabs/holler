@@ -361,15 +361,35 @@ type Registration struct {
 }
 
 type RegistrationRequest struct {
-	Actor          string        `json:"actor,omitempty"`
-	RunID          string        `json:"run_id,omitempty"`
-	Harness        string        `json:"harness"`
-	AttentionMode  string        `json:"attention_mode,omitempty"`
-	SessionID      string        `json:"session_id"`
-	DeliveryHandle string        `json:"delivery_handle"`
-	ProjectID      string        `json:"project_id"`
-	WorkingDir     string        `json:"working_directory,omitempty"`
-	Lease          time.Duration `json:"lease"`
+	Actor          string                `json:"actor,omitempty"`
+	RunID          string                `json:"run_id,omitempty"`
+	Harness        string                `json:"harness"`
+	AttentionMode  string                `json:"attention_mode,omitempty"`
+	SessionID      string                `json:"session_id"`
+	DeliveryHandle string                `json:"delivery_handle"`
+	ProjectID      string                `json:"project_id"`
+	WorkingDir     string                `json:"working_directory,omitempty"`
+	Lease          time.Duration         `json:"lease"`
+	HostAttention  *HostAttentionBinding `json:"-"`
+}
+
+// ProcessIdentity is daemon-derived OS process evidence. It is never accepted
+// from the public registration protocol.
+type ProcessIdentity struct {
+	PID              int
+	StartFingerprint string
+}
+
+// HostAttentionBinding persists the exact Claude child and direct host process
+// associated with one host-injected registration. HarnessHandle is used only to
+// verify the registration against the daemon-owned harness-instance binding.
+type HostAttentionBinding struct {
+	HarnessHandle string
+	Harness       ProcessIdentity
+	Host          ProcessIdentity
+	Actor         string
+	RunID         string
+	SessionID     string
 }
 
 // ActorProfile is model-authored discovery metadata. It is descriptive only:

@@ -157,17 +157,22 @@ Holler changes:
   must never claim messages, inject content, or manufacture a registration
   after startup grace.
 - Treat the launch handle as correlation only, never as authority. It is present
-  in Claude's environment and can therefore be read by model-spawned processes.
+  in Claude's environment, can be read by model-spawned and other same-user
+  processes, and must not select a host-attention binding.
   When a trusted lifecycle hook or MCP attachment binds the harness instance,
   record the daemon-verified Claude PID and process start time, plus Claude's
   direct-parent PID and start time, with the exact actor/run/session
-  registration.
-- On host attach, use the handle only to find the candidate registration, then
-  verify the connecting peer's PID and start time through the daemon. They must
-  exactly equal the recorded direct-parent PID and start time, and PID 1 is
-  never eligible. A grandparent, sibling, Claude itself, or descendant such as
-  model-spawned Bash must be rejected even when it presents the correct handle.
-  Comparing start times makes PID reuse fail closed.
+  registration. Persist this binding so an idle session can reattach after a
+  daemon restart without another SessionStart event.
+- Key the binding by the daemon-derived Claude PID and start fingerprint, never
+  by a client-supplied string. Require its actor/run to equal the actor/run in
+  the daemon-owned harness-instance binding, and refuse to point a process key
+  at another registration while it has an admitted host connection.
+- On host attach, accept only `{claude_pid}` for selection. Verify that PID's
+  current start fingerprint matches the persisted Claude process, then verify
+  that the connecting peer PID and start fingerprint exactly equal Claude's
+  recorded direct parent. PID 1 is never eligible. A grandparent, sibling,
+  Claude itself, or descendant such as model-spawned Bash must be rejected.
 - A later opaque attachment token may be minted only after this host ancestry
   proof succeeds. It must be bound to the connection and must never be placed
   in Claude's environment.
@@ -182,6 +187,9 @@ T3 changes:
   Unix socket. Do not spawn `holler attention wait` for the product integration:
   that CLI would be Claude's sibling and cannot satisfy direct-parent identity.
   Keep the CLI only as a lab/test client.
+- Wrap the SDK's `spawnClaudeCodeProcess` callback, retain the exact spawned
+  Claude child PID, and use that PID for the in-process host attachment. Do not
+  rediscover or select the child by launch tag, command name, or process order.
 - Start one in-process waiter with the long-lived Claude query, cancel it before
   or with `query.close()`, and restart it only after the exact session reattaches.
 - On a notice, enqueue the fixed input `Holler has unread messages; call
@@ -272,8 +280,9 @@ Holler cannot infer Channel readiness from a successful stdout write. T3 must
 report successful activation of the exact configured Holler server and Holler
 must observe the matching live attachment. For `host-injected`, `READY` requires
 the daemon to have admitted a live host connection whose PID and start time
-exactly match Claude's recorded direct parent for that registration; knowing a
-launch handle or starting a waiter is not readiness evidence. If the SDK cannot
+exactly match Claude's recorded direct parent for that registration and whose
+supplied Claude PID matches the persisted process generation; knowing a launch
+handle or starting a waiter is not readiness evidence. If the SDK cannot
 distinguish Channel policy denial from activation, report wake as unverified/off
 until a canary event is claimed; never infer `READY`.
 
@@ -390,17 +399,18 @@ small public fix; T3 process management is not assumed.
 
 ### Host-injected wake proof
 
-- The host waiter cannot attach with a stale actor, run, session, launch
-  handle, or ended registration.
-- A model-spawned Bash process presenting the correct launch handle is rejected.
+- The host waiter cannot attach with an unknown/reused Claude PID or a stale,
+  mismatched, or ended registration.
+- A model-spawned Bash process attempting to attach is rejected.
   So are a waiter CLI spawned by T3, a process spawned by a neighboring
   `codex app-server`, and a grandparent such as the T3 app, a shell, or tmux.
   Only T3's in-process connection, whose peer PID and start time exactly equal
   Claude's recorded direct parent, is admitted; PID 1 and a reused PID with a
   different start time are rejected.
-- The launch handle performs lookup only. Any opaque token is minted after the
-  ancestry check, remains outside Claude's environment, and expires with the
-  host connection.
+- A launch handle never performs lookup or selects a host binding. A descendant
+  of Claude A that races with Claude B's launch tag cannot create or redirect
+  B's PID-keyed binding. A live process key cannot be rebound to another
+  actor/run/session.
 - The public host notice is exactly `{message_id}`. Broker thread, sender, type,
   delivery-request, and message-body fields are absent even when populated with
   hostile values.
@@ -424,7 +434,8 @@ small public fix; T3 process management is not assumed.
   it human-authored. Peer body, sender, type, and thread metadata do not appear
   in the injected SDK input.
 - Daemon restart, T3 restart, query close/reopen, and waiter reconnect preserve
-  durable messages and never leave duplicate waiters.
+  durable messages and never leave duplicate waiters. A daemon restart retains
+  the persisted process binding so T3 can reattach without a new SessionStart.
 - All real-client canaries use a temporary socket and database. No experiment
   may register actors or conditions in the operator's production daemon.
   Teardown uses exact existing identities and must not allocate replacement
