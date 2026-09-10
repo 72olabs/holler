@@ -31,7 +31,7 @@ var (
 	ErrBindingStale         = errors.New("actor binding is stale: this run was superseded and cannot reclaim the actor")
 	ErrContinuityConflict   = errors.New("continuity handles resolve to different actors")
 	ErrBindingReassigned    = errors.New("provisional actor binding was reassigned")
-	ErrIdentityRebound      = errors.New("authenticated API identity changed before the operation started")
+	ErrIdentityRebound      = errors.New("requested identity does not match the connection-bound identity")
 	ErrAdoptionConflict     = errors.New("actor inbox was already adopted by another actor")
 	ErrAdoptionBusy         = errors.New("actor inbox has an active claim")
 	ErrActorNotLive         = errors.New("adopting actor has no live presence")

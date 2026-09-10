@@ -5,10 +5,15 @@ set -eu
 # hooks before exiting. A live long-poll can therefore deadlock a one-shot
 # command: Claude waits for Holler while Holler waits for Claude's result
 # channel to close. Startup hydration still runs through the ordinary hook, so
-# skip only the live monitor for the SDK entrypoint family.
+# skip only the live monitor for the SDK entrypoint family. A host that owns a
+# long-lived streaming query may explicitly opt into Claude's asyncRewake path.
 if [ "${1:-}" = "monitor" ]; then
   case "${CLAUDE_CODE_ENTRYPOINT:-}" in
-    sdk-cli|sdk-ts|sdk-py) exit 0 ;;
+    sdk-cli|sdk-ts|sdk-py)
+      if [ "${HOLLER_CLAUDE_LIVE_WAKE:-}" != "1" ]; then
+        exit 0
+      fi
+      ;;
   esac
 fi
 

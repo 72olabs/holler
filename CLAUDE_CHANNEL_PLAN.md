@@ -95,6 +95,15 @@ API session`.
 This race affects both hook and Channel transports, so no wake-path experiment
 is meaningful until it is fixed.
 
+Follow-up hardening after the launch-path experiment:
+
+- Restart the complete `bus_inbox` operation once if its check and claim phases
+  straddle an identity rebind; never return a misleading empty result for the
+  new actor after silently skipping the old actor's message IDs.
+- Translate ack, extend, and nack failures caused by a post-claim rebind into an
+  explicit `identity changed since claim` diagnostic rather than exposing a
+  bare lease mismatch.
+
 ### 2. Run the SDK async-rewake guard-bypass experiment
 
 The Claude Agent SDK bundled by current T3 supports `asyncRewake` hooks. The
