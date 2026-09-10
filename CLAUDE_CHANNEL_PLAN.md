@@ -4,10 +4,10 @@ Status: implementation branch (`feature/claude-channel`)
 
 ## Objective
 
-Evaluate Claude Code Channels as an experimental Holler attention transport for
-SDK-style sessions while first testing whether the SDK's existing
-`asyncRewake` hook support can provide the public live-wake path with a smaller,
-safer integration.
+Deliver a public Holler attention path for SDK-style sessions while evaluating
+Claude Code Channels as an experimental transport. The SDK `asyncRewake` hook
+path has been tested and rejected; the next public-path candidate is an
+ID-only, host-injected wake owned by T3.
 
 This is an attention-path change, not a change to Holler's delivery contract.
 The durable inbox, claim lease, processing, reply, and acknowledgement remain
@@ -22,9 +22,9 @@ work planned for Holler V2.
 
 ```text
 hollerd durable outbox
-  -> exact actor/run/session Channel attachment
-  -> Holler MCP server
-  -> notifications/claude/channel (message ID only)
+  -> exact actor/run/session attention attachment
+  -> T3-owned waiter -> fixed ID-only synthetic SDK input       (public path)
+     or Holler MCP -> notifications/claude/channel, ID only     (experimental)
   -> Claude synthetic turn
   -> bus_inbox claim
   -> agent processes and optionally replies
@@ -35,6 +35,8 @@ The internal Claude attention adapters will be:
 
 - `hook-long-poll`: interactive Claude CLI sessions supervised by Holler's
   existing hook monitor.
+- `host-injected`: SDK hosts such as T3 that own both the streaming query and
+  an exact Holler attention waiter.
 - `claude-channel`: hosts using the Claude Agent SDK, or another host that
   explicitly enables Holler's Channel-capable MCP server.
 - `startup-only`: durable hydration with no live wake transport.
@@ -63,6 +65,9 @@ attachment.
   must fall back truthfully to `startup-only`; Holler cannot detect policy
   denial from its stdout write and must not report `READY` without host evidence.
 - Existing hook-long-poll and startup-only behavior must remain unchanged.
+- Host-injected wake text is Holler-generated, fixed, ID-only, and explicitly
+  labeled synthetic/agent-originated in both the SDK input and T3 UI. It must
+  never be rendered or persisted as human-authored input.
 
 ## Decision and implementation order
 
@@ -126,14 +131,69 @@ host opt-in:
   immediate synthetic continuation, proving `asyncRewake` reacts to output but
   does not keep a silent long poll alive across idle turns.
 - The identical control query with the shipping guard completed normally in
-  3.7 seconds. Every canary ended its registration and left zero orphan monitor
-  processes.
+  3.7 seconds. Controlled query-close canaries ended cleanly, but a separate
+  manual shell workaround left a monitor orphan because its reparented shell
+  kept the output pipe open after Claude exited. That monitor renewed a phantom
+  live registration until it was explicitly terminated.
 
 Keep the SDK guard unchanged. A T3 environment-only change cannot provide the
-required live wake. Continue with the Claude Channel vertical slice; do not ship
-the experimental opt-in.
+required live wake. Do not ship the experimental opt-in.
 
-### 3. Keep Claude Channel behind a development flag
+### 3. Prove host-injected wake as the public SDK path
+
+There is no protocol blocker to a host-injected wake, provided the host owns
+the SDK query and the attention wait, and the injected frame contains no
+peer-authored data. The proof of concept should use the existing broker and
+exact attachment checks rather than a new delivery subscription.
+
+Holler changes:
+
+- Add a small host-facing attention wait API/CLI that attaches to one exact
+  actor, run, and session, blocks for an attention notice, and emits structured
+  JSON containing only the durable message ID. It must never claim messages,
+  inject content, or manufacture a registration after startup grace.
+- Require explicit daemon-proven attachment identity. Do not allow an arbitrary
+  session ID alone to select another actor's waiter. For the proof of concept,
+  T3 should generate a unique launch handle shared with SessionStart and the
+  waiter; a later protocol may replace this with an opaque attachment token.
+- Make cancellation authoritative: when T3 closes the query or waiter pipe, the
+  wait detaches immediately and presence cannot remain live by lease renewal.
+
+T3 changes:
+
+- Start one waiter with the long-lived Claude query, cancel it before or with
+  `query.close()`, and restart it only after the exact session reattaches.
+- On a notice, enqueue exactly one fixed input such as `Holler message <id> is
+  available; call bus_inbox`, marked synthetic with agent/system provenance.
+  Render a system event in T3; never display it as a user message.
+- While Claude is busy, queue and coalesce wake hints without claiming or
+  dropping durable messages. A subsequent `bus_inbox` call remains the only
+  authority for what Claude processes.
+
+Reject this public path if the tested SDK cannot preserve synthetic provenance,
+if injection interrupts or impersonates the user, or if waiter cancellation
+can leave a live attachment. Claude Channel remains the experimental fallback.
+
+### 4. Harden hook-monitor process liveness
+
+The output pipe is not sufficient proof that Claude is alive. A shell or `cat`
+process can inherit the descriptor, become reparented to launchd, and keep a
+monitor renewing a phantom registration after the harness exits.
+
+- Bind the monitor to the verified Claude harness ancestor observed during API
+  attachment, expose that process identity without trusting caller-supplied
+  metadata, and cancel the monitor when that ancestor exits. On macOS prefer a
+  kqueue `NOTE_EXIT` watch; retain a bounded portable polling fallback.
+- Do not let a standalone monitor create a replacement registration after
+  startup grace unless daemon-verified lifecycle-hook provenance authorizes the
+  fallback. A host attention waiter never self-registers.
+- On ancestor exit, detach the waiter and expire the exact registration rather
+  than waiting for passive lease timeout.
+- Add a regression lab that kills Claude while a descendant deliberately holds
+  the result pipe open. The monitor and descendants must exit, and status must
+  stop reporting live presence within the teardown bound.
+
+### 5. Keep Claude Channel behind a development flag
 
 The protocol-safe foundation on this branch remains useful, but it is not a
 public setup option:
@@ -156,7 +216,7 @@ preview unless an organization explicitly places Holler in its managed
 Foundry. Do not expose `claude-channel` in `holler setup` while those constraints
 remain.
 
-### 4. Reuse the attention broker for Channel dispatch
+### 6. Reuse the attention broker for Channel dispatch
 
 Do not build a second delivery subscription. After SessionStart finalizes the
 registration, the Channel-enabled MCP process should resolve that exact
@@ -175,7 +235,7 @@ timer, raise a visible condition, and allow at most one bounded re-notification
 for the same still-unread message and unchanged attachment. Inbox claims remain
 the only processing authority.
 
-### 5. Make readiness host-attested and user-simple
+### 7. Make readiness host-attested and user-simple
 
 Holler cannot infer Channel readiness from a successful stdout write. T3 must
 report successful activation of the exact configured Holler server and Holler
@@ -185,7 +245,8 @@ claimed; never infer `READY`.
 
 Keep detailed states internal. Present one user concept with one remediation:
 
-- `Live wake: ready (hook monitor)` or `Live wake: ready (Claude Channel)`.
+- `Live wake: ready (hook monitor)`, `Live wake: ready (host injected)`, or
+  `Live wake: ready (Claude Channel)`.
 - `Live wake: off. Messages will arrive at next session start. Fix: <action>`.
 
 The host selects the transport. Users do not choose `hook-long-poll` versus
@@ -197,16 +258,20 @@ The host selects the transport. Users do not choose `hook-long-poll` versus
    reconciliation.
 2. **Launch-path experiment (complete, rejected):** the SDK async-rewake hook
    cannot retain a parked monitor after a T3 turn result.
-3. **Experimental Channel vertical slice:** finish ID-only broker dispatch,
+3. **Host-injected proof:** add the exact, cancellable attention-wait API and
+   prove fixed ID-only synthetic injection in T3.
+4. **Monitor liveness hardening:** tie hook monitor lifetime to its verified
+   Claude ancestor and remove unverified self-registration fallback behavior.
+5. **Experimental Channel vertical slice:** finish ID-only broker dispatch,
    host-attested readiness, bounded unclaimed recovery, and protocol/security
    tests behind the development flag.
-4. **Revisit public Channels later:** only after Anthropic offers a viable
+6. **Revisit public Channels later:** only after Anthropic offers a viable
    third-party distribution path and the combined packaged canary passes.
 
 Holler and T3 changes should remain separate commits or pull requests linked to
 this contract. Identity reconciliation and the rejected SDK experiment are now
-complete. The next code slice is daemon Channel dispatch behind the development
-flag, followed by explicit T3 Channel activation and readiness evidence.
+complete. The next code slice is the host attention-wait API plus a T3 proof of
+concept. Channel dispatch remains behind the development flag.
 
 ## Test plan
 
@@ -253,7 +318,8 @@ small public fix; T3 process management is not assumed.
 - Concurrent responses and notifications remain valid, non-interleaved JSONL.
 - Channel payloads contain required fixed `content` and only
   `meta: {message_id}`, never the message body.
-- Connector/API/store validation accepts only the three documented modes.
+- Connector/API/store validation accepts only implemented modes; adding
+  `host-injected` requires an explicit allowlist and downgrade tests.
 - Exact actor/run/session routing rejects stale or mismatched attachments.
 - Repeated notification attempts cannot create duplicate durable messages.
 
@@ -276,8 +342,10 @@ small public fix; T3 process management is not assumed.
 - A SessionStart long poll blocked SDK initialization and result delivery.
 - A Stop-only long poll allowed the result but did not survive the idle
   boundary; a wake-requested message remained durable and unclaimed.
-- `query.close()` consistently expired the registration and left no orphan
-  monitor, including after the 120-second blocked-start timeout.
+- Controlled `query.close()` calls expired their registrations. A separate
+  shell-backgrounded monitor outlived Claude because a reparented shell kept
+  its result pipe open, renewed a phantom registration, and required explicit
+  termination. This invalidates the earlier blanket zero-orphan claim.
 - Hook output triggered an immediate continuation, so using heartbeat or
   diagnostic output to hold the channel open would create a wake loop rather
   than a stable attachment.
@@ -285,6 +353,26 @@ small public fix; T3 process management is not assumed.
   and are never kept open by Holler.
 - The SDK hook path is rejected for T3 live wake. No
   `HOLLER_CLAUDE_LIVE_WAKE` option is shipped.
+
+### Host-injected wake proof
+
+- The host waiter cannot attach with a stale actor, run, session, launch
+  handle, or ended registration.
+- Closing the T3 query cancels the waiter before readiness can renew; keeping
+  stdout open cannot manufacture or extend presence.
+- Kill Claude while the waiter's output pipe remains open. The waiter exits and
+  the exact registration becomes non-live within the bounded teardown window.
+- An idle query receives one fixed, ID-only synthetic input, claims and
+  acknowledges the corresponding inbox item, and produces one agent turn.
+- Busy queries queue multiple notices without interruption; the next synthetic
+  turn drains durable inbox state once with no loss, replay, or reordering.
+- T3 renders the wake as a system/agent event and the transcript never labels
+  it human-authored. Peer body, sender, type, and thread metadata do not appear
+  in the injected SDK input.
+- Daemon restart, T3 restart, query close/reopen, and waiter reconnect preserve
+  durable messages and never leave duplicate waiters.
+- All real-client canaries use a temporary socket and database. No experiment
+  may register actors or conditions in the operator's production daemon.
 
 ### Security tests
 
@@ -300,8 +388,9 @@ small public fix; T3 process management is not assumed.
 
 ### Launch-blocker real-client canary
 
-Use a fresh isolated Git repository, daemon database, T3 profile, and Claude
-session assigned the `reviewer-holler` alias.
+Use a fresh isolated Git repository, daemon socket/database, T3 profile, and
+Claude session assigned the `reviewer-holler` alias. Never point this canary at
+the operator's production `~/.holler` state.
 
 1. Verify the exact T3, Agent SDK, Claude Code, Holler, connector, and daemon
    build identities.
@@ -314,8 +403,8 @@ session assigned the `reviewer-holler` alias.
    processed once in the documented order.
 6. Repeat across a daemon restart, an MCP reconnect, and a complete T3/Claude
    restart.
-7. Exercise missing host opt-in and, for Channel, policy-blocked activation;
-   prove the UI/status says startup-only rather than ready.
+7. Exercise missing/stale host attachment and, for Channel, policy-blocked
+   activation; prove the UI/status says startup-only rather than ready.
 8. Finish with empty inboxes, no active claims, zero orphan monitor processes,
    no lost/duplicated/misrouted messages, and retained provenance for every
    reply.
