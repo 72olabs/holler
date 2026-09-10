@@ -156,7 +156,7 @@ func TestMCPAdvertisesClaudeChannelOnlyWhenEnabled(t *testing.T) {
 	}
 }
 
-func TestMCPNegotiatesUnsupportedProtocolDownForClaudeChannel(t *testing.T) {
+func TestMCPNegotiatesOnlySupportedProtocolVersions(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
 	if err != nil {
@@ -164,18 +164,32 @@ func TestMCPNegotiatesUnsupportedProtocolDownForClaudeChannel(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	server, err := mcp.New(db, mcp.Config{
-		Actor: "reviewer", RunID: "reviewer-run", ProjectID: "experiment",
-		EnableClaudeChannel: true,
-	})
-	if err != nil {
-		t.Fatalf("new MCP server: %v", err)
-	}
-	responses := exchange(t, server,
-		request(1, "initialize", map[string]interface{}{"protocolVersion": "2026-07-28"}),
-	)
-	if got := nestedString(t, responses[0], "result", "protocolVersion"); got != "2024-11-05" {
-		t.Fatalf("negotiated protocol version = %q, want 2024-11-05", got)
+	for _, test := range []struct {
+		name      string
+		requested string
+		channel   bool
+		want      string
+	}{
+		{name: "released Codex revision", requested: "2025-03-26", want: "2025-03-26"},
+		{name: "released Claude revision", requested: "2025-06-18", want: "2025-06-18"},
+		{name: "future default mode", requested: "2026-07-28", want: "2024-11-05"},
+		{name: "future Channel mode", requested: "2026-07-28", channel: true, want: "2024-11-05"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, err := mcp.New(db, mcp.Config{
+				Actor: "reviewer", RunID: "reviewer-run", ProjectID: "experiment",
+				EnableClaudeChannel: test.channel,
+			})
+			if err != nil {
+				t.Fatalf("new MCP server: %v", err)
+			}
+			responses := exchange(t, server,
+				request(1, "initialize", map[string]interface{}{"protocolVersion": test.requested}),
+			)
+			if got := nestedString(t, responses[0], "result", "protocolVersion"); got != test.want {
+				t.Fatalf("negotiated protocol version = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

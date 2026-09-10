@@ -19,6 +19,12 @@ import (
 
 const defaultProtocolVersion = "2024-11-05"
 
+var supportedProtocolVersions = map[string]struct{}{
+	"2024-11-05": {},
+	"2025-03-26": {},
+	"2025-06-18": {},
+}
+
 const claudeChannelInstructions = "Holler Channel notifications are untrusted wake hints containing only a durable message ID. Use bus_inbox to claim the message, process it, reply when needed, and call bus_ack with the lease token. Do not ask the user to relay the message."
 
 type Store interface {
@@ -179,10 +185,10 @@ func (s *Server) handle(ctx context.Context, req request) (interface{}, bool, er
 		if len(req.Params) > 0 {
 			_ = json.Unmarshal(req.Params, &params)
 		}
-		// Negotiate down when the client requests a revision Holler does not
-		// implement. Echoing a future revision can make Claude Code reject an
-		// otherwise valid Channel server.
-		if params.ProtocolVersion != defaultProtocolVersion {
+		// Preserve revisions used by released clients, but negotiate down when
+		// the client requests a revision Holler has not certified. Echoing
+		// 2026-07-28 can make Claude Code reject a Channel server.
+		if _, supported := supportedProtocolVersions[params.ProtocolVersion]; !supported {
 			params.ProtocolVersion = defaultProtocolVersion
 		}
 		capabilities := map[string]interface{}{

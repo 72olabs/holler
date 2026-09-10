@@ -254,6 +254,9 @@ small public fix; T3 process management is not assumed.
 
 ### SDK async-rewake experiment
 
+- Close the T3 query first: SessionEnd must expire the registration before the
+  SDK waits for outstanding async hooks, causing `wait_attention` and the
+  monitor to exit promptly. Fail the experiment on any shutdown hang or orphan.
 - A long-lived `sdk-ts` query with `HOLLER_CLAUDE_LIVE_WAKE=1` wakes from idle
   through Claude's existing async-rewake hook handling.
 - A parked monitor does not delay or suppress the current turn's SDK `result`
@@ -262,8 +265,6 @@ small public fix; T3 process management is not assumed.
   diagnostic; it must not report live readiness.
 - Claude's hook runner rearms exactly once after normal Stop, StopFailure, and
   async wake continuation, without a recursive wake loop.
-- Closing the query/session cancels the monitor promptly and leaves no
-  orphan process or live registration.
 - Daemon loss reconnects without terminating the T3 session or dropping the
   durable message.
 - One-shot `sdk-cli`, `sdk-ts`, and `sdk-py` commands retain the current guard
