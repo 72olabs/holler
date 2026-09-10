@@ -70,7 +70,7 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 	}
 	if req.AttentionMode == "host-injected" {
 		if req.HostAttention == nil {
-			return bus.Registration{}, &bus.ValidationError{Field: "registration.host_attention", Problem: "requires daemon-derived process evidence"}
+			return bus.Registration{}, hostAttentionUnavailable("process_proof_unavailable", "daemon-derived process evidence is missing")
 		}
 		req.HostAttention.Actor = req.Actor
 		req.HostAttention.RunID = req.RunID
@@ -142,9 +142,13 @@ func validateHostAttentionBinding(binding bus.HostAttentionBinding) error {
 	if strings.TrimSpace(binding.HarnessHandle) == "" || binding.Harness.PID <= 1 ||
 		strings.TrimSpace(binding.Harness.StartFingerprint) == "" || binding.Host.PID <= 1 ||
 		strings.TrimSpace(binding.Host.StartFingerprint) == "" {
-		return &bus.ValidationError{Field: "registration.host_attention", Problem: "requires eligible harness and direct-parent process identities"}
+		return hostAttentionUnavailable("process_proof_unavailable", "eligible harness and direct-parent process identities are required")
 	}
 	return nil
+}
+
+func hostAttentionUnavailable(reason, problem string) error {
+	return &bus.HostAttentionUnavailableError{ReasonCode: reason, Problem: problem}
 }
 
 func bindHostAttentionTx(ctx context.Context, tx *sql.Tx, binding bus.HostAttentionBinding, now time.Time) error {
@@ -153,13 +157,13 @@ func bindHostAttentionTx(ctx context.Context, tx *sql.Tx, binding bus.HostAttent
 		SELECT actor, run_id FROM harness_instance_bindings WHERE handle = ?`, binding.HarnessHandle).
 		Scan(&boundActor, &boundRun)
 	if errors.Is(err, sql.ErrNoRows) {
-		return &bus.ValidationError{Field: "registration.host_attention", Problem: "harness instance is not daemon-bound"}
+		return hostAttentionUnavailable("harness_instance_unbound", "harness instance is not daemon-bound")
 	}
 	if err != nil {
 		return fmt.Errorf("read host attention harness binding: %w", err)
 	}
 	if boundActor != binding.Actor || boundRun != binding.RunID {
-		return &bus.ValidationError{Field: "registration.host_attention", Problem: "actor and run do not match the daemon-bound harness instance"}
+		return hostAttentionUnavailable("harness_identity_mismatch", "actor and run do not match the daemon-bound harness instance")
 	}
 	var actor, runID, sessionID string
 	err = tx.QueryRowContext(ctx, `
@@ -183,8 +187,28 @@ func bindHostAttentionTx(ctx context.Context, tx *sql.Tx, binding bus.HostAttent
 	if err != nil {
 		return fmt.Errorf("read host attention process binding: %w", err)
 	}
-	if actor != binding.Actor || runID != binding.RunID || sessionID != binding.SessionID {
-		return &bus.ValidationError{Field: "registration.host_attention", Problem: "harness process is already bound to another registration"}
+	if actor != binding.Actor || runID != binding.RunID {
+		return hostAttentionUnavailable("process_binding_conflict", "harness process is bound to another actor or run")
+	}
+	if sessionID != binding.SessionID {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE registrations SET attention_superseded_at_ns = ?
+			WHERE actor = ? AND run_id = ? AND session_id = ?
+			  AND ended_at_ns IS NULL AND attention_superseded_at_ns IS NULL`,
+			now.UnixNano(), actor, runID, sessionID); err != nil {
+			return fmt.Errorf("supersede previous host attention registration: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE host_attention_bindings
+			SET harness_handle = ?, host_pid = ?, host_start = ?, actor = ?, run_id = ?,
+			    session_id = ?, updated_at_ns = ?
+			WHERE harness_pid = ? AND harness_start = ?`,
+			binding.HarnessHandle, binding.Host.PID, binding.Host.StartFingerprint,
+			binding.Actor, binding.RunID, binding.SessionID, now.UnixNano(),
+			binding.Harness.PID, binding.Harness.StartFingerprint); err != nil {
+			return fmt.Errorf("replace host attention process binding: %w", err)
+		}
+		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE host_attention_bindings

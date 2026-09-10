@@ -54,14 +54,6 @@ func TestHostAttentionAdmitsExactParentAndProjectsMessageID(t *testing.T) {
 		}
 		t.Fatalf("duplicate host error = %v", duplicateErr)
 	}
-	if _, err := client.RegisterSession(ctx, bus.RegistrationRequest{
-		Actor: client.Identity().Actor, RunID: client.Identity().RunID,
-		Harness: "claude", AttentionMode: "host-injected", SessionID: "session-2",
-		ProjectID: "test", Lease: time.Hour,
-	}); !errors.Is(err, bus.ErrInvalid) {
-		t.Fatalf("live host process rebind error = %v", err)
-	}
-
 	type waitResult struct {
 		notice api.HostAttentionNotice
 		err    error
@@ -232,6 +224,49 @@ func TestHostAttentionDisconnectCancelsParkedWait(t *testing.T) {
 	}
 }
 
+func TestLiveHostProcessRebindFallsBackToStartupOnly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	evidence := api.HarnessProcessIdentity{
+		Handle:  "hin_host_live_rebind",
+		Harness: api.ProcessIdentity{PID: 67537, StartFingerprint: "claude-live-start"},
+		Host:    api.ProcessIdentity{PID: 8784, StartFingerprint: "t3-server-start"},
+	}
+	_, socket := startServer(t, ctx, cancel,
+		api.WithAttentionBroker(attention.NewBroker()),
+		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
+			return evidence, nil
+		}),
+		api.WithPeerProcessResolver(func(net.Conn) (api.ProcessIdentity, error) {
+			return evidence.Host, nil
+		}),
+		api.WithProcessStartResolver(func(int) (string, error) {
+			return evidence.Harness.StartFingerprint, nil
+		}),
+	)
+	client, _ := registerHostInjectedClaude(t, ctx, socket)
+	defer client.Close()
+	host, err := api.DialHostAttention(ctx, socket, evidence.Harness.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	replacement, err := client.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: client.Identity().Actor, RunID: client.Identity().RunID,
+		Harness: "claude", AttentionMode: "host-injected", SessionID: "session-2",
+		ProjectID: "test", Lease: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("live rebind should degrade, not fail: %v", err)
+	}
+	if replacement.AttentionMode != "startup-only" {
+		t.Fatalf("live rebind mode = %q", replacement.AttentionMode)
+	}
+	conditions, err := client.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 1 || conditions[0].ReasonCode != "host_attention_binding_in_use" {
+		t.Fatalf("host fallback conditions = %+v, err=%v", conditions, err)
+	}
+}
+
 func TestCrossSessionLaunchTagRaceCannotRedirectHostBinding(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	hostProcess := api.ProcessIdentity{PID: 8784, StartFingerprint: "t3-server-start"}
@@ -337,6 +372,10 @@ func TestHostInjectedRegistrationFailsClosedWithoutProcessProof(t *testing.T) {
 	}
 	if registration.AttentionMode != "startup-only" {
 		t.Fatalf("registration mode = %q, want startup-only", registration.AttentionMode)
+	}
+	conditions, err := client.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 1 || conditions[0].ReasonCode != "host_attention_process_proof_unavailable" {
+		t.Fatalf("process-proof fallback conditions = %+v, err=%v", conditions, err)
 	}
 }
 

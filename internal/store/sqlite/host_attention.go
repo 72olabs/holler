@@ -9,12 +9,15 @@ import (
 	"github.com/72olabs/holler/internal/bus"
 )
 
-// HostAttentionBindingByPID returns one live host-injected registration for
-// the exact Claude PID. Callers must separately verify the PID's current start
-// fingerprint and the connecting host's peer credentials.
-func (s *Store) HostAttentionBindingByPID(ctx context.Context, harnessPID int) (bus.HostAttentionBinding, error) {
+// HostAttentionBinding returns the live host-injected registration for one
+// exact Claude process generation. Callers must separately verify the
+// connecting host's peer credentials.
+func (s *Store) HostAttentionBinding(ctx context.Context, harnessPID int, harnessStart string) (bus.HostAttentionBinding, error) {
 	if harnessPID <= 1 {
 		return bus.HostAttentionBinding{}, &bus.ValidationError{Field: "claude_pid", Problem: "must identify an eligible process"}
+	}
+	if harnessStart == "" {
+		return bus.HostAttentionBinding{}, &bus.ValidationError{Field: "claude_process", Problem: "start fingerprint is required"}
 	}
 	now := s.now().UTC().UnixNano()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -38,8 +41,7 @@ func (s *Store) HostAttentionBindingByPID(ctx context.Context, harnessPID int) (
 	rows, err := tx.QueryContext(ctx, `
 		SELECT harness_handle, harness_pid, harness_start, host_pid, host_start,
 		       actor, run_id, session_id
-		FROM host_attention_bindings WHERE harness_pid = ?
-		ORDER BY updated_at_ns DESC`, harnessPID)
+		FROM host_attention_bindings WHERE harness_pid = ? AND harness_start = ?`, harnessPID, harnessStart)
 	if err != nil {
 		return bus.HostAttentionBinding{}, fmt.Errorf("query host attention binding: %w", err)
 	}
@@ -53,9 +55,6 @@ func (s *Store) HostAttentionBindingByPID(ctx context.Context, harnessPID int) (
 	}
 	if err := scanHostAttentionBinding(rows, &result); err != nil {
 		return bus.HostAttentionBinding{}, err
-	}
-	if rows.Next() {
-		return bus.HostAttentionBinding{}, &bus.ValidationError{Field: "claude_pid", Problem: "matches multiple live process generations"}
 	}
 	if err := rows.Err(); err != nil {
 		return bus.HostAttentionBinding{}, err

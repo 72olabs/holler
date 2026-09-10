@@ -124,7 +124,7 @@ type Store interface {
 	Nack(context.Context, string, string, string, string, bool) error
 	ListEvents(context.Context, string, string, int64, int) ([]bus.Event, error)
 	RegisterSession(context.Context, bus.RegistrationRequest) (bus.Registration, error)
-	HostAttentionBindingByPID(context.Context, int) (bus.HostAttentionBinding, error)
+	HostAttentionBinding(context.Context, int, string) (bus.HostAttentionBinding, error)
 	AttachMonitor(context.Context, string, string, string, string, string, time.Duration) (bus.Registration, error)
 	RearmAcceptedNotifications(context.Context, string) error
 	LiveRegistrations(context.Context, string) ([]bus.Registration, error)
@@ -660,16 +660,19 @@ func (s *Server) serveHostAttentionConnection(ctx context.Context, connection ne
 		_ = writeResponse(connection, failure(helloRequest.ID, "unauthenticated", "host attention attachment was not admitted", false))
 		return
 	}
-	binding, err := s.store.HostAttentionBindingByPID(ctx, hello.ClaudePID)
-	if err != nil || s.resolvePeerProcess == nil || s.resolveProcessStart == nil {
+	if s.resolvePeerProcess == nil || s.resolveProcessStart == nil {
 		_ = writeResponse(connection, failure(helloRequest.ID, "unauthenticated", "host attention attachment was not admitted", false))
 		return
 	}
 	currentHarnessStart, startErr := s.resolveProcessStart(hello.ClaudePID)
+	if startErr != nil || strings.TrimSpace(currentHarnessStart) == "" {
+		_ = writeResponse(connection, failure(helloRequest.ID, "unauthenticated", "host attention attachment was not admitted", false))
+		return
+	}
+	binding, err := s.store.HostAttentionBinding(ctx, hello.ClaudePID, currentHarnessStart)
 	peer, peerErr := s.resolvePeerProcess(connection)
 	harness := HarnessProcessIdentity{Handle: binding.HarnessHandle, Harness: binding.Harness, Host: binding.Host}
-	if startErr != nil || currentHarnessStart != binding.Harness.StartFingerprint ||
-		peerErr != nil || authorizeHostPeer(harness, peer) != nil || !s.hostRegistrationLive(ctx, binding) {
+	if err != nil || peerErr != nil || authorizeHostPeer(harness, peer) != nil || !s.hostRegistrationLive(ctx, binding) {
 		_ = writeResponse(connection, failure(helloRequest.ID, "unauthenticated", "host attention attachment was not admitted", false))
 		return
 	}
@@ -1233,14 +1236,20 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		}
 		request.Actor = identity.Actor
 		request.RunID = identity.RunID
+		requestedHostAttention := request.AttentionMode == "host-injected"
+		hostDowngradeReason := ""
 		if identity.InstanceState == "unreconciled" && request.AttentionMode != "" && request.AttentionMode != "startup-only" {
 			request.AttentionMode = "startup-only"
 			request.DeliveryHandle = ""
+			if requestedHostAttention {
+				hostDowngradeReason = "harness_instance_unreconciled"
+			}
 		}
 		if request.AttentionMode == "host-injected" {
 			if identity.Harness != "claude" || identity.harnessProcess == nil {
 				request.AttentionMode = "startup-only"
 				request.DeliveryHandle = ""
+				hostDowngradeReason = "process_proof_unavailable"
 			} else {
 				binding := bus.HostAttentionBinding{
 					HarnessHandle: "instance:" + identity.harnessProcess.Handle,
@@ -1251,19 +1260,44 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 					SessionID:     strings.TrimSpace(request.SessionID),
 				}
 				if !s.hostProcessCanBind(binding) {
-					return nil, &bus.ValidationError{Field: "registration.host_attention", Problem: "harness process has an admitted host attachment for another registration"}
+					request.AttentionMode = "startup-only"
+					request.DeliveryHandle = ""
+					hostDowngradeReason = "binding_in_use"
+				} else {
+					request.HostAttention = &binding
 				}
-				request.HostAttention = &binding
 			}
 		}
 		registration, err := s.store.RegisterSession(ctx, request)
-		if err == nil && registration.AttentionMode != "startup-only" && identity.InstanceState != "unreconciled" {
+		if requestedHostAttention && errors.Is(err, bus.ErrHostAttentionUnavailable) {
+			var unavailable *bus.HostAttentionUnavailableError
+			if errors.As(err, &unavailable) {
+				hostDowngradeReason = unavailable.ReasonCode
+			} else {
+				hostDowngradeReason = "binding_unavailable"
+			}
+			request.AttentionMode = "startup-only"
+			request.DeliveryHandle = ""
+			request.HostAttention = nil
+			registration, err = s.store.RegisterSession(ctx, request)
+		}
+		if err == nil && registration.AttentionMode == "host-injected" {
+			_ = s.store.ResolveCondition(ctx, "attention_unavailable", identity.Actor)
+		} else if err == nil && registration.AttentionMode != "startup-only" && identity.InstanceState != "unreconciled" {
 			_ = s.store.ResolveConditionIfReason(ctx, "attention_unavailable", identity.Actor, "startup_only_selected")
 		} else if err == nil && registration.AttentionMode == "startup-only" && identity.InstanceState == "bound" {
-			details, _ := json.Marshal(map[string]string{"actor": identity.Actor, "harness": identity.Harness})
+			reason := "startup_only_selected"
+			summary := "Automatic wake is disabled by configuration for " + identity.Actor
+			if hostDowngradeReason != "" {
+				reason = "host_attention_" + hostDowngradeReason
+				summary = "Host-injected wake is unavailable for " + identity.Actor + "; startup hydration remains enabled"
+			}
+			details, _ := json.Marshal(map[string]string{
+				"actor": identity.Actor, "harness": identity.Harness, "reason": reason,
+			})
 			_, _ = s.store.ObserveCondition(ctx, bus.ConditionObservation{
-				Kind: "attention_unavailable", Subject: identity.Actor, ReasonCode: "startup_only_selected",
-				Summary: "Automatic wake is disabled by configuration for " + identity.Actor, Details: details,
+				Kind: "attention_unavailable", Subject: identity.Actor, ReasonCode: reason,
+				Summary: summary, Details: details,
 			})
 		}
 		return registration, err

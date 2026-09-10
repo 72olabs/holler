@@ -15,35 +15,50 @@ const SchemaVersion = 1
 const MaxBodyBytes = 1 << 20
 
 var (
-	ErrInvalid              = errors.New("invalid request")
-	ErrNotFound             = errors.New("not found")
-	ErrNoMessage            = errors.New("no claimable message")
-	ErrAttentionWaiterBusy  = errors.New("attention waiter already active")
-	ErrAttentionUnavailable = errors.New("attention waiting is unavailable")
-	ErrSessionEnded         = errors.New("session ended")
-	ErrPresenceSuperseded   = errors.New("attention presence superseded")
-	ErrRegistrationExpired  = errors.New("registration expired")
-	ErrIdempotencyConflict  = errors.New("idempotency key reused for different message")
-	ErrLeaseTokenMismatch   = errors.New("lease token mismatch")
-	ErrLeaseExpired         = errors.New("lease expired")
-	ErrDeliveryTerminal     = errors.New("delivery is already terminal")
-	ErrActorLive            = errors.New("actor already has a live presence")
-	ErrBindingStale         = errors.New("actor binding is stale: this run was superseded and cannot reclaim the actor")
-	ErrContinuityConflict   = errors.New("continuity handles resolve to different actors")
-	ErrBindingReassigned    = errors.New("provisional actor binding was reassigned")
-	ErrIdentityRebound      = errors.New("requested identity does not match the connection-bound identity")
-	ErrAdoptionConflict     = errors.New("actor inbox was already adopted by another actor")
-	ErrAdoptionBusy         = errors.New("actor inbox has an active claim")
-	ErrActorNotLive         = errors.New("adopting actor has no live presence")
-	ErrRunNotLive           = errors.New("adopting run has no live presence")
-	ErrActorAdopted         = errors.New("actor identity was permanently adopted")
-	ErrAliasConflict        = errors.New("actor and alias namespaces conflict")
-	ErrAliasNotFound        = errors.New("actor alias not found")
-	ErrAliasTombstoned      = errors.New("actor alias was removed and is reserved")
-	ErrAliasTargetUnknown   = errors.New("alias target is not a known actor")
-	ErrDatabaseOwned        = errors.New("another hollerd already owns this database")
-	ErrActorArchived        = errors.New("actor is archived")
+	ErrInvalid                  = errors.New("invalid request")
+	ErrNotFound                 = errors.New("not found")
+	ErrNoMessage                = errors.New("no claimable message")
+	ErrAttentionWaiterBusy      = errors.New("attention waiter already active")
+	ErrAttentionUnavailable     = errors.New("attention waiting is unavailable")
+	ErrSessionEnded             = errors.New("session ended")
+	ErrPresenceSuperseded       = errors.New("attention presence superseded")
+	ErrRegistrationExpired      = errors.New("registration expired")
+	ErrIdempotencyConflict      = errors.New("idempotency key reused for different message")
+	ErrLeaseTokenMismatch       = errors.New("lease token mismatch")
+	ErrLeaseExpired             = errors.New("lease expired")
+	ErrDeliveryTerminal         = errors.New("delivery is already terminal")
+	ErrActorLive                = errors.New("actor already has a live presence")
+	ErrBindingStale             = errors.New("actor binding is stale: this run was superseded and cannot reclaim the actor")
+	ErrContinuityConflict       = errors.New("continuity handles resolve to different actors")
+	ErrBindingReassigned        = errors.New("provisional actor binding was reassigned")
+	ErrIdentityRebound          = errors.New("requested identity does not match the connection-bound identity")
+	ErrHostAttentionUnavailable = errors.New("host attention is unavailable")
+	ErrAdoptionConflict         = errors.New("actor inbox was already adopted by another actor")
+	ErrAdoptionBusy             = errors.New("actor inbox has an active claim")
+	ErrActorNotLive             = errors.New("adopting actor has no live presence")
+	ErrRunNotLive               = errors.New("adopting run has no live presence")
+	ErrActorAdopted             = errors.New("actor identity was permanently adopted")
+	ErrAliasConflict            = errors.New("actor and alias namespaces conflict")
+	ErrAliasNotFound            = errors.New("actor alias not found")
+	ErrAliasTombstoned          = errors.New("actor alias was removed and is reserved")
+	ErrAliasTargetUnknown       = errors.New("alias target is not a known actor")
+	ErrDatabaseOwned            = errors.New("another hollerd already owns this database")
+	ErrActorArchived            = errors.New("actor is archived")
 )
+
+type HostAttentionUnavailableError struct {
+	ReasonCode string
+	Problem    string
+}
+
+func (e *HostAttentionUnavailableError) Error() string {
+	if strings.TrimSpace(e.Problem) == "" {
+		return ErrHostAttentionUnavailable.Error()
+	}
+	return ErrHostAttentionUnavailable.Error() + ": " + e.Problem
+}
+
+func (e *HostAttentionUnavailableError) Unwrap() error { return ErrHostAttentionUnavailable }
 
 type NameMode string
 
