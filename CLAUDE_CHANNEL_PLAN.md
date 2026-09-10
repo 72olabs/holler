@@ -128,6 +128,34 @@ The proof of concept should use the development-channel flag only in an
 isolated test profile. Release builds should use Anthropic's supported
 allowlist/policy path.
 
+### 5. Decision gate: managed monitor or Claude Channel
+
+A follow-up `reviewer-holler` canary proved that `holler monitor` itself can
+wake a long-lived `sdk-ts` session. The shipping plugin wrapper currently exits
+before launching it for every SDK entrypoint; that guard protects one-shot SDK
+commands from waiting forever on an async hook, but it also disables live wake
+for long-lived T3 sessions.
+
+Before completing the Channel vertical slice, compare these two supported-host
+designs:
+
+1. **T3-managed hook monitor:** T3 launches and rearms `holler monitor` as a
+   background task for its long-lived Claude session. Its stdout/stderr must be
+   a pipe or socket so Holler can observe result-channel closure; redirecting to
+   a regular file disables that liveness contract. Holler may add an explicit
+   opt-in that bypasses the SDK wrapper guard, but the default guard must remain
+   for one-shot SDK users.
+2. **Claude Channel:** T3 enables Holler's Channel-capable MCP server and Holler
+   emits ID-only `notifications/claude/channel` events as described above.
+
+The managed-monitor path reuses the released durable attention broker and may
+be the smaller launch-blocker fix. The Channel path is a cleaner native SDK
+transport but carries research-preview, allowlist, and SDK-typing risk. Run the
+same idle, busy, rearm, restart, and shutdown matrix against both. Select the
+managed monitor if it has clean lifecycle behavior and does not delay query
+completion; otherwise continue with Channel activation. Do not ship two active
+wake transports for one session.
+
 ## Delivery sequence
 
 1. **Protocol-safe foundation**: this branch adds the design, opt-in MCP
@@ -162,9 +190,15 @@ The `reviewer-holler` canary established the failure state this work must fix:
 - The daemon raised `stale_unread` with
   `wake_requested_unclaimed_threshold`, which correctly detected the missing
   processing but did not provide an SDK wake transport.
-- No `holler monitor` process existed for the SDK session. That is consistent
-  with the connector's SDK deadlock guard and confirms this case needs Claude
-  Channel attention rather than another hook continuation change.
+- No `holler monitor` process existed under the shipping SDK configuration.
+  Local source confirms that the plugin wrapper exits immediately for
+  `sdk-cli`, `sdk-ts`, and `sdk-py` before invoking the monitor. This establishes
+  a missing host integration, not a limitation of the monitor itself.
+- A follow-up manual canary launched `holler monitor` as a background task with
+  pipe-backed stdout/stderr. It immediately surfaced an approximately
+  88-minute-old durable reply, exited with the expected async-rewake status,
+  and caused the SDK session to run again. The reviewer then rearmed it with
+  `stop_hook_active=true` for the continuation path.
 - The first `bus_inbox` call after startup failed because the actor did not
   match the authenticated API session. `bus_status` observed the new run and a
   retry succeeded without claiming the message twice. Track this MCP/run
@@ -172,8 +206,10 @@ The `reviewer-holler` canary established the failure state this work must fix:
   Channel canary.
 - No duplicate delivery or recursive Stop continuation was observed.
 
-This baseline means v0.7.1 preserves durable recovery but does not remove the
-SDK live-wake launch blocker.
+This baseline means v0.7.1 preserves durable recovery and contains a working
+monitor primitive, but the shipping SDK guard still leaves T3 without a managed
+live-wake attachment. The decision gate above determines whether T3 should
+manage that monitor or adopt Claude Channels.
 
 ### Unit and protocol tests
 
@@ -198,6 +234,22 @@ SDK live-wake launch blocker.
 - T3/Claude restart hydrates unread work once and reattaches cleanly.
 - Policy denial and unsupported clients register startup-only and explain why.
 - Existing hook-long-poll certification remains green.
+
+### T3-managed monitor comparison tests
+
+- A long-lived `sdk-ts` session wakes from idle with the monitor running as a
+  background task and pipe/socket-backed output.
+- The same command with regular-file output fails closed with a visible
+  diagnostic; it must not report live readiness.
+- T3 rearms exactly once after normal Stop, StopFailure, and async wake
+  continuation, without a recursive wake loop.
+- T3 cancels the monitor promptly when the query/session closes and leaves no
+  orphan process or live registration.
+- Daemon loss reconnects without terminating the T3 session or dropping the
+  durable message.
+- One-shot `sdk-cli`, `sdk-ts`, and `sdk-py` commands retain the current guard
+  and are never kept open by Holler.
+- Enabling the managed monitor and Claude Channel together is rejected.
 
 ### Security tests
 
