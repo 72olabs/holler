@@ -23,7 +23,7 @@ work planned for Holler V2.
 ```text
 hollerd durable outbox
   -> exact actor/run/session attention attachment
-  -> T3-owned waiter -> fixed ID-only synthetic SDK input       (public path)
+  -> T3 in-process waiter -> fixed data-free synthetic SDK input (public path)
      or Holler MCP -> notifications/claude/channel, ID only     (experimental)
   -> Claude synthetic turn
   -> bus_inbox claim
@@ -159,14 +159,15 @@ Holler changes:
 - Treat the launch handle as correlation only, never as authority. It is present
   in Claude's environment and can therefore be read by model-spawned processes.
   When a trusted lifecycle hook or MCP attachment binds the harness instance,
-  record the daemon-verified Claude PID and process start time with the exact
-  actor/run/session registration.
+  record the daemon-verified Claude PID and process start time, plus Claude's
+  direct-parent PID and start time, with the exact actor/run/session
+  registration.
 - On host attach, use the handle only to find the candidate registration, then
-  verify the connecting peer's PID and start time through the daemon. That
-  process must be a strict ancestor of the recorded Claude process. A sibling,
-  Claude itself, or a descendant such as model-spawned Bash must be rejected
-  even when it presents the correct handle. Include start times in the proof so
-  PID reuse fails closed.
+  verify the connecting peer's PID and start time through the daemon. They must
+  exactly equal the recorded direct-parent PID and start time, and PID 1 is
+  never eligible. A grandparent, sibling, Claude itself, or descendant such as
+  model-spawned Bash must be rejected even when it presents the correct handle.
+  Comparing start times makes PID reuse fail closed.
 - A later opaque attachment token may be minted only after this host ancestry
   proof succeeds. It must be bound to the connection and must never be placed
   in Claude's environment.
@@ -177,8 +178,12 @@ Holler changes:
 
 T3 changes:
 
-- Start one waiter with the long-lived Claude query, cancel it before or with
-  `query.close()`, and restart it only after the exact session reattaches.
+- Connect the T3 server itself to the framed host-attention protocol over the
+  Unix socket. Do not spawn `holler attention wait` for the product integration:
+  that CLI would be Claude's sibling and cannot satisfy direct-parent identity.
+  Keep the CLI only as a lab/test client.
+- Start one in-process waiter with the long-lived Claude query, cancel it before
+  or with `query.close()`, and restart it only after the exact session reattaches.
 - On a notice, enqueue the fixed input `Holler has unread messages; call
   bus_inbox`. Keep the message ID only in host state for deduplication; do not
   put it or any body, sender, type, or thread in the SDK input.
@@ -266,11 +271,11 @@ the only processing authority.
 Holler cannot infer Channel readiness from a successful stdout write. T3 must
 report successful activation of the exact configured Holler server and Holler
 must observe the matching live attachment. For `host-injected`, `READY` requires
-the daemon to have admitted a live host connection with reverse-ancestry proof
-for the exact registration; knowing a launch handle or starting a waiter is not
-readiness evidence. If the SDK cannot distinguish Channel policy denial from
-activation, report wake as unverified/off until a canary event is claimed; never
-infer `READY`.
+the daemon to have admitted a live host connection whose PID and start time
+exactly match Claude's recorded direct parent for that registration; knowing a
+launch handle or starting a waiter is not readiness evidence. If the SDK cannot
+distinguish Channel policy denial from activation, report wake as unverified/off
+until a canary event is claimed; never infer `READY`.
 
 Keep detailed states internal. Present one user concept with one remediation:
 
@@ -288,7 +293,7 @@ The host selects the transport. Users do not choose `hook-long-poll` versus
 2. **Launch-path experiment (complete, rejected):** the SDK async-rewake hook
    cannot retain a parked monitor after a T3 turn result.
 3. **Host-injected proof:** add the exact, cancellable attention-wait API and
-   prove fixed ID-only synthetic injection in T3.
+   prove fixed, data-free synthetic injection in T3.
 4. **Monitor liveness hardening:** tie hook monitor lifetime to its verified
    Claude ancestor and remove unverified self-registration fallback behavior.
 5. **Experimental Channel vertical slice:** finish ID-only broker dispatch,
@@ -387,10 +392,12 @@ small public fix; T3 process management is not assumed.
 
 - The host waiter cannot attach with a stale actor, run, session, launch
   handle, or ended registration.
-- A model-spawned Bash process presenting the correct launch handle is rejected;
-  the T3 process that is a strict ancestor of the recorded Claude PID is
-  admitted. Reusing the same PID with a different process start time is
-  rejected.
+- A model-spawned Bash process presenting the correct launch handle is rejected.
+  So are a waiter CLI spawned by T3, a process spawned by a neighboring
+  `codex app-server`, and a grandparent such as the T3 app, a shell, or tmux.
+  Only T3's in-process connection, whose peer PID and start time exactly equal
+  Claude's recorded direct parent, is admitted; PID 1 and a reused PID with a
+  different start time are rejected.
 - The launch handle performs lookup only. Any opaque token is minted after the
   ancestry check, remains outside Claude's environment, and expires with the
   host connection.
