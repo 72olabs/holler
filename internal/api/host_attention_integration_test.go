@@ -28,6 +28,7 @@ func TestHostAttentionAdmitsExactParentAndProjectsMessageID(t *testing.T) {
 	}
 	_, socket := startServer(t, ctx, cancel,
 		api.WithAttentionBroker(broker),
+		api.WithExperimentalHostAttention(true),
 		api.WithHarnessProcessResolver(func(_ net.Conn, _ string) (api.HarnessProcessIdentity, error) {
 			return evidence, nil
 		}),
@@ -40,6 +41,10 @@ func TestHostAttentionAdmitsExactParentAndProjectsMessageID(t *testing.T) {
 	)
 	client, registration := registerHostInjectedClaude(t, ctx, socket)
 	defer client.Close()
+	conditions, err := client.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 1 || conditions[0].ReasonCode != "host_not_attached" {
+		t.Fatalf("unattached host conditions = %+v, err=%v", conditions, err)
+	}
 
 	host, err := api.DialHostAttention(ctx, socket, evidence.Harness.PID)
 	if err != nil {
@@ -47,6 +52,10 @@ func TestHostAttentionAdmitsExactParentAndProjectsMessageID(t *testing.T) {
 	}
 	if !broker.Attached(registration.Actor, registration.RunID, registration.SessionID) {
 		t.Fatal("exact host was admitted without attaching attention")
+	}
+	conditions, err = client.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 0 {
+		t.Fatalf("admitted host left active conditions = %+v, err=%v", conditions, err)
 	}
 	if duplicate, duplicateErr := api.DialHostAttention(ctx, socket, evidence.Harness.PID); !errors.Is(duplicateErr, bus.ErrAttentionWaiterBusy) {
 		if duplicate != nil {
@@ -112,6 +121,95 @@ func TestHostAttentionAdmitsExactParentAndProjectsMessageID(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	reconnecting, err := client.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "host-reconnecting-receipt", ProjectID: "test", ChannelID: "direct",
+		ToActors: []string{registration.Actor}, Type: "MESSAGE", DeliveryRequest: bus.DeliveryWake,
+		Body: json.RawMessage(`{"text":"wake again"}`),
+	})
+	if err != nil || len(reconnecting.DeliveryReceipts) != 1 ||
+		reconnecting.DeliveryReceipts[0].AttentionAttachment != "reconnecting" ||
+		reconnecting.DeliveryReceipts[0].AttentionReason != "host_reconnecting" ||
+		reconnecting.DeliveryReceipts[0].SenderAction != "none" {
+		t.Fatalf("previously admitted detached receipt = %+v, err=%v", reconnecting.DeliveryReceipts, err)
+	}
+	conditions, err = client.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 0 {
+		t.Fatalf("detached admitted host raised active conditions = %+v, err=%v", conditions, err)
+	}
+}
+
+func TestHostAttentionDisabledDowngradesAndDoesNotAdmit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	evidence := api.HarnessProcessIdentity{
+		Handle:  "hin_host_disabled",
+		Harness: api.ProcessIdentity{PID: 67539, StartFingerprint: "claude-disabled-start"},
+		Host:    api.ProcessIdentity{PID: 8784, StartFingerprint: "host-disabled-start"},
+	}
+	_, socket := startServer(t, ctx, cancel,
+		api.WithAttentionBroker(attention.NewBroker()),
+		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
+			return evidence, nil
+		}),
+	)
+	client, err := api.Dial(ctx, socket, api.Identity{
+		Actor: "reviewer", RunID: "reviewer-run", Client: "mcp", Harness: "claude",
+		NameMode: bus.NameModeAllocate, ProjectID: "test",
+		ContinuityHandles: []string{"process:claude:reviewer-run", "launch:claude:disabled"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	registration, err := client.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: client.Identity().Actor, RunID: client.Identity().RunID,
+		Harness: "claude", AttentionMode: "host-injected", SessionID: "session-1",
+		DeliveryHandle: "session-1", ProjectID: "test", Lease: time.Hour,
+	})
+	if err != nil || registration.AttentionMode != "startup-only" {
+		t.Fatalf("disabled registration = %+v, err=%v", registration, err)
+	}
+	conditions, err := client.ListConditions(ctx, false, 10)
+	if err != nil || len(conditions) != 1 || conditions[0].ReasonCode != "host_attention_disabled" {
+		t.Fatalf("disabled conditions = %+v, err=%v", conditions, err)
+	}
+	if host, err := api.DialHostAttention(ctx, socket, evidence.Harness.PID); err == nil {
+		host.Close()
+		t.Fatal("disabled server admitted a host")
+	}
+}
+
+func TestHostAttentionWithoutAdmittedHostReportsUnavailable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	evidence := api.HarnessProcessIdentity{
+		Handle:  "hin_host_missing",
+		Harness: api.ProcessIdentity{PID: 67540, StartFingerprint: "claude-missing-start"},
+		Host:    api.ProcessIdentity{PID: 8784, StartFingerprint: "host-missing-start"},
+	}
+	_, socket := startServer(t, ctx, cancel,
+		api.WithAttentionBroker(attention.NewBroker()),
+		api.WithExperimentalHostAttention(true),
+		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
+			return evidence, nil
+		}),
+	)
+	client, registration := registerHostInjectedClaude(t, ctx, socket)
+	defer client.Close()
+	sent, err := client.Send(ctx, bus.SendRequest{
+		IdempotencyKey: "host-missing-receipt", ProjectID: "test", ChannelID: "direct",
+		ToActors: []string{registration.Actor}, Type: "MESSAGE", DeliveryRequest: bus.DeliveryWake,
+		Body: json.RawMessage(`{"text":"wake"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent.DeliveryReceipts) != 1 {
+		t.Fatalf("receipts = %+v", sent.DeliveryReceipts)
+	}
+	receipt := sent.DeliveryReceipts[0]
+	if receipt.AttentionCapability != "integration_missing" || receipt.AttentionAttachment != "unavailable" ||
+		receipt.AttentionReason != "host_not_attached" || receipt.SenderAction != "inform_operator" {
+		t.Fatalf("unattached host receipt = %+v", receipt)
+	}
 }
 
 func TestHostAttentionRejectsEveryProcessExceptExactParent(t *testing.T) {
@@ -127,6 +225,7 @@ func TestHostAttentionRejectsEveryProcessExceptExactParent(t *testing.T) {
 	harnessStart.Store(evidence.Harness.StartFingerprint)
 	_, socket := startServer(t, ctx, cancel,
 		api.WithAttentionBroker(attention.NewBroker()),
+		api.WithExperimentalHostAttention(true),
 		api.WithHarnessProcessResolver(func(_ net.Conn, _ string) (api.HarnessProcessIdentity, error) {
 			return evidence, nil
 		}),
@@ -180,6 +279,7 @@ func TestHostAttentionDisconnectCancelsParkedWait(t *testing.T) {
 	broker := &cancellationBroker{waiting: make(chan struct{}), canceled: make(chan struct{})}
 	_, socket := startServer(t, ctx, cancel,
 		api.WithAttentionBroker(broker),
+		api.WithExperimentalHostAttention(true),
 		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
 			return evidence, nil
 		}),
@@ -233,6 +333,7 @@ func TestLiveHostProcessRebindFallsBackToStartupOnly(t *testing.T) {
 	}
 	_, socket := startServer(t, ctx, cancel,
 		api.WithAttentionBroker(attention.NewBroker()),
+		api.WithExperimentalHostAttention(true),
 		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
 			return evidence, nil
 		}),
@@ -276,6 +377,7 @@ func TestEndedHostProcessRebindEvictsStaleAttachment(t *testing.T) {
 	}
 	_, socket := startServer(t, ctx, cancel,
 		api.WithAttentionBroker(attention.NewBroker()),
+		api.WithExperimentalHostAttention(true),
 		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
 			return evidence, nil
 		}),
@@ -322,6 +424,7 @@ func TestCrossSessionLaunchTagRaceCannotRedirectHostBinding(t *testing.T) {
 	resolved.Store(claudeA)
 	_, socket := startServer(t, ctx, cancel,
 		api.WithAttentionBroker(attention.NewBroker()),
+		api.WithExperimentalHostAttention(true),
 		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
 			return resolved.Load().(api.HarnessProcessIdentity), nil
 		}),
@@ -392,9 +495,12 @@ func TestCrossSessionLaunchTagRaceCannotRedirectHostBinding(t *testing.T) {
 
 func TestHostInjectedRegistrationFailsClosedWithoutProcessProof(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	_, socket := startServer(t, ctx, cancel, api.WithHarnessInstanceResolver(func(net.Conn, string) (string, error) {
-		return "hin_hash_only", nil
-	}))
+	_, socket := startServer(t, ctx, cancel,
+		api.WithExperimentalHostAttention(true),
+		api.WithHarnessInstanceResolver(func(net.Conn, string) (string, error) {
+			return "hin_hash_only", nil
+		}),
+	)
 	client, err := api.Dial(ctx, socket, api.Identity{
 		Actor: "reviewer", RunID: "reviewer-run", Client: "mcp", Harness: "claude",
 		NameMode: bus.NameModeAllocate, ProjectID: "test",
@@ -438,6 +544,17 @@ func TestHostAttentionBindingSurvivesDaemonRestart(t *testing.T) {
 	firstBroker := attention.NewBroker()
 	first := startRestartableHostServer(t, databasePath, socketPath, firstBroker, evidence)
 	client, registration := registerHostInjectedClaude(t, context.Background(), socketPath)
+	firstHost, err := api.DialHostAttention(context.Background(), socketPath, evidence.Harness.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstHost.Close(); err != nil {
+		t.Fatal(err)
+	}
+	firstBinding, err := first.db.HostAttentionBinding(context.Background(), evidence.Harness.PID, evidence.Harness.StartFingerprint)
+	if err != nil || !firstBinding.Admitted {
+		t.Fatalf("first daemon admission = %+v, err=%v", firstBinding, err)
+	}
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -446,6 +563,10 @@ func TestHostAttentionBindingSurvivesDaemonRestart(t *testing.T) {
 	secondBroker := attention.NewBroker()
 	second := startRestartableHostServer(t, databasePath, socketPath, secondBroker, evidence)
 	defer second.stop(t)
+	secondBinding, err := second.db.HostAttentionBinding(context.Background(), evidence.Harness.PID, evidence.Harness.StartFingerprint)
+	if err != nil || !secondBinding.Admitted {
+		t.Fatalf("restart lost prior host admission = %+v, err=%v", secondBinding, err)
+	}
 	host, err := api.DialHostAttention(context.Background(), socketPath, evidence.Harness.PID)
 	if err != nil {
 		t.Fatalf("reattach after daemon restart: %v", err)
@@ -487,6 +608,7 @@ func TestHostAttentionReconnectRearmsAcceptedNotice(t *testing.T) {
 	}
 	db, socket := startServer(t, ctx, cancel,
 		api.WithAttentionBroker(broker),
+		api.WithExperimentalHostAttention(true),
 		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
 			return evidence, nil
 		}),
@@ -573,6 +695,7 @@ func startRestartableHostServer(t *testing.T, databasePath, socketPath string, b
 	done := make(chan error, 1)
 	server := api.NewServer(db,
 		api.WithAttentionBroker(broker),
+		api.WithExperimentalHostAttention(true),
 		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
 			return evidence, nil
 		}),

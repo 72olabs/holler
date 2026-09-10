@@ -39,6 +39,17 @@ func TestHostAttentionBindingIsProcessKeyedAndAtomic(t *testing.T) {
 	if err != nil || stored != process {
 		t.Fatalf("stored binding = %+v, err=%v", stored, err)
 	}
+	if err := db.MarkHostAttentionAdmitted(ctx, process); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = db.HostAttentionBinding(ctx, process.Harness.PID, process.Harness.StartFingerprint)
+	if err != nil || !stored.Admitted {
+		t.Fatalf("admitted binding = %+v, err=%v", stored, err)
+	}
+	liveAfterAdmission, err := db.LiveRegistrations(ctx, binding.Actor)
+	if err != nil || len(liveAfterAdmission) != 1 || !liveAfterAdmission[0].HostAttentionAdmitted {
+		t.Fatalf("admitted registration = %+v, err=%v", liveAfterAdmission, err)
+	}
 
 	rebind := process
 	rebind.SessionID = "session-2"
@@ -53,6 +64,9 @@ func TestHostAttentionBindingIsProcessKeyedAndAtomic(t *testing.T) {
 	live, err := db.LiveRegistrations(ctx, binding.Actor)
 	if err != nil || len(live) != 1 || live[0].SessionID != replacement.SessionID {
 		t.Fatalf("rebind did not supersede old registration atomically: registrations=%+v err=%v", live, err)
+	}
+	if live[0].HostAttentionAdmitted {
+		t.Fatal("/clear replacement inherited prior host admission")
 	}
 
 	mismatched := process

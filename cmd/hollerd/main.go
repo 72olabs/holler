@@ -28,8 +28,9 @@ func main() {
 	resolvedCodexBinary := resolveCodexBinary(*codexBinary)
 	if err := daemon.Run(ctx, daemon.Config{
 		DatabasePath: *dbPath, SocketPath: *socketPath, CodexBinary: resolvedCodexBinary,
-		CodexBinaryResolver: func() string { return resolveCodexBinary(*codexBinary) },
-		NotificationTimeout: *notificationTimeout,
+		CodexBinaryResolver:       func() string { return resolveCodexBinary(*codexBinary) },
+		NotificationTimeout:       *notificationTimeout,
+		ExperimentalHostAttention: strings.TrimSpace(os.Getenv("HOLLER_EXPERIMENTAL_HOST_ATTENTION")) == "1",
 	}, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

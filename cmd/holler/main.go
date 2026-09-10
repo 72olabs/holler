@@ -500,7 +500,8 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	}
 	client, err := dialAPI(ctx, *socketPath, *actor, *runID, "bus-cli/0.1")
 	if err != nil {
-		return err
+		return fmt.Errorf("%w; if an upgrade failed, inspect %s for a pre-migration backup error", err,
+			filepath.Join(filepath.Dir(*socketPath), "logs", "hollerd.stderr.log"))
 	}
 	defer client.Close()
 	if err := client.Ping(ctx); err != nil {

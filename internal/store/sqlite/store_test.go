@@ -754,6 +754,147 @@ func TestStoreRefusesNewerSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestMigrationCreatesSecureRollbackBackup(t *testing.T) {
+	ctx := context.Background()
+	db, path := openTestStore(t)
+	sent, err := db.Send(ctx, testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE host_attention_bindings`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (14, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backups, err := filepath.Glob(path + ".pre-v15.bak")
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("migration backups = %v, err=%v", backups, err)
+	}
+	info, err := os.Stat(backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup mode = %v", info.Mode().Perm())
+	}
+	reopened, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	afterReopen, err := os.Stat(backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterReopen.Size() != info.Size() || !afterReopen.ModTime().Equal(info.ModTime()) {
+		t.Fatal("second start replaced the pre-v15 backup")
+	}
+	backup, err := sql.Open("sqlite", "file:"+backups[0]+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	var version int
+	if err := backup.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 14 {
+		t.Fatalf("backup schema version=%d err=%v", version, err)
+	}
+	var messageID string
+	if err := backup.QueryRow(`SELECT message_id FROM messages WHERE message_id = ?`, sent.Message.ID).Scan(&messageID); err != nil || messageID != sent.Message.ID {
+		t.Fatalf("backup message=%q err=%v", messageID, err)
+	}
+	var hostTables int
+	if err := backup.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='host_attention_bindings'`).Scan(&hostTables); err != nil || hostTables != 0 {
+		t.Fatalf("backup host table count=%d err=%v", hostTables, err)
+	}
+}
+
+func TestMigrationBackupFailureLeavesPriorSchemaUntouched(t *testing.T) {
+	ctx := context.Background()
+	db, path := openTestStore(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TABLE host_attention_bindings`,
+		`DELETE FROM schema_migrations`,
+		`INSERT INTO schema_migrations(version, applied_at_ns) VALUES (14, 1)`,
+	} {
+		if _, err := raw.Exec(statement); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".pre-v15.bak", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if migrated, err := store.Open(ctx, path); err == nil {
+		migrated.Close()
+		t.Fatal("migration succeeded without a valid rollback backup")
+	} else if !strings.Contains(err.Error(), "pre-v15.bak") || !strings.Contains(err.Error(), "free_bytes=") {
+		t.Fatalf("backup failure was not actionable: %v", err)
+	}
+	raw, err = sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var version int
+	if err := raw.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 14 {
+		t.Fatalf("schema version after backup failure=%d err=%v", version, err)
+	}
+	var hostTables int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='host_attention_bindings'`).Scan(&hostTables); err != nil || hostTables != 0 {
+		t.Fatalf("host table count after backup failure=%d err=%v", hostTables, err)
+	}
+}
+
+func TestFreshStoreDoesNotCreateRollbackBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "holler.sqlite3")
+	db, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backups, err := filepath.Glob(path + ".pre-v*.bak*")
+	if err != nil || len(backups) != 0 {
+		t.Fatalf("fresh-store backups = %v, err=%v", backups, err)
+	}
+}
+
 func TestMigrationV5AddsSupersessionWithoutLosingRegistration(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "holler.sqlite3")

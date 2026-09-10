@@ -41,8 +41,12 @@ const (
 	ActorLifecycleCapability     = "actor-lifecycle-v1"
 )
 
-func protocolCapabilities() []string {
-	return []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, HarnessInstanceCapability, HostAttentionCapability, OperatorConditionsCapability, ActorLifecycleCapability, CapabilityBridgeCapability}
+func protocolCapabilities(experimentalHostAttention bool) []string {
+	capabilities := []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, HarnessInstanceCapability, OperatorConditionsCapability, ActorLifecycleCapability, CapabilityBridgeCapability}
+	if experimentalHostAttention {
+		capabilities = append(capabilities, HostAttentionCapability)
+	}
+	return capabilities
 }
 
 type Identity struct {
@@ -125,6 +129,7 @@ type Store interface {
 	ListEvents(context.Context, string, string, int64, int) ([]bus.Event, error)
 	RegisterSession(context.Context, bus.RegistrationRequest) (bus.Registration, error)
 	HostAttentionBinding(context.Context, int, string) (bus.HostAttentionBinding, error)
+	MarkHostAttentionAdmitted(context.Context, bus.HostAttentionBinding) error
 	AttachMonitor(context.Context, string, string, string, string, string, time.Duration) (bus.Registration, error)
 	RearmAcceptedNotifications(context.Context, string) error
 	LiveRegistrations(context.Context, string) ([]bus.Registration, error)
@@ -171,19 +176,20 @@ type attentionAttachmentInspector interface {
 }
 
 type Server struct {
-	store                  Store
-	build                  buildinfo.Info
-	attention              AttentionBroker
-	capabilities           map[string]registeredCapability
-	capabilityErr          error
-	resolveHarnessInstance HarnessInstanceResolver
-	resolveHarnessProcess  HarnessProcessResolver
-	resolvePeerProcess     PeerProcessResolver
-	resolveProcessStart    ProcessStartResolver
-	connectionsMu          sync.Mutex
-	identityConnections    map[authenticatedIdentity]map[net.Conn]struct{}
-	hostAttentionMu        sync.Mutex
-	hostConnections        map[hostAttentionKey]hostAttentionConnection
+	store                     Store
+	build                     buildinfo.Info
+	attention                 AttentionBroker
+	capabilities              map[string]registeredCapability
+	capabilityErr             error
+	resolveHarnessInstance    HarnessInstanceResolver
+	resolveHarnessProcess     HarnessProcessResolver
+	resolvePeerProcess        PeerProcessResolver
+	resolveProcessStart       ProcessStartResolver
+	connectionsMu             sync.Mutex
+	identityConnections       map[authenticatedIdentity]map[net.Conn]struct{}
+	hostAttentionMu           sync.Mutex
+	hostConnections           map[hostAttentionKey]hostAttentionConnection
+	experimentalHostAttention bool
 }
 
 type hostAttentionKey struct {
@@ -231,6 +237,10 @@ func WithPeerProcessResolver(resolver PeerProcessResolver) ServerOption {
 
 func WithProcessStartResolver(resolver ProcessStartResolver) ServerOption {
 	return func(server *Server) { server.resolveProcessStart = resolver }
+}
+
+func WithExperimentalHostAttention(enabled bool) ServerOption {
+	return func(server *Server) { server.experimentalHostAttention = enabled }
 }
 
 func NewServer(store Store, options ...ServerOption) *Server {
@@ -414,6 +424,10 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		return
 	}
 	if request.Op == "host_attention_hello" {
+		if !s.experimentalHostAttention {
+			_ = writeResponse(connection, failure(request.ID, "bad_request", "unknown operation: host_attention_hello", false))
+			return
+		}
 		s.serveHostAttentionConnection(connectionCtx, connection, reader, request)
 		return
 	}
@@ -583,7 +597,7 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	ready, _ := json.Marshal(map[string]interface{}{
 		"protocol": ProtocolVersion, "daemon": "hollerd/0.1", "actor": assignedActor,
 		"requested_actor": hello.Actor, "run_id": assignedRunID, "server_time": time.Now().UTC(), "build": s.build,
-		"capabilities": protocolCapabilities(), "minted": binding.Minted,
+		"capabilities": s.protocolCapabilities(), "minted": binding.Minted,
 		"continuity_reclaimed": binding.ContinuityReclaimed, "provisional": binding.Provisional,
 		"adopted_predecessor": binding.AdoptedPredecessor, "harness_instance": harnessInstance,
 		"pending_predecessor": binding.PendingPredecessor, "instance_state": instanceState,
@@ -693,6 +707,11 @@ func (s *Server) serveHostAttentionConnection(ctx context.Context, connection ne
 		return
 	}
 	defer s.attention.Cancel(binding.Actor, binding.RunID, binding.SessionID, bus.ErrAttentionUnavailable)
+	if err := s.store.MarkHostAttentionAdmitted(ctx, binding); err != nil {
+		_ = writeResponse(connection, Response{ID: helloRequest.ID, OK: false, Error: rpcError(err)})
+		return
+	}
+	_ = s.store.ResolveCondition(ctx, "attention_unavailable", binding.Actor)
 	ready, _ := json.Marshal(map[string]interface{}{
 		"protocol": ProtocolVersion, "ready": true, "capability": HostAttentionCapability,
 	})
@@ -752,6 +771,10 @@ func (s *Server) hostRegistrationLive(ctx context.Context, binding bus.HostAtten
 		}
 	}
 	return false
+}
+
+func (s *Server) protocolCapabilities() []string {
+	return protocolCapabilities(s.experimentalHostAttention)
 }
 
 func (s *Server) claimHostConnection(key hostAttentionKey, binding bus.HostAttentionBinding, connection net.Conn) bool {
@@ -890,7 +913,7 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 	case "ping":
 		return DaemonInfo{
 			Protocol: ProtocolVersion, Actor: identity.Actor, PID: os.Getpid(), Build: s.build,
-			Capabilities: protocolCapabilities(),
+			Capabilities: s.protocolCapabilities(),
 		}, nil
 	case "list_capabilities":
 		var args struct{}
@@ -1261,6 +1284,11 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		request.RunID = identity.RunID
 		requestedHostAttention := request.AttentionMode == "host-injected"
 		hostDowngradeReason := ""
+		if requestedHostAttention && !s.experimentalHostAttention {
+			request.AttentionMode = "startup-only"
+			request.DeliveryHandle = ""
+			hostDowngradeReason = "disabled"
+		}
 		if identity.InstanceState == "unreconciled" && request.AttentionMode != "" && request.AttentionMode != "startup-only" {
 			request.AttentionMode = "startup-only"
 			request.DeliveryHandle = ""
@@ -1305,7 +1333,17 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 			registration, err = s.store.RegisterSession(ctx, request)
 		}
 		if err == nil && registration.AttentionMode == "host-injected" {
-			_ = s.store.ResolveCondition(ctx, "attention_unavailable", identity.Actor)
+			current, bindingErr := s.store.HostAttentionBinding(ctx, identity.harnessProcess.Harness.PID, identity.harnessProcess.Harness.StartFingerprint)
+			if bindingErr != nil || !current.Admitted {
+				details, _ := json.Marshal(map[string]string{
+					"actor": identity.Actor, "harness": identity.Harness, "reason": "host_not_attached",
+				})
+				_, _ = s.store.ObserveCondition(ctx, bus.ConditionObservation{
+					Kind: "attention_unavailable", Subject: identity.Actor, ReasonCode: "host_not_attached",
+					Summary: "Experimental host attention is registered but no host is admitted for " + identity.Actor,
+					Details: details,
+				})
+			}
 		} else if err == nil && registration.AttentionMode != "startup-only" && identity.InstanceState != "unreconciled" {
 			_ = s.store.ResolveConditionIfReason(ctx, "attention_unavailable", identity.Actor, "startup_only_selected")
 		} else if err == nil && registration.AttentionMode == "startup-only" && identity.InstanceState == "bound" {

@@ -562,7 +562,8 @@ func checkDaemon(ctx context.Context, config DoctorConfig, report *DoctorReport)
 	client, err := api.Dial(ctx, config.SocketPath, api.Identity{Actor: actor, RunID: runID, Client: "connector-doctor/" + ConnectorVersion, Build: buildinfo.Current()})
 	if err != nil {
 		report.add(CheckFail, "daemon.reachable", "runtime", "hollerd is not reachable",
-			map[string]string{"socket": config.SocketPath, "detail": err.Error()}, "start hollerd and verify the socket path and OS permissions")
+			map[string]string{"socket": config.SocketPath, "detail": err.Error()},
+			"start hollerd and verify the socket path and OS permissions; after an upgrade, inspect hollerd stderr for a pre-migration backup failure")
 		return false
 	}
 	defer client.Close()

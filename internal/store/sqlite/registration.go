@@ -174,8 +174,8 @@ func bindHostAttentionTx(ctx context.Context, tx *sql.Tx, binding bus.HostAttent
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO host_attention_bindings(
 				harness_pid, harness_start, harness_handle, host_pid, host_start,
-				actor, run_id, session_id, created_at_ns, updated_at_ns
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				actor, run_id, session_id, admitted_at_ns, created_at_ns, updated_at_ns
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
 			binding.Harness.PID, binding.Harness.StartFingerprint, binding.HarnessHandle,
 			binding.Host.PID, binding.Host.StartFingerprint, binding.Actor, binding.RunID,
 			binding.SessionID, now.UnixNano(), now.UnixNano())
@@ -201,7 +201,7 @@ func bindHostAttentionTx(ctx context.Context, tx *sql.Tx, binding bus.HostAttent
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE host_attention_bindings
 			SET harness_handle = ?, host_pid = ?, host_start = ?, actor = ?, run_id = ?,
-			    session_id = ?, updated_at_ns = ?
+			    session_id = ?, admitted_at_ns = NULL, updated_at_ns = ?
 			WHERE harness_pid = ? AND harness_start = ?`,
 			binding.HarnessHandle, binding.Host.PID, binding.Host.StartFingerprint,
 			binding.Actor, binding.RunID, binding.SessionID, now.UnixNano(),
@@ -228,7 +228,12 @@ func (s *Store) LiveRegistrations(ctx context.Context, actor string) ([]bus.Regi
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT actor, run_id, harness, attention_mode, session_id, delivery_handle, project_id, working_directory,
-		       epoch, updated_at_ns, lease_expires_at_ns
+		       epoch, updated_at_ns, lease_expires_at_ns,
+		       EXISTS(
+		           SELECT 1 FROM host_attention_bindings h
+		           WHERE h.actor = registrations.actor AND h.run_id = registrations.run_id
+		             AND h.session_id = registrations.session_id AND h.admitted_at_ns IS NOT NULL
+		       )
 		FROM registrations
 		WHERE actor = ? AND ended_at_ns IS NULL AND attention_superseded_at_ns IS NULL
 		  AND lease_expires_at_ns > ?
@@ -239,7 +244,7 @@ func (s *Store) LiveRegistrations(ctx context.Context, actor string) ([]bus.Regi
 	defer rows.Close()
 	registrations := make([]bus.Registration, 0)
 	for rows.Next() {
-		registration, err := scanRegistration(rows)
+		registration, err := scanLiveRegistration(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -249,6 +254,22 @@ func (s *Store) LiveRegistrations(ctx context.Context, actor string) ([]bus.Regi
 		return nil, fmt.Errorf("iterate registrations: %w", err)
 	}
 	return registrations, nil
+}
+
+func scanLiveRegistration(scanner registrationScanner) (bus.Registration, error) {
+	var registration bus.Registration
+	var updatedNS, leaseExpiresNS int64
+	if err := scanner.Scan(
+		&registration.Actor, &registration.RunID, &registration.Harness, &registration.AttentionMode,
+		&registration.SessionID, &registration.DeliveryHandle, &registration.ProjectID,
+		&registration.WorkingDir, &registration.Epoch, &updatedNS, &leaseExpiresNS,
+		&registration.HostAttentionAdmitted,
+	); err != nil {
+		return bus.Registration{}, fmt.Errorf("scan live registration: %w", err)
+	}
+	registration.UpdatedAt = time.Unix(0, updatedNS).UTC()
+	registration.LeaseExpiresAt = time.Unix(0, leaseExpiresNS).UTC()
+	return registration, nil
 }
 
 func (s *Store) HeartbeatRegistrations(ctx context.Context, actor, runID string, lease time.Duration) (int, error) {

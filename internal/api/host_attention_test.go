@@ -53,3 +53,14 @@ func TestAuthorizeHostPeerRejectsIneligibleRecordedParent(t *testing.T) {
 		}
 	}
 }
+
+func TestHostAttentionCapabilityIsExperimental(t *testing.T) {
+	standard := NewServer(nil)
+	if containsString(standard.protocolCapabilities(), HostAttentionCapability) {
+		t.Fatal("standard server advertised experimental host attention")
+	}
+	experimental := NewServer(nil, WithExperimentalHostAttention(true))
+	if !containsString(experimental.protocolCapabilities(), HostAttentionCapability) {
+		t.Fatal("experimental server omitted host attention capability")
+	}
+}

@@ -9,7 +9,7 @@ import (
 	"github.com/72olabs/holler/internal/mcp"
 )
 
-const ConnectorVersion = "0.7.1"
+const ConnectorVersion = "0.7.2"
 
 type ReadinessState string
 
@@ -111,7 +111,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:a2a5be5c714fecd74b54666a709347024313542f7e54c7ea3138b7ff6c9b2323"
+		base.PackageHash = "sha256:7d07b6d672f76539938c708755ec915eca52942d9d5ba9abcdbf53bf2d2faec4"
 	case "claude":
 		base.PluginID = DefaultClaudePluginID
 		base.ClientCommand = "claude"
@@ -120,14 +120,14 @@ func Manifest(harness string) (CapabilityManifest, error) {
 		base.LifecycleEvents = []string{"startup", "resume", "clear", "compact", "fork", "stop", "stop_failure", "end"}
 		base.NotificationMode = AttentionHookLongPoll
 		base.NotificationFallback = "startup-only"
-		base.AttentionModes = []string{AttentionHookLongPoll, AttentionHostInjected, AttentionStartupOnly}
+		base.AttentionModes = []string{AttentionHookLongPoll, AttentionStartupOnly}
 		base.ClaudeToolPrefix = "mcp__plugin_" + base.PluginName + "_" + base.MCPServerName + "__"
 		base.RequiredAssets = []string{
 			".claude-plugin/plugin.json", ".mcp.json", "hooks/hooks.json",
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:106278dd9fef3c3c920519646762cce204b40d826e3e4a4f5568fa2a3c19ce46"
+		base.PackageHash = "sha256:04df0f03a737eb65996b7bc3fc922406c818fd28d95529682e704af2a91a3d55"
 	case "opencode":
 		base.PluginID = DefaultOpenCodePluginID
 		base.ClientCommand = "opencode"

@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS host_attention_bindings (
     actor TEXT NOT NULL,
     run_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
+    admitted_at_ns INTEGER,
     created_at_ns INTEGER NOT NULL,
     updated_at_ns INTEGER NOT NULL,
     PRIMARY KEY (harness_pid, harness_start),

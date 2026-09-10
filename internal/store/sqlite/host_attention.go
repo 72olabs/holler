@@ -40,7 +40,7 @@ func (s *Store) HostAttentionBinding(ctx context.Context, harnessPID int, harnes
 	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT harness_handle, harness_pid, harness_start, host_pid, host_start,
-		       actor, run_id, session_id
+		       actor, run_id, session_id, admitted_at_ns IS NOT NULL
 		FROM host_attention_bindings WHERE harness_pid = ? AND harness_start = ?`, harnessPID, harnessStart)
 	if err != nil {
 		return bus.HostAttentionBinding{}, fmt.Errorf("query host attention binding: %w", err)
@@ -69,12 +69,32 @@ func scanHostAttentionBinding(scanner interface{ Scan(...interface{}) error }, b
 	if err := scanner.Scan(
 		&binding.HarnessHandle, &binding.Harness.PID, &binding.Harness.StartFingerprint,
 		&binding.Host.PID, &binding.Host.StartFingerprint,
-		&binding.Actor, &binding.RunID, &binding.SessionID,
+		&binding.Actor, &binding.RunID, &binding.SessionID, &binding.Admitted,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return bus.ErrNotFound
 		}
 		return fmt.Errorf("scan host attention binding: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) MarkHostAttentionAdmitted(ctx context.Context, binding bus.HostAttentionBinding) error {
+	now := s.now().UTC().UnixNano()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE host_attention_bindings SET admitted_at_ns = ?, updated_at_ns = ?
+		WHERE harness_pid = ? AND harness_start = ? AND actor = ? AND run_id = ? AND session_id = ?`,
+		now, now, binding.Harness.PID, binding.Harness.StartFingerprint,
+		binding.Actor, binding.RunID, binding.SessionID)
+	if err != nil {
+		return fmt.Errorf("mark host attention admitted: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect host attention admission: %w", err)
+	}
+	if updated != 1 {
+		return bus.ErrNotFound
 	}
 	return nil
 }

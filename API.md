@@ -173,6 +173,62 @@ does not leak suffixes or create phantom directory entries.
 
 This implemented slice does not yet perform the Ed25519 challenge-response specified by the full protocol. The `0600` local socket and owning OS account are currently the trust boundary. Do not expose the socket through a network proxy or to another OS user.
 
+## Experimental host attention
+
+Host attention is an unsupported protocol foundation for SDK hosts that own an
+exact Claude child process and its in-process input queue. It is disabled by
+default, absent from the daemon's READY capability list, and unavailable through
+the packaged Claude setup and connector configuration.
+
+For isolated development only, start `hollerd` with
+`HOLLER_EXPERIMENTAL_HOST_ATTENTION=1` in the daemon's own process environment.
+The daemon then advertises `host-attention-v1`. Client, hook, MCP, and handshake
+environment or arguments cannot enable the feature. A `register_session`
+request for `host-injected` degrades to `startup-only` with a visible
+`host_attention_disabled` condition when the daemon gate is off.
+
+The host connection uses the same length-prefixed JSON framing but is a
+restricted connection type. Its first and only handshake request is:
+
+```json
+{"id":1,"op":"host_attention_hello","args":{"protocol":1,"claude_pid":67533}}
+```
+
+The caller-supplied PID is only a lookup key. Before accepting the connection,
+the daemon resolves the PID's current process-start fingerprint and requires an
+exact persisted `(pid, start)` registration binding. It then obtains the Unix
+peer process identity and requires that peer's PID and start fingerprint to
+equal Claude's daemon-recorded direct parent. A PID reuse, Claude itself, a
+child or sibling helper, a grandparent, PID 1, a stale registration, or another
+actor/run/session is rejected. One connection-bound host attachment is allowed
+per Claude process generation.
+
+After admission, the host may repeatedly call:
+
+```json
+{"id":2,"op":"host_attention_wait","args":{"wait_ns":25000000000}}
+```
+
+An attention result is either `{}` after the bounded wait or exactly a
+server-generated reference:
+
+```json
+{"message_id":"msg_0123456789abcdef"}
+```
+
+No body, sender, thread, type, delivery request, or other peer-controlled field
+crosses this connection. The host connection has no inbox, messaging, claim,
+acknowledgement, registration, heartbeat, alias, profile, or permission
+authority. It cannot create or renew presence. Holler's ordinary `bus_inbox`
+claim and `bus_ack` remain the only evidence that an agent processed a message.
+
+The daemon persists whether a registration has ever admitted its exact host.
+A never-admitted registration reports `host_not_attached` as unavailable and
+requires operator attention. A previously admitted but currently detached host
+reports reconnecting, allowing a transient daemon or host restart to retry
+without claiming that live wake is ready. Only successful host admission
+resolves the unavailable condition.
+
 ## Implemented operations
 
 - `ping {}`

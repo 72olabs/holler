@@ -362,17 +362,18 @@ type AliasPreflight struct {
 }
 
 type Registration struct {
-	Actor          string    `json:"actor"`
-	RunID          string    `json:"run_id"`
-	Harness        string    `json:"harness"`
-	AttentionMode  string    `json:"attention_mode,omitempty"`
-	SessionID      string    `json:"session_id"`
-	DeliveryHandle string    `json:"delivery_handle"`
-	ProjectID      string    `json:"project_id"`
-	WorkingDir     string    `json:"working_directory,omitempty"`
-	Epoch          int64     `json:"epoch"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	Actor                 string    `json:"actor"`
+	RunID                 string    `json:"run_id"`
+	Harness               string    `json:"harness"`
+	AttentionMode         string    `json:"attention_mode,omitempty"`
+	SessionID             string    `json:"session_id"`
+	DeliveryHandle        string    `json:"delivery_handle"`
+	ProjectID             string    `json:"project_id"`
+	WorkingDir            string    `json:"working_directory,omitempty"`
+	Epoch                 int64     `json:"epoch"`
+	UpdatedAt             time.Time `json:"updated_at"`
+	LeaseExpiresAt        time.Time `json:"lease_expires_at"`
+	HostAttentionAdmitted bool      `json:"-"`
 }
 
 type RegistrationRequest struct {
@@ -405,6 +406,7 @@ type HostAttentionBinding struct {
 	Actor         string
 	RunID         string
 	SessionID     string
+	Admitted      bool
 }
 
 // ActorProfile is model-authored discovery metadata. It is descriptive only:
