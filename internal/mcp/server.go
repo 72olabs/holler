@@ -153,8 +153,9 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 
 func (s *Server) heartbeat(ctx context.Context) {
 	const registrationLease = 5 * time.Minute
-	actor, runID := s.boundIdentity()
-	_, _ = s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
+	_, _ = withBoundIdentityRetry(s, func(actor, runID string) (int, error) {
+		return s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
+	})
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -162,8 +163,9 @@ func (s *Server) heartbeat(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			actor, runID := s.boundIdentity()
-			_, _ = s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
+			_, _ = withBoundIdentityRetry(s, func(actor, runID string) (int, error) {
+				return s.store.HeartbeatRegistrations(ctx, actor, runID, registrationLease)
+			})
 		}
 	}
 }
@@ -177,7 +179,10 @@ func (s *Server) handle(ctx context.Context, req request) (interface{}, bool, er
 		if len(req.Params) > 0 {
 			_ = json.Unmarshal(req.Params, &params)
 		}
-		if params.ProtocolVersion == "" {
+		// Negotiate down when the client requests a revision Holler does not
+		// implement. Echoing a future revision can make Claude Code reject an
+		// otherwise valid Channel server.
+		if params.ProtocolVersion != defaultProtocolVersion {
 			params.ProtocolVersion = defaultProtocolVersion
 		}
 		capabilities := map[string]interface{}{
@@ -316,7 +321,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		items, err := s.store.CheckInbox(ctx, actor, args.Limit)
+		items, err := withBoundIdentityRetry(s, func(actor, _ string) ([]bus.InboxItem, error) {
+			return s.store.CheckInbox(ctx, actor, args.Limit)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -333,7 +340,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if args.LeaseSeconds == 0 {
 			args.LeaseSeconds = 300
 		}
-		claim, err := s.store.Claim(ctx, actor, args.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+		claim, err := withBoundIdentityRetry(s, func(actor, _ string) (bus.Claim, error) {
+			return s.store.Claim(ctx, actor, args.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -352,7 +361,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if args.LeaseSeconds == 0 {
 			args.LeaseSeconds = 300
 		}
-		items, err := s.store.CheckInbox(ctx, actor, args.Limit)
+		items, err := withBoundIdentityRetry(s, func(actor, _ string) ([]bus.InboxItem, error) {
+			return s.store.CheckInbox(ctx, actor, args.Limit)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -361,7 +372,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			if !item.Available {
 				continue
 			}
-			claim, err := s.store.Claim(ctx, actor, item.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+			claim, err := withBoundIdentityRetry(s, func(actor, _ string) (bus.Claim, error) {
+				return s.store.Claim(ctx, actor, item.MessageID, time.Duration(args.LeaseSeconds)*time.Second)
+			})
 			if err != nil {
 				if errors.Is(err, bus.ErrNoMessage) {
 					continue
@@ -380,7 +393,10 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		if err := s.store.Ack(ctx, actor, args.MessageID, args.LeaseToken); err != nil {
+		_, err := withBoundIdentityRetry(s, func(actor, _ string) (struct{}, error) {
+			return struct{}{}, s.store.Ack(ctx, actor, args.MessageID, args.LeaseToken)
+		})
+		if err != nil {
 			return nil, err
 		}
 		return map[string]bool{"acked": true}, nil
@@ -396,7 +412,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if args.LeaseSeconds == 0 {
 			args.LeaseSeconds = 300
 		}
-		return s.store.Extend(ctx, actor, args.MessageID, args.LeaseToken, time.Duration(args.LeaseSeconds)*time.Second)
+		return withBoundIdentityRetry(s, func(actor, _ string) (bus.LeaseExtension, error) {
+			return s.store.Extend(ctx, actor, args.MessageID, args.LeaseToken, time.Duration(args.LeaseSeconds)*time.Second)
+		})
 	case "bus_nack":
 		var args struct {
 			MessageID  string `json:"message_id"`
@@ -407,7 +425,10 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		if err := s.store.Nack(ctx, actor, args.MessageID, args.LeaseToken, args.Reason, args.Final); err != nil {
+		_, err := withBoundIdentityRetry(s, func(actor, _ string) (struct{}, error) {
+			return struct{}{}, s.store.Nack(ctx, actor, args.MessageID, args.LeaseToken, args.Reason, args.Final)
+		})
+		if err != nil {
 			return nil, err
 		}
 		return map[string]bool{"nacked": true}, nil
@@ -415,7 +436,9 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &struct{}{}); err != nil {
 			return nil, err
 		}
-		items, err := s.store.CheckInbox(ctx, actor, 100)
+		items, err := withBoundIdentityRetry(s, func(actor, _ string) ([]bus.InboxItem, error) {
+			return s.store.CheckInbox(ctx, actor, 100)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -443,8 +466,10 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		return s.store.SetActorProfile(ctx, actor, runID, s.config.ProjectID, bus.ActorProfileRequest{
-			RoleText: args.RoleText, Accepts: args.Accepts,
+		return withBoundIdentityRetry(s, func(actor, runID string) (bus.ActorProfileResult, error) {
+			return s.store.SetActorProfile(ctx, actor, runID, s.config.ProjectID, bus.ActorProfileRequest{
+				RoleText: args.RoleText, Accepts: args.Accepts,
+			})
 		})
 	case "holler_who":
 		var args struct {
@@ -554,6 +579,30 @@ func (s *Server) boundIdentity() (string, string) {
 		return provider.BoundIdentity()
 	}
 	return s.config.Actor, s.config.RunID
+}
+
+func withBoundIdentityRetry[T any](s *Server, operation func(actor, runID string) (T, error)) (T, error) {
+	actor, runID := s.boundIdentity()
+	result, err := operation(actor, runID)
+	if err == nil || !isAuthenticatedIdentityMismatch(err) {
+		return result, err
+	}
+	nextActor, nextRunID := s.boundIdentity()
+	if nextActor == actor && nextRunID == runID {
+		return result, err
+	}
+	return operation(nextActor, nextRunID)
+}
+
+func isAuthenticatedIdentityMismatch(err error) bool {
+	var validation *bus.ValidationError
+	if !errors.As(err, &validation) {
+		return false
+	}
+	if validation.Problem != "does not match the authenticated API session" {
+		return false
+	}
+	return validation.Field == "actor" || validation.Field == "run_id"
 }
 
 func messageView(message bus.Message, recipientActor, originalRecipientActor, leaseToken string, leaseExpires time.Time, attempt int) map[string]interface{} {

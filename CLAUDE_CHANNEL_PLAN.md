@@ -4,9 +4,10 @@ Status: implementation branch (`feature/claude-channel`)
 
 ## Objective
 
-Add Claude Code Channels as an explicit Holler attention transport so SDK-style
-Claude sessions can wake while idle without the hook monitor that interactive
-CLI sessions use today.
+Evaluate Claude Code Channels as an experimental Holler attention transport for
+SDK-style sessions while first testing whether the SDK's existing
+`asyncRewake` hook support can provide the public live-wake path with a smaller,
+safer integration.
 
 This is an attention-path change, not a change to Holler's delivery contract.
 The durable inbox, claim lease, processing, reply, and acknowledgement remain
@@ -30,7 +31,7 @@ hollerd durable outbox
   -> bus_ack with lease token
 ```
 
-The supported Claude attention modes will be:
+The internal Claude attention adapters will be:
 
 - `hook-long-poll`: interactive Claude CLI sessions supervised by Holler's
   existing hook monitor.
@@ -49,6 +50,8 @@ attachment.
   server-generated durable message ID plus fixed fetch instructions only.
 - Treat Channel content and metadata as untrusted input, never as a human
   instruction or an authorization decision.
+- Never declare `claude/channel/permission`. Holler is an agent-message
+  transport, not a remote tool-approval authority.
 - Enable only the configured Holler MCP server; never auto-enable arbitrary
   third-party Channel servers.
 - Route notifications to an exact actor, run, and session attachment. An alias
@@ -56,127 +59,136 @@ attachment.
   transport by itself.
 - Preserve Holler's claim/ack semantics. Claude Code currently does not
   acknowledge Channel notification delivery.
-- A failed, unavailable, or policy-blocked Channel activation must be visible
-  and must fall back truthfully to `startup-only`; it must not report `READY`.
+- A failed, unavailable, policy-blocked, or unverifiable Channel activation
+  must fall back truthfully to `startup-only`; Holler cannot detect policy
+  denial from its stdout write and must not report `READY` without host evidence.
 - Existing hook-long-poll and startup-only behavior must remain unchanged.
 
-## Implementation work
+## Decision and implementation order
 
-### 1. Holler MCP foundation
+The public launch path and the Claude Channel experiment are separate tracks.
+The launch path should use the smallest supported transport that passes the
+real T3 lifecycle matrix. Claude Channel remains experimental while Anthropic's
+research-preview allowlist excludes third-party plugins for ordinary Pro and
+Max sessions.
 
-- Advertise `capabilities.experimental["claude/channel"]` only when the
-  connector explicitly enables Channel mode.
-- Return fixed Channel-specific instructions in the MCP initialize response.
-- Serialize every JSON-RPC response and asynchronous Channel notification
-  through one writer so concurrent output can never corrupt the stdio stream.
-- Add an internal notification API whose payload is generated from durable
-  server state and contains only the message ID.
+### 1. Fix MCP identity rebinding first
 
-The first branch slice implements conditional capability advertisement and the
-serialized writer without enabling Channels in normal installs.
+The MCP process starts without Claude's `session_id`. In allocate mode it can
+therefore hold a provisional actor/run binding until SessionStart supplies the
+daemon-proven harness instance and session continuity. The API client follows
+that reconciliation, but an MCP tool can read the old bound actor immediately
+before another goroutine changes the client identity. Its following
+actor-validated call then fails with `actor: does not match the authenticated
+API session`.
 
-### 2. Daemon attachment and dispatch
+- Make identity snapshot plus actor/run validation atomic for MCP-backed API
+  calls, or retry only the pre-operation identity-mismatch case after fetching
+  the new binding. Never retry an operation whose commit status is ambiguous.
+- Keep the provisional reservation invisible and do not attach attention until
+  SessionStart has finalized the canonical actor/run/session registration.
+- Add deterministic tests that reconcile between identity lookup and inbox,
+  claim, ack, profile, heartbeat, and future attention attachment calls.
+- Require the first `bus_inbox` after SessionStart reconciliation to succeed.
 
-- Add `claude-channel` to connector, API, and store validation.
-- Associate each live Channel attachment with the exact actor/run/session that
-  owns the MCP transport.
-- Subscribe the MCP process to committed deliveries for that identity and
-  emit one Channel notification per eligible durable message.
-- Define reconnect and cancellation behavior for MCP exit, daemon restart,
-  Claude/T3 restart, and stale session expiry.
-- Make repeated notifications idempotent from the agent's perspective. The
-  inbox claim remains the arbiter if the transport retries.
+This race affects both hook and Channel transports, so no wake-path experiment
+is meaningful until it is fixed.
 
-Before launch, decide whether the current attention broker is sufficient for
-the preview or whether Channel dispatch needs a leased/two-phase acceptance
-record. In either design, transport acceptance must remain distinct from
-message acknowledgement.
+### 2. Run the SDK async-rewake guard-bypass experiment
 
-### 3. Registration, setup, and diagnostics
+The Claude Agent SDK bundled by current T3 supports `asyncRewake` hooks. The
+existing Holler `hooks.json` already uses that contract. Holler's wrapper exits
+early for all `sdk-cli`, `sdk-ts`, and `sdk-py` entrypoints to protect one-shot
+queries from being held open by the parked monitor.
 
-- Record `claude-channel` only when the host deliberately opts in.
-- Teach setup, manifests, package metadata, doctor, status, and certification
-  about the new mode.
-- Distinguish these states in user-facing output:
-  `CAPABLE`, `POLICY_BLOCKED`, `ENABLED_NO_ATTACHMENT`, `READY`, and
-  `STARTUP_ONLY`.
-- Keep `hook-long-poll` the default for plain interactive Claude Code until the
-  Channel path is supported and released.
-- Update connector skills and public documentation only after packaged
-  real-client certification passes.
+Add an explicit host opt-in such as `HOLLER_CLAUDE_LIVE_WAKE=1`. When set for a
+known long-lived streaming query, the wrapper may run the existing monitor even
+for an SDK entrypoint. Without it, the current guard remains unchanged. T3 only
+needs to set the opt-in for the long-lived Claude query; it must not manage a
+Holler-specific child process or inject a turn itself.
 
-### 4. T3 launcher integration
+One experiment decides whether this is the public launch fix: does a parked
+async-rewake hook allow each per-turn SDK `result` message to arrive promptly?
+If yes, exercise the full matrix and ship this as the small supported path. If
+the result is delayed, shutdown leaks, or rearming is unreliable, keep the guard
+and continue with the Channel experiment.
 
-A local proof of concept may use Claude launch arguments to enable the trusted
-Holler development Channel. Public T3 support requires a small code change:
+### 3. Keep Claude Channel behind a development flag
 
-- After creating the Agent SDK query, wait for initialization and inspect MCP
-  server status.
-- Resolve the exact configured Holler MCP server and verify that it advertises
-  the Channel capability.
-- Call the SDK's Channel activation method for that server before T3 reports
-  Holler live-wake readiness. The T3-bundled SDK runtime exposes
-  `enableChannel(serverName)` even though the currently published TypeScript
-  declaration may require a narrow local augmentation.
-- If activation is rejected or blocked by policy, surface the reason and use a
-  truthful startup-only registration (or fail the explicitly requested launch).
-- Preserve Channel origin metadata in T3's synthetic turn and render it as an
-  agent/system event, not as a human-authored message.
-- Do not enable every discovered Channel server.
+The protocol-safe foundation on this branch remains useful, but it is not a
+public setup option:
 
-The proof of concept should use the development-channel flag only in an
-isolated test profile. Release builds should use Anthropic's supported
-allowlist/policy path.
+- Advertise `capabilities.experimental["claude/channel"]` only under an
+  explicit development switch.
+- Never declare `claude/channel/permission`; Holler peers cannot approve local
+  tool prompts.
+- Negotiate MCP down to a protocol revision Holler actually implements rather
+  than echoing an unsupported client revision.
+- Serialize every JSON-RPC response and asynchronous notification through one
+  writer.
+- Emit required fixed `content` that tells Claude to fetch its durable inbox,
+  with only `meta: {message_id}`. Never put a message body or peer-authored
+  metadata in the Channel frame.
 
-### 5. Decision gate: managed monitor or Claude Channel
+Custom channels must use Anthropic's dangerous development flag during the
+preview unless an organization explicitly places Holler in its managed
+`allowedChannelPlugins`. They are unavailable on Bedrock, Google Cloud, and
+Foundry. Do not expose `claude-channel` in `holler setup` while those constraints
+remain.
 
-A follow-up `reviewer-holler` canary proved that `holler monitor` itself can
-wake a long-lived `sdk-ts` session. The shipping plugin wrapper currently exits
-before launching it for every SDK entrypoint; that guard protects one-shot SDK
-commands from waiting forever on an async hook, but it also disables live wake
-for long-lived T3 sessions.
+### 4. Reuse the attention broker for Channel dispatch
 
-Before completing the Channel vertical slice, compare these two supported-host
-designs:
+Do not build a second delivery subscription. After SessionStart finalizes the
+registration, the Channel-enabled MCP process should resolve that exact
+daemon-proven harness instance and canonical run, then:
 
-1. **T3-managed hook monitor:** T3 launches and rearms `holler monitor` as a
-   background task for its long-lived Claude session. Its stdout/stderr must be
-   a pipe or socket so Holler can observe result-channel closure; redirecting to
-   a regular file disables that liveness contract. Holler may add an explicit
-   opt-in that bypasses the SDK wrapper guard, but the default guard must remain
-   for one-shot SDK users.
-2. **Claude Channel:** T3 enables Holler's Channel-capable MCP server and Holler
-   emits ID-only `notifications/claude/channel` events as described above.
+1. attach with adapter `claude-channel`;
+2. call the existing `wait_attention` loop in a goroutine;
+3. emit an ID-only Channel notification through the serialized writer; and
+4. immediately park the next wait.
 
-The managed-monitor path reuses the released durable attention broker and may
-be the smaller launch-blocker fix. The Channel path is a cleaner native SDK
-transport but carries research-preview, allowlist, and SDK-typing risk. Run the
-same idle, busy, rearm, restart, and shutdown matrix against both. Select the
-managed monitor if it has clean lifecycle behavior and does not delay query
-completion; otherwise continue with Channel activation. Do not ship two active
-wake transports for one session.
+Extend API/store adapter validation without weakening exact actor/run/session
+matching. A broker acceptance proves only that Holler wrote to MCP stdout.
+Claude Code does not acknowledge Channel notifications and may silently drop
+them when the server or policy is inactive. Keep an `accepted-but-unclaimed`
+timer, raise a visible condition, and allow at most one bounded re-notification
+for the same still-unread message and unchanged attachment. Inbox claims remain
+the only processing authority.
+
+### 5. Make readiness host-attested and user-simple
+
+Holler cannot infer Channel readiness from a successful stdout write. T3 must
+report successful activation of the exact configured Holler server and Holler
+must observe the matching live attachment. If the SDK cannot distinguish policy
+denial from activation, report wake as unverified/off until a canary event is
+claimed; never infer `READY`.
+
+Keep detailed states internal. Present one user concept with one remediation:
+
+- `Live wake: ready (hook monitor)` or `Live wake: ready (Claude Channel)`.
+- `Live wake: off. Messages will arrive at next session start. Fix: <action>`.
+
+The host selects the transport. Users do not choose `hook-long-poll` versus
+`claude-channel`, and one session must never activate both.
 
 ## Delivery sequence
 
-1. **Protocol-safe foundation**: this branch adds the design, opt-in MCP
-   capability, serialized output, and unit tests. No user-visible mode exists.
-2. **Holler Channel vertical slice**: add the live attachment, ID-only
-   notification, daemon dispatch, mode validation, and integration tests behind
-   an experimental switch.
-3. **T3 proof of concept**: enable the exact Holler server in a local T3 build
-   and prove an idle SDK session starts a synthetic turn.
-4. **Durability and readiness hardening**: exercise restart/retry paths and make
-   diagnostics reflect actual attachment state.
-5. **Packaged real-client certification**: test the exact Holler artifact,
-   Claude Code/Agent SDK version, and T3 build intended for release.
-6. **Policy, packaging, and docs**: secure Channel allowlisting, update setup
-   and connector packages, and publish limitations for the research-preview
-   feature.
+1. **Identity correctness:** fix and regression-test MCP-first SessionStart
+   reconciliation.
+2. **Launch-path experiment:** add the explicit SDK live-wake opt-in and run the
+   real T3 async-rewake matrix, especially per-turn result latency and shutdown.
+3. **Ship or reject the small path:** if it passes, package and certify it while
+   retaining safe defaults for one-shot SDK calls.
+4. **Experimental Channel vertical slice:** finish ID-only broker dispatch,
+   host-attested readiness, bounded unclaimed recovery, and protocol/security
+   tests behind the development flag.
+5. **Revisit public Channels later:** only after Anthropic offers a viable
+   third-party distribution path and the combined packaged canary passes.
 
-Holler and T3 should land as separate pull requests linked to the same protocol
-contract. The Holler experimental vertical slice lands first; T3 consumes it;
-the Holler mode is made generally selectable only after the combined canary
-passes.
+Holler and T3 changes should remain separate commits or pull requests linked to
+this contract. The immediate next code slice on this branch is identity
+reconciliation, followed by the wrapper opt-in experiment—not daemon Channel
+dispatch.
 
 ## Test plan
 
@@ -197,27 +209,32 @@ The `reviewer-holler` canary established the failure state this work must fix:
 - A follow-up manual canary launched `holler monitor` as a background task with
   pipe-backed stdout/stderr. It immediately surfaced an approximately
   88-minute-old durable reply, exited with the expected async-rewake status,
-  and caused the SDK session to run again. The reviewer then rearmed it with
-  `stop_hook_active=true` for the continuation path.
+  and Claude Code's own background-hook handling caused the SDK session to run
+  again. This did not prove that T3 can manage a monitor or inject a turn; it
+  proved that the SDK's native `asyncRewake` path works when Holler's wrapper
+  does not suppress the monitor.
 - The first `bus_inbox` call after startup failed because the actor did not
   match the authenticated API session. `bus_status` observed the new run and a
   retry succeeded without claiming the message twice. Track this MCP/run
   rebinding race separately and require the first inbox call to succeed in the
-  Channel canary.
+  selected-path canary.
 - No duplicate delivery or recursive Stop continuation was observed.
 
 This baseline means v0.7.1 preserves durable recovery and contains a working
-monitor primitive, but the shipping SDK guard still leaves T3 without a managed
-live-wake attachment. The decision gate above determines whether T3 should
-manage that monitor or adopt Claude Channels.
+monitor primitive, but the shipping SDK guard leaves T3 without live wake. The
+guard-bypass experiment above determines whether native SDK `asyncRewake` is the
+small public fix; T3 process management is not assumed.
 
 ### Unit and protocol tests
 
 - Channel capability and instructions are absent by default and present only
   when explicitly enabled.
+- Unsupported client protocol revisions negotiate down to Holler's implemented
+  revision instead of being echoed.
+- Channel capability output never includes `claude/channel/permission`.
 - Concurrent responses and notifications remain valid, non-interleaved JSONL.
-- Channel payloads contain a durable message ID and fixed instructions, never
-  the message body.
+- Channel payloads contain required fixed `content` and only
+  `meta: {message_id}`, never the message body.
 - Connector/API/store validation accepts only the three documented modes.
 - Exact actor/run/session routing rejects stale or mismatched attachments.
 - Repeated notification attempts cannot create duplicate durable messages.
@@ -235,25 +252,29 @@ manage that monitor or adopt Claude Channels.
 - Policy denial and unsupported clients register startup-only and explain why.
 - Existing hook-long-poll certification remains green.
 
-### T3-managed monitor comparison tests
+### SDK async-rewake experiment
 
-- A long-lived `sdk-ts` session wakes from idle with the monitor running as a
-  background task and pipe/socket-backed output.
+- A long-lived `sdk-ts` query with `HOLLER_CLAUDE_LIVE_WAKE=1` wakes from idle
+  through Claude's existing async-rewake hook handling.
+- A parked monitor does not delay or suppress the current turn's SDK `result`
+  message.
 - The same command with regular-file output fails closed with a visible
   diagnostic; it must not report live readiness.
-- T3 rearms exactly once after normal Stop, StopFailure, and async wake
-  continuation, without a recursive wake loop.
-- T3 cancels the monitor promptly when the query/session closes and leaves no
+- Claude's hook runner rearms exactly once after normal Stop, StopFailure, and
+  async wake continuation, without a recursive wake loop.
+- Closing the query/session cancels the monitor promptly and leaves no
   orphan process or live registration.
 - Daemon loss reconnects without terminating the T3 session or dropping the
   durable message.
 - One-shot `sdk-cli`, `sdk-ts`, and `sdk-py` commands retain the current guard
   and are never kept open by Holler.
-- Enabling the managed monitor and Claude Channel together is rejected.
+- Enabling the async-rewake monitor and Claude Channel together is rejected.
 
 ### Security tests
 
 - Hostile message bodies never appear in Channel notification frames.
+- Holler never advertises `claude/channel/permission` and never receives or
+  returns permission decisions.
 - Forged/malformed Channel metadata cannot select an actor, run, or session.
 - Channel-originated turns are never labeled as human input.
 - A second Channel-capable MCP server is not activated automatically.
@@ -268,8 +289,8 @@ session assigned the `reviewer-holler` alias.
 
 1. Verify the exact T3, Agent SDK, Claude Code, Holler, connector, and daemon
    build identities.
-2. Start Claude through T3, verify Channel activation for the exact Holler MCP
-   server, and leave the session idle.
+2. Start Claude through T3 with exactly one selected live-wake transport, verify
+   its attachment/readiness evidence unambiguously, and leave the session idle.
 3. From `coder-holler`, send message A. Claude must start exactly one synthetic
    turn, claim A, acknowledge it, and reply without human input.
 4. Leave Claude idle and send message B. It must wake once with no replay of A.
@@ -277,8 +298,8 @@ session assigned the `reviewer-holler` alias.
    processed once in the documented order.
 6. Repeat across a daemon restart, an MCP reconnect, and a complete T3/Claude
    restart.
-7. Exercise policy-blocked activation and prove the UI/status says startup-only
-   rather than ready.
+7. Exercise missing host opt-in and, for Channel, policy-blocked activation;
+   prove the UI/status says startup-only rather than ready.
 8. Finish with empty inboxes, no active claims, zero orphan monitor processes,
    no lost/duplicated/misrouted messages, and retained provenance for every
    reply.
@@ -299,8 +320,16 @@ session assigned the `reviewer-holler` alias.
 
 - Claude Channels is a research-preview surface and its allowlist/policy rules
   may change.
+- Custom third-party channels require the dangerous development flag for Pro
+  and Max during the preview; managed organizations can explicitly allow their
+  own plugin, but this is not a general public distribution path.
 - The SDK runtime activation method and its public TypeScript declarations are
   not currently aligned in every version.
 - A successful stdio notification write is not a client acknowledgement.
 - Public readiness depends on both a Holler release and a compatible T3 release;
   configuration alone is suitable only for the local proof of concept.
+
+## References
+
+- [Claude Code Channels](https://code.claude.com/docs/en/channels)
+- [Claude Code Channels reference](https://code.claude.com/docs/en/channels-reference)
