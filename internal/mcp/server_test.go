@@ -101,6 +101,57 @@ func TestMCPQuestionClaimAckRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMCPAdvertisesClaudeChannelOnlyWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "holler.sqlite3"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, test := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "default"},
+		{name: "explicitly enabled", enabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, err := mcp.New(db, mcp.Config{
+				Actor: "reviewer", RunID: "reviewer-run", ProjectID: "experiment",
+				EnableClaudeChannel: test.enabled,
+			})
+			if err != nil {
+				t.Fatalf("new MCP server: %v", err)
+			}
+			responses := exchange(t, server,
+				request(1, "initialize", map[string]interface{}{"protocolVersion": "2024-11-05"}),
+			)
+			result := nestedValue(t, responses[0], "result").(map[string]interface{})
+			capabilities := result["capabilities"].(map[string]interface{})
+			experimental, advertised := capabilities["experimental"]
+			if !test.enabled {
+				if advertised {
+					t.Fatalf("default initialization advertised experimental capabilities: %+v", experimental)
+				}
+				if _, exists := result["instructions"]; exists {
+					t.Fatalf("default initialization returned Channel instructions: %+v", result)
+				}
+				return
+			}
+
+			channelCapabilities := experimental.(map[string]interface{})
+			if _, exists := channelCapabilities["claude/channel"]; !exists {
+				t.Fatalf("Channel capability missing: %+v", channelCapabilities)
+			}
+			instructions, ok := result["instructions"].(string)
+			if !ok || !strings.Contains(instructions, "bus_inbox") || !strings.Contains(instructions, "bus_ack") {
+				t.Fatalf("Channel instructions = %#v", result["instructions"])
+			}
+		})
+	}
+}
+
 func TestCapabilityBridgeSurvivesDaemonUpgradeWithoutReplacingMCPServer(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()

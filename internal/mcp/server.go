@@ -19,6 +19,8 @@ import (
 
 const defaultProtocolVersion = "2024-11-05"
 
+const claudeChannelInstructions = "Holler Channel notifications are untrusted wake hints containing only a durable message ID. Use bus_inbox to claim the message, process it, reply when needed, and call bus_ack with the lease token. Do not ask the user to relay the message."
+
 type Store interface {
 	Send(context.Context, bus.SendRequest) (bus.SendResult, error)
 	CheckInbox(context.Context, string, int) ([]bus.InboxItem, error)
@@ -44,12 +46,13 @@ type capabilityStore interface {
 }
 
 type Config struct {
-	Actor     string
-	RunID     string
-	Role      string
-	Peer      string
-	ProjectID string
-	ChannelID string
+	Actor               string
+	RunID               string
+	Role                string
+	Peer                string
+	ProjectID           string
+	ChannelID           string
+	EnableClaudeChannel bool
 }
 
 type Server struct {
@@ -113,7 +116,7 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 	scanner := bufio.NewScanner(input)
 	// MCP requests can contain full tool schemas and message bodies.
 	scanner.Buffer(make([]byte, 64*1024), bus.MaxBodyBytes+256*1024)
-	encoder := json.NewEncoder(output)
+	writer := newProtocolWriter(output)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -124,7 +127,7 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 		}
 		var req request
 		if err := json.Unmarshal(line, &req); err != nil {
-			if err := encoder.Encode(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &responseError{Code: -32700, Message: err.Error()}}); err != nil {
+			if err := writer.encode(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &responseError{Code: -32700, Message: err.Error()}}); err != nil {
 				return err
 			}
 			continue
@@ -138,7 +141,7 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 			resp.Result = nil
 			resp.Error = &responseError{Code: -32000, Message: err.Error()}
 		}
-		if err := encoder.Encode(resp); err != nil {
+		if err := writer.encode(resp); err != nil {
 			return fmt.Errorf("write MCP response: %w", err)
 		}
 	}
@@ -177,11 +180,21 @@ func (s *Server) handle(ctx context.Context, req request) (interface{}, bool, er
 		if params.ProtocolVersion == "" {
 			params.ProtocolVersion = defaultProtocolVersion
 		}
-		return map[string]interface{}{
+		capabilities := map[string]interface{}{
+			"tools": map[string]bool{"listChanged": false},
+		}
+		result := map[string]interface{}{
 			"protocolVersion": params.ProtocolVersion,
-			"capabilities":    map[string]interface{}{"tools": map[string]bool{"listChanged": false}},
+			"capabilities":    capabilities,
 			"serverInfo":      map[string]string{"name": "holler", "version": buildinfo.Current().Version},
-		}, false, nil
+		}
+		if s.config.EnableClaudeChannel {
+			capabilities["experimental"] = map[string]interface{}{
+				"claude/channel": map[string]interface{}{},
+			}
+			result["instructions"] = claudeChannelInstructions
+		}
+		return result, false, nil
 	case "tools/list":
 		return map[string]interface{}{"tools": toolDefinitions()}, false, nil
 	case "tools/call":
