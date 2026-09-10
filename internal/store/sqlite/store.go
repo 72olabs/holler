@@ -237,35 +237,28 @@ func migrationState(ctx context.Context, conn *sql.Conn) (current int, initializ
 }
 
 func (s *Store) backupBeforeMigration(ctx context.Context, conn *sql.Conn, current int) (string, error) {
-	target := fmt.Sprintf("%s.pre-v%d.bak", s.path, migrationVersion)
+	timestamp := s.now().UTC().Format("20060102T150405.000000000Z")
+	target := fmt.Sprintf("%s.pre-v%d.%s.bak", s.path, migrationVersion, timestamp)
 	if _, err := os.Lstat(target); err == nil {
-		if err := verifyMigrationBackup(ctx, target, current); err != nil {
-			return "", migrationBackupError(target, fmt.Errorf("existing backup is invalid: %w", err))
-		}
-		if err := os.Chmod(target, 0o600); err != nil {
-			return "", migrationBackupError(target, fmt.Errorf("secure existing backup: %w", err))
-		}
-		return target, nil
+		return "", migrationBackupError(target, errors.New("timestamped backup path already exists"))
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", migrationBackupError(target, fmt.Errorf("inspect backup path: %w", err))
 	}
 
-	temporaryFile, err := os.CreateTemp(filepath.Dir(s.path), "."+filepath.Base(target)+".tmp-")
+	temporaryDirectory, err := os.MkdirTemp(filepath.Dir(s.path), "."+filepath.Base(target)+".tmp-")
 	if err != nil {
-		return "", migrationBackupError(target, fmt.Errorf("reserve temporary path: %w", err))
+		return "", migrationBackupError(target, fmt.Errorf("create private temporary backup directory: %w", err))
 	}
-	temporary := temporaryFile.Name()
-	if err := temporaryFile.Close(); err != nil {
-		_ = os.Remove(temporary)
-		return "", migrationBackupError(target, fmt.Errorf("close temporary path: %w", err))
+	if err := os.Chmod(temporaryDirectory, 0o700); err != nil {
+		_ = os.Remove(temporaryDirectory)
+		return "", migrationBackupError(target, fmt.Errorf("secure temporary backup directory: %w", err))
 	}
-	if err := os.Remove(temporary); err != nil {
-		return "", migrationBackupError(target, fmt.Errorf("prepare temporary path: %w", err))
-	}
+	temporary := filepath.Join(temporaryDirectory, "snapshot.sqlite3")
 	removeTemporary := true
 	defer func() {
 		if removeTemporary {
 			_ = os.Remove(temporary)
+			_ = os.Remove(temporaryDirectory)
 		}
 	}()
 
@@ -309,6 +302,9 @@ func (s *Store) backupBeforeMigration(ctx context.Context, conn *sql.Conn, curre
 	}
 	if err := os.Remove(temporary); err != nil {
 		return "", migrationBackupError(target, fmt.Errorf("remove temporary backup link: %w", err))
+	}
+	if err := os.Remove(temporaryDirectory); err != nil {
+		return "", migrationBackupError(target, fmt.Errorf("remove temporary backup directory: %w", err))
 	}
 	if err := syncDirectory(filepath.Dir(target)); err != nil {
 		return "", migrationBackupError(target, fmt.Errorf("sync backup directory after cleanup: %w", err))

@@ -42,18 +42,21 @@ host was ever admitted.
 
 Before applying any schema change to an existing database, Holler uses SQLite
 `VACUUM INTO` while holding its migration ownership lock, verifies the snapshot
-with `PRAGMA quick_check`, syncs it, sets mode `0600`, and publishes it
-atomically beside the database as `holler.sqlite3.pre-v15.bak`. Fresh installs
-do not create a backup. An existing valid pre-v15 backup is never overwritten;
-backup creation or verification failure aborts before schema DDL and reports
-the path, cause, and detectable free space.
+with `PRAGMA quick_check`, syncs it, sets mode `0600`, and publishes a new,
+immutable timestamped snapshot atomically beside the database as
+`holler.sqlite3.pre-v15.<UTC-timestamp>.bak`. Fresh installs do not create a
+backup. Every upgrade from an older schema creates a new snapshot without
+overwriting or deleting earlier backups; backup creation or verification
+failure aborts before schema DDL and reports the path, cause, and detectable
+free space.
 
 Holler 0.7.1 correctly refuses a schema-15 database. To downgrade:
 
 1. Stop the Holler daemon service.
 2. Move the schema-15 `holler.sqlite3` and any matching `-wal` and `-shm` files
    aside; do not copy or reuse them with 0.7.1.
-3. Copy `holler.sqlite3.pre-v15.bak` to `holler.sqlite3` and keep it mode `0600`.
+3. Copy the newest `holler.sqlite3.pre-v15.*.bak` to `holler.sqlite3` and keep it
+   mode `0600`.
 4. Reinstall Holler 0.7.1 and restart its daemon/setup.
 
 Restoring the backup discards every message and state change committed after
