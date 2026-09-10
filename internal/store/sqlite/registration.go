@@ -60,8 +60,8 @@ func (s *Store) RegisterSession(ctx context.Context, request bus.RegistrationReq
 			return bus.Registration{}, &bus.ValidationError{Field: "registration.attention_mode", Problem: "must be native-queue or startup-only for codex"}
 		}
 	case "claude":
-		if req.AttentionMode != "hook-long-poll" && req.AttentionMode != "startup-only" {
-			return bus.Registration{}, &bus.ValidationError{Field: "registration.attention_mode", Problem: "must be hook-long-poll or startup-only for claude"}
+		if req.AttentionMode != "hook-long-poll" && req.AttentionMode != "host-injected" && req.AttentionMode != "startup-only" {
+			return bus.Registration{}, &bus.ValidationError{Field: "registration.attention_mode", Problem: "must be hook-long-poll, host-injected, or startup-only for claude"}
 		}
 	case "opencode":
 		if req.AttentionMode != "native-prompt" && req.AttentionMode != "startup-only" {
