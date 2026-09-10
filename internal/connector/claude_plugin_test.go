@@ -22,7 +22,7 @@ func TestClaudePluginWrapperFailsOpenWithoutHollerBinary(t *testing.T) {
 	}
 }
 
-func TestClaudePluginWrapperSkipsMonitorForSDKEntrypointsByDefault(t *testing.T) {
+func TestClaudePluginWrapperSkipsMonitorForPrintMode(t *testing.T) {
 	root := repositoryRoot(t)
 	wrapper := filepath.Join(root, "connectors", "marketplace", "plugins", "claude-holler", "scripts", "holler")
 	for _, entrypoint := range []string{"sdk-cli", "sdk-ts", "sdk-py"} {
@@ -49,26 +49,6 @@ func TestClaudePluginWrapperSkipsMonitorForSDKEntrypointsByDefault(t *testing.T)
 	}
 	if output, err := interactive.CombinedOutput(); err == nil {
 		t.Fatalf("interactive monitor was incorrectly skipped: %s", output)
-	}
-}
-
-func TestClaudePluginWrapperAllowsHostOptInForLongLivedSDKQuery(t *testing.T) {
-	root := repositoryRoot(t)
-	wrapper := filepath.Join(root, "connectors", "marketplace", "plugins", "claude-holler", "scripts", "holler")
-	for _, entrypoint := range []string{"sdk-cli", "sdk-ts", "sdk-py"} {
-		t.Run(entrypoint, func(t *testing.T) {
-			command := exec.Command("/bin/sh", wrapper, "monitor", "--harness", "claude")
-			command.Env = []string{
-				"PATH=/usr/bin:/bin",
-				"HOME=" + t.TempDir(),
-				"HOLLER_BIN=/usr/bin/false",
-				"HOLLER_CLAUDE_LIVE_WAKE=1",
-				"CLAUDE_CODE_ENTRYPOINT=" + entrypoint,
-			}
-			if output, err := command.CombinedOutput(); err == nil {
-				t.Fatalf("opted-in SDK monitor was incorrectly skipped: %s", output)
-			}
-		})
 	}
 }
 

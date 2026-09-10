@@ -104,24 +104,34 @@ Follow-up hardening after the launch-path experiment:
   explicit `identity changed since claim` diagnostic rather than exposing a
   bare lease mismatch.
 
-### 2. Run the SDK async-rewake guard-bypass experiment
+### 2. SDK async-rewake guard-bypass experiment: rejected
 
 The Claude Agent SDK bundled by current T3 supports `asyncRewake` hooks. The
 existing Holler `hooks.json` already uses that contract. Holler's wrapper exits
 early for all `sdk-cli`, `sdk-ts`, and `sdk-py` entrypoints to protect one-shot
 queries from being held open by the parked monitor.
 
-Add an explicit host opt-in such as `HOLLER_CLAUDE_LIVE_WAKE=1`. When set for a
-known long-lived streaming query, the wrapper may run the existing monitor even
-for an SDK entrypoint. Without it, the current guard remains unchanged. T3 only
-needs to set the opt-in for the long-lived Claude query; it must not manage a
-Holler-specific child process or inject a turn itself.
+The real Agent SDK canary rejected the proposed `HOLLER_CLAUDE_LIVE_WAKE=1`
+host opt-in:
 
-One experiment decides whether this is the public launch fix: does a parked
-async-rewake hook allow each per-turn SDK `result` message to arrive promptly?
-If yes, exercise the full matrix and ship this as the small supported path. If
-the result is delayed, shutdown leaks, or rearming is unreliable, keep the guard
-and continue with the Channel experiment.
+- Bypassing the SDK guard for the SessionStart monitor produced neither SDK
+  `init` nor a model `result` in 120 seconds. Calling `query.close()` then ended
+  the registration and monitor in about two seconds with no orphan.
+- Restricting the bypass to the Stop hook restored prompt results (5.2 seconds
+  in the query-close canary), but the hook result channel closed with the turn.
+  No monitor remained attached while the query was idle, and a wake-requested
+  message stayed durable and unclaimed.
+- SDK hook-event traces showed Stop starts before the result and completes as
+  the result channel closes. Diagnostic output from the hook triggered an
+  immediate synthetic continuation, proving `asyncRewake` reacts to output but
+  does not keep a silent long poll alive across idle turns.
+- The identical control query with the shipping guard completed normally in
+  3.7 seconds. Every canary ended its registration and left zero orphan monitor
+  processes.
+
+Keep the SDK guard unchanged. A T3 environment-only change cannot provide the
+required live wake. Continue with the Claude Channel vertical slice; do not ship
+the experimental opt-in.
 
 ### 3. Keep Claude Channel behind a development flag
 
@@ -185,20 +195,18 @@ The host selects the transport. Users do not choose `hook-long-poll` versus
 
 1. **Identity correctness:** fix and regression-test MCP-first SessionStart
    reconciliation.
-2. **Launch-path experiment:** add the explicit SDK live-wake opt-in and run the
-   real T3 async-rewake matrix, especially per-turn result latency and shutdown.
-3. **Ship or reject the small path:** if it passes, package and certify it while
-   retaining safe defaults for one-shot SDK calls.
-4. **Experimental Channel vertical slice:** finish ID-only broker dispatch,
+2. **Launch-path experiment (complete, rejected):** the SDK async-rewake hook
+   cannot retain a parked monitor after a T3 turn result.
+3. **Experimental Channel vertical slice:** finish ID-only broker dispatch,
    host-attested readiness, bounded unclaimed recovery, and protocol/security
    tests behind the development flag.
-5. **Revisit public Channels later:** only after Anthropic offers a viable
+4. **Revisit public Channels later:** only after Anthropic offers a viable
    third-party distribution path and the combined packaged canary passes.
 
 Holler and T3 changes should remain separate commits or pull requests linked to
-this contract. The immediate next code slice on this branch is identity
-reconciliation, followed by the wrapper opt-in experiment—not daemon Channel
-dispatch.
+this contract. Identity reconciliation and the rejected SDK experiment are now
+complete. The next code slice is daemon Channel dispatch behind the development
+flag, followed by explicit T3 Channel activation and readiness evidence.
 
 ## Test plan
 
@@ -262,24 +270,21 @@ small public fix; T3 process management is not assumed.
 - Policy denial and unsupported clients register startup-only and explain why.
 - Existing hook-long-poll certification remains green.
 
-### SDK async-rewake experiment
+### SDK async-rewake experiment (completed)
 
-- Close the T3 query first: SessionEnd must expire the registration before the
-  SDK waits for outstanding async hooks, causing `wait_attention` and the
-  monitor to exit promptly. Fail the experiment on any shutdown hang or orphan.
-- A long-lived `sdk-ts` query with `HOLLER_CLAUDE_LIVE_WAKE=1` wakes from idle
-  through Claude's existing async-rewake hook handling.
-- A parked monitor does not delay or suppress the current turn's SDK `result`
-  message.
-- The same command with regular-file output fails closed with a visible
-  diagnostic; it must not report live readiness.
-- Claude's hook runner rearms exactly once after normal Stop, StopFailure, and
-  async wake continuation, without a recursive wake loop.
-- Daemon loss reconnects without terminating the T3 session or dropping the
-  durable message.
+- The control `sdk-ts` query completed normally with the shipping guard.
+- A SessionStart long poll blocked SDK initialization and result delivery.
+- A Stop-only long poll allowed the result but did not survive the idle
+  boundary; a wake-requested message remained durable and unclaimed.
+- `query.close()` consistently expired the registration and left no orphan
+  monitor, including after the 120-second blocked-start timeout.
+- Hook output triggered an immediate continuation, so using heartbeat or
+  diagnostic output to hold the channel open would create a wake loop rather
+  than a stable attachment.
 - One-shot `sdk-cli`, `sdk-ts`, and `sdk-py` commands retain the current guard
   and are never kept open by Holler.
-- Enabling the async-rewake monitor and Claude Channel together is rejected.
+- The SDK hook path is rejected for T3 live wake. No
+  `HOLLER_CLAUDE_LIVE_WAKE` option is shipped.
 
 ### Security tests
 

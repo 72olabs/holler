@@ -127,7 +127,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 			"scripts/holler", "skills/holler/SKILL.md",
 			"skills/holler-setup/SKILL.md",
 		}
-		base.PackageHash = "sha256:3f26aaf11f1ff477ee2320c8f8c1bbc2a63283ff90272242f9412ff368bd4a5d"
+		base.PackageHash = "sha256:106278dd9fef3c3c920519646762cce204b40d826e3e4a4f5568fa2a3c19ce46"
 	case "opencode":
 		base.PluginID = DefaultOpenCodePluginID
 		base.ClientCommand = "opencode"
