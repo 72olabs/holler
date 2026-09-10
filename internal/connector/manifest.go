@@ -120,7 +120,7 @@ func Manifest(harness string) (CapabilityManifest, error) {
 		base.LifecycleEvents = []string{"startup", "resume", "clear", "compact", "fork", "stop", "stop_failure", "end"}
 		base.NotificationMode = AttentionHookLongPoll
 		base.NotificationFallback = "startup-only"
-		base.AttentionModes = []string{AttentionHookLongPoll, AttentionStartupOnly}
+		base.AttentionModes = []string{AttentionHookLongPoll, AttentionHostInjected, AttentionStartupOnly}
 		base.ClaudeToolPrefix = "mcp__plugin_" + base.PluginName + "_" + base.MCPServerName + "__"
 		base.RequiredAssets = []string{
 			".claude-plugin/plugin.json", ".mcp.json", "hooks/hooks.json",

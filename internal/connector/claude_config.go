@@ -11,6 +11,7 @@ import (
 
 const (
 	AttentionHookLongPoll = "hook-long-poll"
+	AttentionHostInjected = "host-injected"
 	AttentionStartupOnly  = "startup-only"
 )
 
@@ -33,10 +34,10 @@ type ClaudeConnectorConfig struct {
 
 func ValidateClaudeAttentionMode(mode string) error {
 	switch strings.TrimSpace(mode) {
-	case AttentionHookLongPoll, AttentionStartupOnly:
+	case AttentionHookLongPoll, AttentionHostInjected, AttentionStartupOnly:
 		return nil
 	default:
-		return fmt.Errorf("unsupported Claude attention mode %q (expected hook-long-poll or startup-only)", mode)
+		return fmt.Errorf("unsupported Claude attention mode %q (expected hook-long-poll, host-injected, or startup-only)", mode)
 	}
 }
 

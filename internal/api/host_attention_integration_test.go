@@ -267,6 +267,48 @@ func TestLiveHostProcessRebindFallsBackToStartupOnly(t *testing.T) {
 	}
 }
 
+func TestEndedHostProcessRebindEvictsStaleAttachment(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	evidence := api.HarnessProcessIdentity{
+		Handle:  "hin_host_ended_rebind",
+		Harness: api.ProcessIdentity{PID: 67538, StartFingerprint: "claude-ended-start"},
+		Host:    api.ProcessIdentity{PID: 8784, StartFingerprint: "t3-server-start"},
+	}
+	_, socket := startServer(t, ctx, cancel,
+		api.WithAttentionBroker(attention.NewBroker()),
+		api.WithHarnessProcessResolver(func(net.Conn, string) (api.HarnessProcessIdentity, error) {
+			return evidence, nil
+		}),
+		api.WithPeerProcessResolver(func(net.Conn) (api.ProcessIdentity, error) {
+			return evidence.Host, nil
+		}),
+		api.WithProcessStartResolver(func(int) (string, error) {
+			return evidence.Harness.StartFingerprint, nil
+		}),
+	)
+	client, registration := registerHostInjectedClaude(t, ctx, socket)
+	defer client.Close()
+	host, err := api.DialHostAttention(ctx, socket, evidence.Harness.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	if err := client.ExpireRegistration(ctx, registration.Actor, registration.RunID, registration.SessionID, "clear"); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := client.RegisterSession(ctx, bus.RegistrationRequest{
+		Actor: client.Identity().Actor, RunID: client.Identity().RunID,
+		Harness: "claude", AttentionMode: "host-injected", SessionID: "session-2",
+		ProjectID: "test", Lease: time.Hour,
+	})
+	if err != nil || replacement.AttentionMode != "host-injected" {
+		t.Fatalf("ended rebind = %+v, err=%v", replacement, err)
+	}
+	if _, err := host.Wait(ctx, time.Millisecond); err == nil {
+		t.Fatal("stale host attachment remained connected after ended-session rebind")
+	}
+}
+
 func TestCrossSessionLaunchTagRaceCannotRedirectHostBinding(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	hostProcess := api.ProcessIdentity{PID: 8784, StartFingerprint: "t3-server-start"}

@@ -36,4 +36,9 @@ func TestResolveClaudeAttentionModeUsesExplicitPrecedenceAndCompatibleDefault(t 
 	if err != nil || mode != connector.AttentionHookLongPoll {
 		t.Fatalf("environment mode=%q err=%v", mode, err)
 	}
+	t.Setenv("HOLLER_CLAUDE_ATTENTION", connector.AttentionHostInjected)
+	mode, err = connector.ResolveClaudeAttentionMode()
+	if err != nil || mode != connector.AttentionHostInjected {
+		t.Fatalf("host environment mode=%q err=%v", mode, err)
+	}
 }

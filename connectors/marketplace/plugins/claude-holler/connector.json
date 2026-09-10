@@ -12,7 +12,7 @@
   "lifecycle_events": ["startup", "resume", "clear", "compact", "fork", "stop", "stop_failure", "end"],
   "notification_mode": "hook-long-poll",
   "notification_fallback": "startup-only",
-  "attention_modes": ["hook-long-poll", "startup-only"],
+  "attention_modes": ["hook-long-poll", "host-injected", "startup-only"],
   "required_assets": [
     ".claude-plugin/plugin.json",
     ".mcp.json",

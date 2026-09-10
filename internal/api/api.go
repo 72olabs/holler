@@ -774,12 +774,35 @@ func (s *Server) releaseHostConnection(key hostAttentionKey, connection net.Conn
 	}
 }
 
-func (s *Server) hostProcessCanBind(binding bus.HostAttentionBinding) bool {
+func (s *Server) hostProcessCanBind(ctx context.Context, binding bus.HostAttentionBinding) bool {
 	key := hostAttentionKey{pid: binding.Harness.PID, startFingerprint: binding.Harness.StartFingerprint}
 	s.hostAttentionMu.Lock()
-	defer s.hostAttentionMu.Unlock()
 	current, exists := s.hostConnections[key]
-	return !exists || (current.actor == binding.Actor && current.runID == binding.RunID && current.sessionID == binding.SessionID)
+	if !exists || (current.actor == binding.Actor && current.runID == binding.RunID && current.sessionID == binding.SessionID) {
+		s.hostAttentionMu.Unlock()
+		return true
+	}
+	s.hostAttentionMu.Unlock()
+
+	currentBinding := bus.HostAttentionBinding{
+		Harness: binding.Harness, Actor: current.actor, RunID: current.runID, SessionID: current.sessionID,
+	}
+	if s.hostRegistrationLive(ctx, currentBinding) {
+		return false
+	}
+
+	s.hostAttentionMu.Lock()
+	defer s.hostAttentionMu.Unlock()
+	latest, stillPresent := s.hostConnections[key]
+	if !stillPresent {
+		return true
+	}
+	if latest.connection != current.connection {
+		return latest.actor == binding.Actor && latest.runID == binding.RunID && latest.sessionID == binding.SessionID
+	}
+	delete(s.hostConnections, key)
+	_ = current.connection.Close()
+	return true
 }
 
 func (s *Server) trackIdentityConnection(connection net.Conn, actor, runID string) {
@@ -1259,7 +1282,7 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 					RunID:         identity.RunID,
 					SessionID:     strings.TrimSpace(request.SessionID),
 				}
-				if !s.hostProcessCanBind(binding) {
+				if !s.hostProcessCanBind(ctx, binding) {
 					request.AttentionMode = "startup-only"
 					request.DeliveryHandle = ""
 					hostDowngradeReason = "binding_in_use"
