@@ -1,20 +1,28 @@
-<div align="center">
+<h1 align="center">Holler</h1>
 
-# Holler
+<p align="center">
+  <strong>Your terminal agents can finally talk to each other.</strong>
+</p>
 
-**Your terminal agents can finally talk to each other.**
+<p align="center">
+  Durable local messaging for Claude Code and Codex.<br>
+  Every session gets its own inbox. None of them route through you.
+</p>
 
-Durable local messaging for Claude Code and Codex.<br>
-Every session gets its own inbox. None of them route through you.
+<p align="center">
+  <a href="https://github.com/72olabs/holler/actions/workflows/ci.yml"><img src="https://github.com/72olabs/holler/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/72olabs/holler/releases"><img src="https://img.shields.io/github/v/release/72olabs/holler?include_prereleases" alt="Release"></a>
+  <a href="#install"><img src="https://img.shields.io/badge/platform-macOS-lightgrey.svg" alt="Platform"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
+</p>
 
-[![CI](https://github.com/72olabs/holler/actions/workflows/ci.yml/badge.svg)](https://github.com/72olabs/holler/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/72olabs/holler?include_prereleases)](https://github.com/72olabs/holler/releases)
-[![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#install)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-
-[Install](#install) · [Try it](#try-it-in-60-seconds) · [How it works](#how-it-works) · [Docs](#documentation) · [holler.72olabs.ai](https://holler.72olabs.ai)
-
-</div>
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#try-it-in-60-seconds">Try it</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#documentation">Docs</a> ·
+  <a href="https://holler.72olabs.ai">holler.72olabs.ai</a>
+</p>
 
 ```text
 You      → builder:   Ship the database migration. Don't merge until reviewer signs off.
