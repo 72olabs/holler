@@ -21,6 +21,20 @@ if str(SCRIPT_DIR) not in sys.path:
 from manifest import ManifestError, git, load_request, sha256_file  # noqa: E402
 
 
+CREDENTIAL_DOMAINS = [
+    "api.anthropic.com",
+    "*.anthropic.com",
+    "claude.ai",
+    "*.claude.ai",
+    "claude.com",
+    "*.claude.com",
+    "api.openai.com",
+    "*.openai.com",
+    "chatgpt.com",
+    "*.chatgpt.com",
+]
+
+
 def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
     execution = request["execution"]
     return {
@@ -47,10 +61,7 @@ def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
         "network_policy": {
             "credentialed_sandbox_enforced": True,
             "builder": ["source-host", "go-modules"],
-            "canary": [
-                "api.anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai",
-                "api.openai.com", "*.openai.com", "chatgpt.com", "*.chatgpt.com",
-            ],
+            "canary": CREDENTIAL_DOMAINS,
         },
         "budget": request["budget"],
         "models": {
@@ -312,10 +323,7 @@ def create_auth_sandbox(request: dict[str, Any]) -> dict[str, Any]:
             ttl_minutes=120,
             auto_delete_interval=0,
             labels={"purpose": "holler-canary-auth-bootstrap"},
-            domain_allow_list=(
-                "api.anthropic.com,*.anthropic.com,claude.ai,*.claude.ai,"
-                "api.openai.com,*.openai.com,chatgpt.com,*.chatgpt.com"
-            ),
+            domain_allow_list=",".join(CREDENTIAL_DOMAINS),
             env_vars={"CLAUDE_CONFIG_DIR": f"{mount}/claude", "CODEX_HOME": f"{mount}/codex"},
             volumes=[VolumeMount(volume_id=auth_volume.id, mount_path=mount)],
         ),
@@ -374,10 +382,7 @@ def run_daytona(
         ephemeral=True,
         ttl_minutes=max(1, (request["budget"]["wall_seconds"] + 59) // 60 + 10),
         labels={"purpose": "holler-canary", "request": request["request_hash"][-12:]},
-        domain_allow_list=(
-            "api.anthropic.com,*.anthropic.com,claude.ai,*.claude.ai,"
-            "api.openai.com,*.openai.com,chatgpt.com,*.chatgpt.com"
-        ),
+        domain_allow_list=",".join(CREDENTIAL_DOMAINS),
         env_vars={
             "CLAUDE_CONFIG_DIR": "/home/daytona/.holler-canary-auth/claude",
             "CODEX_HOME": "/home/daytona/.holler-canary-auth/codex",

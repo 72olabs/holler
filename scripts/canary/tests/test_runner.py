@@ -33,6 +33,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(plan["models"]["claude"], "haiku")
         self.assertEqual(plan["models"]["codex"], "gpt-5.6-luna")
         self.assertIn("go-1-26-0", plan["resource_policy"]["canary"]["snapshot"])
+        self.assertIn("*.claude.com", plan["network_policy"]["canary"])
 
 
 if __name__ == "__main__":
