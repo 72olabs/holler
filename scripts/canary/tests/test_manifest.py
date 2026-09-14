@@ -23,6 +23,8 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(len(request["source"]["tree"]), 40)
         self.assertEqual(request["clients"]["claude"]["model"], "haiku")
         self.assertEqual(request["clients"]["codex"]["model"], "gpt-5.6-luna")
+        self.assertEqual(request["execution"]["go_toolchain"]["version"], "1.26.0")
+        self.assertIn("go-1-26-0", request["execution"]["snapshot"])
         validate_request(request)
 
     def test_tampering_is_rejected(self) -> None:
@@ -31,6 +33,13 @@ class ManifestTests(unittest.TestCase):
         changed["budget"]["model_turns"] += 1
         with self.assertRaises(ManifestError):
             validate_request(changed)
+
+    def test_unapproved_go_toolchain_is_rejected(self) -> None:
+        request = create_request(REPO, ref="HEAD", tier="core", clients=client_policy())
+        request["execution"]["go_toolchain"]["version"] = "1.26.1"
+        request["request_hash"] = request_hash(request)
+        with self.assertRaisesRegex(ManifestError, "unsupported Daytona Go toolchain"):
+            validate_request(request)
 
     def test_secret_like_fields_are_rejected(self) -> None:
         request = create_request(REPO, ref="HEAD", tier="core", clients=client_policy())

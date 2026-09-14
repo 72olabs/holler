@@ -214,6 +214,7 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
         ) from error
     execution = request["execution"]
     clients = request["clients"]
+    go_toolchain = execution["go_toolchain"]
     daytona = Daytona()
     auth_volume = daytona.volume.get(execution["auth_volume"], create=True)
     sandbox = daytona.create(
@@ -232,12 +233,23 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
             f"@openai/codex@{clients['codex']['version']}",
         ]
         install = "npm install --global " + " ".join(shlex.quote(value) for value in packages)
+        go_archive = f"/tmp/{go_toolchain['filename']}"
         command = " && ".join(
             [
                 "command -v git",
-                "command -v go",
                 "command -v node",
                 "command -v npm",
+                "command -v curl",
+                f"curl --fail --silent --show-error --location --output {shlex.quote(go_archive)} "
+                f"https://go.dev/dl/{shlex.quote(go_toolchain['filename'])}",
+                f"printf '%s  %s\\n' {shlex.quote(go_toolchain['sha256'])} "
+                f"{shlex.quote(go_archive)} | sha256sum --check --strict",
+                "sudo rm -rf /usr/local/go",
+                f"sudo tar -C /usr/local -xzf {shlex.quote(go_archive)}",
+                "sudo ln -sfn /usr/local/go/bin/go /usr/local/bin/go",
+                "sudo ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt",
+                f"test \"$(go version | sed -E 's/^go version go([^ ]+).*/\\1/')\" = "
+                f"{shlex.quote(go_toolchain['version'])}",
                 install,
                 f"test \"$(claude --version | sed -E 's/[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+).*/\\1/')\" = {shlex.quote(clients['claude']['version'])}",
                 f"test \"$(codex --version | sed -E 's/[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+).*/\\1/')\" = {shlex.quote(clients['codex']['version'])}",
@@ -245,7 +257,11 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
         )
         response = sandbox.process.exec(command, timeout=900)
         if response.exit_code != 0:
-            raise RuntimeError("client snapshot bootstrap failed")
+            detail = (response.result or "").strip()[-4000:]
+            raise RuntimeError(
+                f"client snapshot bootstrap exited {response.exit_code}"
+                + (f":\n{detail}" if detail else "")
+            )
         sandbox.create_snapshot(execution["snapshot"], timeout=600)
     finally:
         sandbox.delete()

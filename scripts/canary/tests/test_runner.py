@@ -32,6 +32,7 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(plan["resource_policy"]["canary"]["source_checkout"])
         self.assertEqual(plan["models"]["claude"], "haiku")
         self.assertEqual(plan["models"]["codex"], "gpt-5.6-luna")
+        self.assertIn("go-1-26-0", plan["resource_policy"]["canary"]["snapshot"])
 
 
 if __name__ == "__main__":

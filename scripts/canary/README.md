@@ -123,9 +123,10 @@ use separate subdirectories in the mounted volume. The accounts should have no
 source-hosting, production, billing-administration, or unrelated-data access.
 
 The controller makes the client snapshot before it mounts the empty auth
-volume. Its name is derived from the pinned Claude and Codex versions, so a
-client upgrade creates a new immutable environment rather than mutating the
-previous one:
+volume. It installs the Go version required by `go.mod` from a hash-pinned
+official archive, then installs the pinned Claude and Codex clients. Its name
+is derived from all three versions, so a toolchain or client upgrade creates a
+new immutable environment rather than mutating the previous one:
 
 ```sh
 DAYTONA_API_KEY=... .runs/canary/venv/bin/python \

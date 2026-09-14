@@ -17,6 +17,13 @@ from clients import assert_low_cost_defaults, client_policy
 
 SCHEMA_VERSION = 1
 HASH_PREFIX = "sha256:"
+GO_TOOLCHAINS = {
+    "1.26": {
+        "version": "1.26.0",
+        "filename": "go1.26.0.linux-amd64.tar.gz",
+        "sha256": "aac1b08a0fb0c4e0a7c1555beb7b59180b05dfc5a3d62e40e9de90cd42f88235",
+    },
+}
 SECRET_KEY_PATTERN = re.compile(
     r"(^|_)(secret|password|api_?key|access_token|refresh_token|credential_value|authorization)($|_)",
     re.I,
@@ -75,6 +82,18 @@ def connector_version(repo: Path, ref: str) -> str:
     return match.group(1)
 
 
+def go_toolchain(repo: Path, ref: str) -> dict[str, str]:
+    raw = git(repo, "show", f"{ref}:go.mod")
+    match = re.search(r"^go\s+([^\s]+)\s*$", raw, re.MULTILINE)
+    if not match:
+        raise ManifestError("cannot determine Go version at requested ref")
+    requested = match.group(1)
+    try:
+        return dict(GO_TOOLCHAINS[requested])
+    except KeyError as error:
+        raise ManifestError(f"unsupported Daytona Go toolchain: {requested}") from error
+
+
 def create_request(
     repo: Path,
     *,
@@ -94,10 +113,12 @@ def create_request(
     limits = budget_for_tier(tier)
     validate_estimate(scenarios, limits)
     selected_clients = clients or client_policy()
+    selected_go = go_toolchain(repo, commit)
     if snapshot is None:
+        go_pin = re.sub(r"[^a-zA-Z0-9]+", "-", selected_go["version"]).strip("-")
         claude_pin = re.sub(r"[^a-zA-Z0-9]+", "-", str(selected_clients["claude"]["version"])).strip("-")
         codex_pin = re.sub(r"[^a-zA-Z0-9]+", "-", str(selected_clients["codex"]["version"])).strip("-")
-        snapshot = f"holler-canary-claude-{claude_pin}-codex-{codex_pin}"
+        snapshot = f"holler-canary-go-{go_pin}-claude-{claude_pin}-codex-{codex_pin}"
     artifact_record: dict[str, Any] = {"required": tier != "preflight"}
     if artifact is not None:
         artifact = artifact.resolve()
@@ -128,6 +149,7 @@ def create_request(
         "execution": {
             "provider": "daytona",
             "snapshot": snapshot,
+            "go_toolchain": selected_go,
             "auth_volume": auth_volume,
             "ephemeral": True,
             "auto_delete_minutes": 60,
@@ -174,6 +196,8 @@ def validate_request(request: object, *, allow_model_override: bool = False) -> 
         except ValueError as error:
             raise ManifestError(str(error)) from error
     execution = request["execution"]
+    if execution.get("go_toolchain") not in GO_TOOLCHAINS.values():
+        raise ManifestError("request uses an unsupported Daytona Go toolchain")
     if execution.get("source_checkout_in_credential_sandbox") is not False:
         raise ManifestError("credentialed canaries must not receive a source checkout")
     if execution.get("evidence_contains_message_bodies") is not False:
