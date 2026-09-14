@@ -150,6 +150,7 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
     require_daytona_key()
     try:
         from daytona import CreateSandboxFromSnapshotParams, Daytona
+        from daytona.common.errors import DaytonaNotFoundError
     except ImportError as error:
         raise RuntimeError(
             "Daytona SDK is missing; install scripts/canary/requirements-daytona.txt in an isolated venv"
@@ -172,6 +173,14 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError(f"cannot archive committed source: {error}") from error
         daytona = Daytona()
+        try:
+            credentialed_runner = daytona.get(execution["runner_name"])
+        except DaytonaNotFoundError:
+            credentialed_runner = None
+        if credentialed_runner is not None:
+            validate_runner(credentialed_runner, execution)
+            if sandbox_state(credentialed_runner) == "started":
+                credentialed_runner.stop(timeout=120)
         sandbox = daytona.create(
             CreateSandboxFromSnapshotParams(
                 language="python",

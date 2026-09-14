@@ -157,6 +157,9 @@ DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
   --execute
 ```
 
+The builder stops the persistent runner first, preserving its filesystem while
+keeping the workflow within Daytona's entry-tier concurrent-memory limit.
+
 Then regenerate the request with `--artifact` so the downloaded archive hash
 becomes part of the operator-approved request before running the real canary.
 
