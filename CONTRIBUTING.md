@@ -14,13 +14,15 @@ Requirements:
 Build and run the deterministic checks:
 
 ```sh
-go test ./...
-go vet ./...
-go test -race ./...
-./scripts/build.sh
-./.build/holler lab run --all --timeout 20s
-HOLLER_VERSION=0.0.0-dev ./scripts/package-release.sh
+./scripts/ci/run.sh
 ```
+
+This single entrypoint is also used by pull-request and release workflows. It
+checks formatting and module tidiness, runs the Go and deterministic lab suites,
+builds the release archive, enforces its explicit file allowlist and build
+identity, then exercises the extracted product in an isolated home with fake
+Claude and Codex clients. The black-box test starts the real packaged daemon but
+never uses vendor credentials or model calls.
 
 The lab command starts a real `hollerd` in an isolated home, socket, database,
 and harness configuration tree. Its built-in fake Claude and Codex scenarios
