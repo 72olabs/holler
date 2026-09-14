@@ -322,12 +322,17 @@ def create_auth_sandbox(request: dict[str, Any]) -> dict[str, Any]:
         timeout=120,
     )
     response = sandbox.process.exec(
-        f"mkdir -p {mount}/claude {mount}/codex && chmod 700 {mount}/claude {mount}/codex",
+        f"mkdir -p {mount}/claude {mount}/codex && "
+        f"test -w {mount}/claude && test -w {mount}/codex",
         timeout=30,
     )
     if response.exit_code != 0:
         sandbox.delete()
-        raise RuntimeError("could not initialize OAuth volume directories")
+        detail = (response.result or "").strip()[-4000:]
+        raise RuntimeError(
+            "could not initialize writable OAuth volume directories"
+            + (f":\n{detail}" if detail else "")
+        )
     return {
         "status": "READY_FOR_INTERACTIVE_LOGIN",
         "sandbox_id": sandbox.id,

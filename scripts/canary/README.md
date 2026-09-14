@@ -121,6 +121,10 @@ an environment variable. Create one Daytona volume named
 dedicated test account in from that sandbox. Configure Claude Code and Codex to
 use separate subdirectories in the mounted volume. The accounts should have no
 source-hosting, production, billing-administration, or unrelated-data access.
+Daytona volumes are FUSE mounts and do not support meaningful `chmod` or
+`chown`; credential isolation therefore comes from mounting this volume only
+into the dedicated test sandboxes and from treating the Daytona organization
+and its API keys as the trust boundary.
 
 The controller makes the client snapshot before it mounts the empty auth
 volume. It installs the Go version required by `go.mod` from a hash-pinned
