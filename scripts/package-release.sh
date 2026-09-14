@@ -47,6 +47,9 @@ if ! printf '%s\n' "$version_output" | grep -Fq '"dirty": false'; then
 fi
 
 archive="${artifact_root}/holler-${version}-${platform}.tar.gz"
-tar -C "$stage" -czf "$archive" "$(basename "$package_root")"
+# BSD tar otherwise serializes macOS extended attributes as hidden AppleDouble
+# entries. Those entries create a second apparent archive root for portable
+# extractors and make the release contents depend on the build host.
+COPYFILE_DISABLE=1 tar -C "$stage" -czf "$archive" "$(basename "$package_root")"
 (cd "$artifact_root" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 echo "$archive"
