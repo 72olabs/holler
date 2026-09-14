@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "C2",
+  "name": "live-bidirectional-attention",
+  "description": "Keep both real clients live and prove one accepted wake, fetch, reply, and acknowledgement in each direction.",
+  "required_clients": ["claude", "codex"],
+  "estimated_model_turns": 4,
+  "timeout_seconds": 420,
+  "checks": [
+    "claude-live-wake",
+    "codex-live-wake",
+    "bidirectional-routing",
+    "exactly-once-processing",
+    "connector-ready"
+  ]
+}
