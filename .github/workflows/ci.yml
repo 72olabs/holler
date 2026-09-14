@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   test:
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
