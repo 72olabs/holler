@@ -9,7 +9,7 @@ import unittest
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from daytona import make_runtime_bundle
+from daytona_controller import make_runtime_bundle
 from worker import claude_cost, codex_reported_tokens, parse_version
 
 

@@ -18,7 +18,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from manifest import ManifestError, load_request, sha256_file  # noqa: E402
+from manifest import ManifestError, git, load_request, sha256_file  # noqa: E402
 
 
 def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
@@ -122,7 +122,17 @@ def require_daytona_key() -> None:
         raise RuntimeError("DAYTONA_API_KEY is not set")
 
 
+def require_committed_controller(request: dict[str, Any], repo: Path) -> None:
+    repo = repo.resolve()
+    if git(repo, "rev-parse", "HEAD") != request["source"]["commit"]:
+        raise RuntimeError("controller HEAD does not match the commit in the approved request")
+    changed = git(repo, "status", "--porcelain", "--untracked-files=all", "--", "scripts/canary")
+    if changed:
+        raise RuntimeError("scripts/canary has uncommitted changes; commit and prepare a new request")
+
+
 def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[str, Any]:
+    require_committed_controller(request, repo)
     require_daytona_key()
     try:
         from daytona import CreateSandboxFromSnapshotParams, Daytona
@@ -194,6 +204,7 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
 
 
 def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
+    require_committed_controller(request, SCRIPT_DIR.parent.parent)
     require_daytona_key()
     try:
         from daytona import CreateSandboxFromSnapshotParams, Daytona
@@ -247,6 +258,7 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def create_auth_sandbox(request: dict[str, Any]) -> dict[str, Any]:
+    require_committed_controller(request, SCRIPT_DIR.parent.parent)
     require_daytona_key()
     try:
         from daytona import CreateSandboxFromSnapshotParams, Daytona, VolumeMount
@@ -297,6 +309,7 @@ def run_daytona(
     output: Path,
     keep_on_failure: bool,
 ) -> dict[str, Any]:
+    require_committed_controller(request, SCRIPT_DIR.parent.parent)
     if request["tier"] != "core":
         raise RuntimeError("the credentialed worker currently accepts only the core tier")
     approved_artifact = request["artifact"]

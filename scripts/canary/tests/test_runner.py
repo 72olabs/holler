@@ -8,7 +8,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from clients import client_policy
-from daytona import execution_plan
+from daytona_controller import execution_plan
 from manifest import create_request
 from run import run_fake
 

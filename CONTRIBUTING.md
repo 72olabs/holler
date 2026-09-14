@@ -57,7 +57,7 @@ python3 scripts/canary/run.py \
   .runs/canary/request.json \
   --driver fake \
   --output .runs/canary/fake-evidence.json
-python3 scripts/canary/daytona.py plan .runs/canary/request.json
+python3 scripts/canary/daytona_controller.py plan .runs/canary/request.json
 ```
 
 The committed defaults use Claude Haiku and `gpt-5.6-luna` at low reasoning

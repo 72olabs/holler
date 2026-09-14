@@ -29,7 +29,7 @@ python3 scripts/canary/run.py \
   --driver fake \
   --output .runs/canary/fake-evidence.json
 
-python3 scripts/canary/daytona.py plan .runs/canary/request.json
+python3 scripts/canary/daytona_controller.py plan .runs/canary/request.json
 ```
 
 All generated requests, evidence, transcripts, databases, and provider state
@@ -90,7 +90,7 @@ sandbox:
 python3 -m venv .runs/canary/venv
 .runs/canary/venv/bin/pip install -r scripts/canary/requirements-daytona.txt
 DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
-  scripts/canary/daytona.py probe --execute
+  scripts/canary/daytona_controller.py probe --execute
 ```
 
 Without `--execute`, the provider tool does not create anything. By default a
@@ -102,7 +102,7 @@ canary is launched explicitly:
 
 ```sh
 DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
-  scripts/canary/daytona.py run .runs/canary/request.json \
+  scripts/canary/daytona_controller.py run .runs/canary/request.json \
   --artifact dist/holler-VERSION-linux-amd64.tar.gz \
   --output .runs/canary/real-evidence.json \
   --execute
@@ -129,10 +129,10 @@ previous one:
 
 ```sh
 DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
-  scripts/canary/daytona.py bootstrap .runs/canary/request.json --execute
+  scripts/canary/daytona_controller.py bootstrap .runs/canary/request.json --execute
 
 DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
-  scripts/canary/daytona.py auth-sandbox .runs/canary/request.json --execute
+  scripts/canary/daytona_controller.py auth-sandbox .runs/canary/request.json --execute
 ```
 
 The second command returns a sandbox ID. Open that sandbox's terminal in
@@ -145,7 +145,7 @@ local checkpoint commit can be tested without a push or PR:
 
 ```sh
 DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
-  scripts/canary/daytona.py build .runs/canary/request.json \
+  scripts/canary/daytona_controller.py build .runs/canary/request.json \
   --output .runs/canary/holler-linux-amd64.tar.gz \
   --execute
 ```
