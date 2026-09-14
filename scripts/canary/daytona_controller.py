@@ -238,7 +238,7 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
             + " ".join(shlex.quote(value) for value in packages)
         )
         go_archive = f"/tmp/{go_toolchain['filename']}"
-        command = " && ".join(
+        command = "set -x && " + " && ".join(
             [
                 "command -v git",
                 "command -v node",
@@ -257,8 +257,10 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
                 install,
                 f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/claude')} /usr/local/bin/claude",
                 f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/codex')} /usr/local/bin/codex",
-                f"test \"$(claude --version | sed -E 's/[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+).*/\\1/')\" = {shlex.quote(clients['claude']['version'])}",
-                f"test \"$(codex --version | sed -E 's/[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+).*/\\1/')\" = {shlex.quote(clients['codex']['version'])}",
+                f"test \"$(claude --version | awk '{{print $1}}')\" = "
+                f"{shlex.quote(clients['claude']['version'])}",
+                f"test \"$(codex --version | awk '{{print $NF}}')\" = "
+                f"{shlex.quote(clients['codex']['version'])}",
             ]
         )
         response = sandbox.process.exec(command, timeout=900)
