@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Keep release behavior aligned with CI during the runner-home audit soak.
+  HOLLER_CI_HOME_AUDIT: report
+
 jobs:
   metadata:
     runs-on: ubuntu-latest

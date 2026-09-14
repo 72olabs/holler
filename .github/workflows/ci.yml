@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Start report-only; promote to strict after the scoped runner-home audit has
+  # produced ten clean runs on both hosted images.
+  HOLLER_CI_HOME_AUDIT: report
+
 jobs:
   test:
     name: test (${{ matrix.os }})

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import stat as stat_module
 import subprocess
 import sys
 import tarfile
@@ -56,33 +57,45 @@ def inside(path: Path, parent: Path) -> bool:
     return candidate == root or candidate.startswith(root + os.sep)
 
 
-def host_snapshot(home: Path, exclusions: list[Path]) -> dict[str, tuple[int, int, int, int]]:
+def host_snapshot(
+    home: Path, monitored_roots: list[Path], exclusions: list[Path]
+) -> dict[str, tuple[int, int, int, int]]:
     snapshot: dict[str, tuple[int, int, int, int]] = {}
     if not home.is_dir():
         return snapshot
-    excluded_paths = [normalized(path) for path in exclusions if path.exists() and inside(path, home)]
+    excluded_paths = [normalized(path) for path in exclusions if inside(path, home)]
 
     def excluded(path: Path) -> bool:
         candidate = normalized(path)
         return any(candidate == root or candidate.startswith(root + os.sep) for root in excluded_paths)
 
-    for root, dirs, files in os.walk(home, topdown=True, followlinks=False):
-        root_path = Path(root)
-        dirs[:] = [name for name in dirs if not excluded(root_path / name)]
-        for name in [*dirs, *files]:
-            path = root_path / name
-            if excluded(path):
-                continue
-            try:
-                stat = path.lstat()
-            except FileNotFoundError:
-                continue
-            snapshot[path.relative_to(home).as_posix()] = (
-                stat.st_mode,
-                stat.st_size,
-                stat.st_mtime_ns,
-                stat.st_ino,
-            )
+    def record(path: Path) -> None:
+        if excluded(path):
+            return
+        try:
+            item = path.lstat()
+        except FileNotFoundError:
+            return
+        is_directory = stat_module.S_ISDIR(item.st_mode)
+        snapshot[path.relative_to(home).as_posix()] = (
+            item.st_mode,
+            0 if is_directory else item.st_size,
+            0 if is_directory else item.st_mtime_ns,
+            item.st_ino,
+        )
+
+    for monitored_root in monitored_roots:
+        if not monitored_root.exists() or excluded(monitored_root):
+            continue
+        record(monitored_root)
+        if not monitored_root.is_dir():
+            continue
+        for root, dirs, files in os.walk(monitored_root, topdown=True, followlinks=False):
+            root_path = Path(root)
+            dirs[:] = [name for name in dirs if not excluded(root_path / name)]
+            for name in [*dirs, *files]:
+                path = root_path / name
+                record(path)
     return snapshot
 
 
@@ -94,15 +107,43 @@ def wait_for_absence(path: Path, timeout: float = 5.0) -> None:
         fail(f"path remained after teardown: {path}")
 
 
+def process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def wait_for_process_exit(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while process_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return not process_alive(pid)
+
+
 def stop_leftover_daemon(pid_path: Path) -> None:
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return
+    forced = False
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
+        pid_path.unlink(missing_ok=True)
         return
+    if not wait_for_process_exit(pid, 2.0):
+        forced = True
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if not wait_for_process_exit(pid, 2.0):
+            fail(f"leftover packaged hollerd process {pid} survived SIGKILL")
+    pid_path.unlink(missing_ok=True)
+    if forced:
+        fail(f"leftover packaged hollerd process {pid} required SIGKILL")
 
 
 def assert_setup(result: object, harness: str) -> None:
@@ -118,13 +159,33 @@ def main() -> None:
     archive = args.archive.resolve()
 
     original_home = Path.home().resolve()
-    exclusions = []
-    for name in ("GOCACHE", "GOMODCACHE", "GOPATH"):
+    monitored_roots = [
+        original_home / ".holler",
+        original_home / ".claude",
+        original_home / ".codex",
+        original_home / ".config",
+        original_home / ".local",
+        original_home / ".cache",
+        original_home / "Library" / "LaunchAgents",
+        original_home / "Library" / "Application Support",
+    ]
+    exclusions = [original_home / ".config" / "go" / "telemetry"]
+    for name in (
+        "GITHUB_WORKSPACE",
+        "GOCACHE",
+        "GOMODCACHE",
+        "GOPATH",
+        "RUNNER_TOOL_CACHE",
+        "AGENT_TOOLSDIRECTORY",
+    ):
         value = os.environ.get(name, "").strip()
         if value:
             exclusions.append(Path(value))
-    audit_runner_home = os.environ.get("GITHUB_ACTIONS") == "true"
-    before = host_snapshot(original_home, exclusions) if audit_runner_home else {}
+    audit_mode = os.environ.get("HOLLER_CI_HOME_AUDIT", "report").strip().lower()
+    if audit_mode not in {"off", "report", "strict"}:
+        fail("HOLLER_CI_HOME_AUDIT must be off, report, or strict")
+    audit_runner_home = os.environ.get("GITHUB_ACTIONS") == "true" and audit_mode != "off"
+    before = host_snapshot(original_home, monitored_roots, exclusions) if audit_runner_home else {}
 
     temp_parent = "/tmp" if Path("/tmp").is_dir() else None
     with tempfile.TemporaryDirectory(prefix="holler ci ünicode ", dir=temp_parent) as temporary:
@@ -351,15 +412,18 @@ def main() -> None:
             stop_leftover_daemon(pid_path)
 
     if audit_runner_home:
-        after = host_snapshot(original_home, exclusions)
+        after = host_snapshot(original_home, monitored_roots, exclusions)
         if before != after:
             created = sorted(after.keys() - before.keys())
             removed = sorted(before.keys() - after.keys())
             changed = sorted(path for path in before.keys() & after.keys() if before[path] != after[path])
-            fail(
-                "packaged black-box wrote outside its isolated prefix; "
+            detail = (
+                "packaged black-box observed changes in monitored runner-home paths; "
                 f"created={created[:20]}, removed={removed[:20]}, changed={changed[:20]}"
             )
+            if audit_mode == "strict":
+                fail(detail)
+            print(f"::warning::{detail}")
 
     print(f"packaged black-box passed for Holler {args.version}")
 
