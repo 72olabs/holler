@@ -262,8 +262,12 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
                 "/home/daytona/.local/bin/codex",
                 f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/claude')} /usr/local/bin/claude",
                 f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/codex')} /usr/local/bin/codex",
-                "test \"$(command -v claude)\" = /home/daytona/.local/bin/claude",
-                "test \"$(command -v codex)\" = /home/daytona/.local/bin/codex",
+                f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/claude')} "
+                "/usr/local/share/nvm/current/bin/claude",
+                f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/codex')} "
+                "/usr/local/share/nvm/current/bin/codex",
+                "test \"$(command -v claude)\" = /usr/local/share/nvm/current/bin/claude",
+                "test \"$(command -v codex)\" = /usr/local/share/nvm/current/bin/codex",
                 f"test \"$(claude --version | awk '{{print $1}}')\" = "
                 f"{shlex.quote(clients['claude']['version'])}",
                 f"test \"$(codex --version | awk '{{print $NF}}')\" = "
