@@ -73,15 +73,18 @@ The Daytona plan intentionally separates two sandboxes:
 
 - The builder receives the committed source tree and no model credentials. It
   runs deterministic CI and produces the verified release archive.
-- The canary receives only that archive, the canary runtime, and a tiny fixture
-  Git repository. It mounts the dedicated OAuth test-account volume but never
-  receives the Holler source checkout.
+- The persistent canary runner receives only that archive, the canary runtime,
+  and a tiny fixture Git repository. Its private filesystem holds only the
+  dedicated test accounts' OAuth state; it never receives the Holler source
+  checkout.
 
 Both real clients run in the same credentialed sandbox and OS user because
-Holler uses a local Unix socket. The sandbox is ephemeral and has a 60-minute
-stopped-state auto-delete fallback. Evidence is downloaded before deletion and
-contains IDs, hashes, versions, assertions, timings, and usage totals—not peer
-message bodies or auth files.
+Holler uses a local Unix socket. The named runner auto-stops after 15 idle
+minutes, and Daytona preserves its filesystem across stop/start and archive.
+Each run begins with a stop/start boundary, uses a private per-run directory,
+downloads body-free evidence, removes that directory, and stops the runner.
+Evidence contains IDs, hashes, versions, assertions, timings, and usage
+totals—not peer message bodies or auth files.
 
 Use the provider probe only when you explicitly want to create a billable
 sandbox:
@@ -97,7 +100,7 @@ Without `--execute`, the provider tool does not create anything. By default a
 successful probe is deleted in a `finally` block; `--keep` is an explicit
 debugging escape hatch.
 
-Once a verified artifact and the OAuth volume exist, the credentialed core
+Once a verified artifact and authenticated runner exist, the credentialed core
 canary is launched explicitly:
 
 ```sh
@@ -109,41 +112,40 @@ DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
 ```
 
 The `run` command accepts the `core` tier today. It uploads only the approved
-archive, request, and small worker bundle; mounts the auth volume; runs C0-C3;
-downloads body-free evidence; and deletes the sandbox in a `finally` block.
-`--keep-on-failure` is available only for deliberate debugging.
+archive, request, and small worker bundle; runs C0-C3; downloads body-free
+evidence; removes the per-run files; and stops the persistent runner in a
+`finally` block. `--keep-on-failure` is available only for deliberate
+debugging.
 
 ## Credential bootstrap
 
-Do not put OAuth state in this repository, a request manifest, a snapshot, or
-an environment variable. Create one Daytona volume named
-`holler-canary-auth`, mount it only into the credentialed sandbox, and log each
-dedicated test account in from that sandbox. Configure Claude Code and Codex to
-use separate subdirectories in the mounted volume. The accounts should have no
-source-hosting, production, billing-administration, or unrelated-data access.
-Daytona volumes are FUSE mounts and do not support meaningful `chmod` or
-`chown`; credential isolation therefore comes from mounting this volume only
-into the dedicated test sandboxes and from treating the Daytona organization
-and its API keys as the trust boundary.
+Do not put OAuth state in this repository, a request manifest, a snapshot, a
+FUSE volume, or an environment variable. Create one named persistent Daytona
+runner and log each dedicated test account in from its terminal. Claude Code
+and Codex use separate mode-`0700` directories on the runner's normal
+filesystem. The accounts should have no source-hosting, production,
+billing-administration, or unrelated-data access. Treat the Daytona
+organization, its API keys, and this dedicated runner as the credential trust
+boundary.
 
-The controller makes the client snapshot before it mounts the empty auth
-volume. It installs the Go version required by `go.mod` from a hash-pinned
-official archive, then installs the pinned Claude and Codex clients. Its name
-is derived from all three versions, so a toolchain or client upgrade creates a
-new immutable environment rather than mutating the previous one:
+The controller creates a credential-free client snapshot first. It installs
+the Go version required by `go.mod` from a hash-pinned official archive, then
+installs the pinned Claude and Codex clients. Its name is derived from all
+three versions, so a toolchain or client upgrade creates a new immutable
+environment rather than mutating the previous one:
 
 ```sh
 DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
   scripts/canary/daytona_controller.py bootstrap .runs/canary/request.json --execute
 
 DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
-  scripts/canary/daytona_controller.py auth-sandbox .runs/canary/request.json --execute
+  scripts/canary/daytona_controller.py runner .runs/canary/request.json --execute
 ```
 
-The second command returns a sandbox ID. Open that sandbox's terminal in
-Daytona, run the two printed login commands yourself, then delete only the
-temporary sandbox. The OAuth state remains in `holler-canary-auth`; it is never
-captured by the snapshot.
+The second command creates or verifies `holler-canary-runner` and returns its
+ID. Open that runner's terminal in Daytona and run the two printed login
+commands yourself. Keep the runner: stopping or archiving it preserves the
+OAuth state without capturing credentials in a reusable snapshot.
 
 Build the committed source in an uncredentialed sandbox. `git archive` means a
 local checkpoint commit can be tested without a push or PR:
@@ -158,8 +160,8 @@ DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
 Then regenerate the request with `--artifact` so the downloaded archive hash
 becomes part of the operator-approved request before running the real canary.
 
-The real worker becomes usable only after the dedicated OAuth volume exists,
-the pinned clients are present in the named snapshot, and both authentication
-preflights succeed. Until then, the fake driver tests manifest integrity, tier
-accounting, budget enforcement, provider planning, and body-free evidence
-generation without model calls.
+The real worker becomes usable only after the named runner exists, the pinned
+clients are present in its base snapshot, and both authentication preflights
+succeed. Until then, the fake driver tests manifest integrity, tier accounting,
+budget enforcement, provider planning, and body-free evidence generation
+without model calls.

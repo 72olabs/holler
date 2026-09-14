@@ -25,6 +25,8 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(request["clients"]["codex"]["model"], "gpt-5.6-luna")
         self.assertEqual(request["execution"]["go_toolchain"]["version"], "1.26.0")
         self.assertIn("go-1-26-0", request["execution"]["snapshot"])
+        self.assertEqual(request["execution"]["runner_name"], "holler-canary-runner")
+        self.assertTrue(request["execution"]["runner_persistent"])
         validate_request(request)
 
     def test_tampering_is_rejected(self) -> None:
@@ -39,6 +41,13 @@ class ManifestTests(unittest.TestCase):
         request["execution"]["go_toolchain"]["version"] = "1.26.1"
         request["request_hash"] = request_hash(request)
         with self.assertRaisesRegex(ManifestError, "unsupported Daytona Go toolchain"):
+            validate_request(request)
+
+    def test_ephemeral_credentialed_runner_is_rejected(self) -> None:
+        request = create_request(REPO, ref="HEAD", tier="core", clients=client_policy())
+        request["execution"]["runner_persistent"] = False
+        request["request_hash"] = request_hash(request)
+        with self.assertRaisesRegex(ManifestError, "must be persistent"):
             validate_request(request)
 
     def test_secret_like_fields_are_rejected(self) -> None:

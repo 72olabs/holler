@@ -102,7 +102,7 @@ def create_request(
     clients: dict[str, dict[str, Any]] | None = None,
     artifact: Path | None = None,
     snapshot: str | None = None,
-    auth_volume: str = "holler-canary-auth",
+    runner_name: str = "holler-canary-runner",
 ) -> dict[str, Any]:
     repo = repo.resolve()
     commit = git(repo, "rev-parse", f"{ref}^{{commit}}")
@@ -150,9 +150,9 @@ def create_request(
             "provider": "daytona",
             "snapshot": snapshot,
             "go_toolchain": selected_go,
-            "auth_volume": auth_volume,
-            "ephemeral": True,
-            "auto_delete_minutes": 60,
+            "runner_name": runner_name,
+            "runner_persistent": True,
+            "runner_auto_stop_minutes": 15,
             "source_checkout_in_credential_sandbox": False,
             "evidence_contains_message_bodies": False,
         },
@@ -198,6 +198,10 @@ def validate_request(request: object, *, allow_model_override: bool = False) -> 
     execution = request["execution"]
     if execution.get("go_toolchain") not in GO_TOOLCHAINS.values():
         raise ManifestError("request uses an unsupported Daytona Go toolchain")
+    if not isinstance(execution.get("runner_name"), str) or not execution["runner_name"].strip():
+        raise ManifestError("request must name a persistent Daytona runner")
+    if execution.get("runner_persistent") is not True:
+        raise ManifestError("credentialed Daytona runner must be persistent")
     if execution.get("source_checkout_in_credential_sandbox") is not False:
         raise ManifestError("credentialed canaries must not receive a source checkout")
     if execution.get("evidence_contains_message_bodies") is not False:

@@ -30,7 +30,7 @@ def main() -> None:
     parser.add_argument("--codex-model")
     parser.add_argument("--allow-model-override", action="store_true")
     parser.add_argument("--snapshot", help="defaults to a name derived from both pinned client versions")
-    parser.add_argument("--auth-volume", default="holler-canary-auth")
+    parser.add_argument("--runner-name", default="holler-canary-runner")
     args = parser.parse_args()
     policy = client_policy(
         claude_version=args.claude_version,
@@ -47,7 +47,7 @@ def main() -> None:
         clients=policy,
         artifact=args.artifact,
         snapshot=args.snapshot,
-        auth_volume=args.auth_volume,
+        runner_name=args.runner_name,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")

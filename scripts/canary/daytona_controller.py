@@ -33,6 +33,8 @@ CREDENTIAL_DOMAINS = [
     "chatgpt.com",
     "*.chatgpt.com",
 ]
+AUTH_ROOT = "/home/daytona/.holler-canary-auth"
+RUNNER_PURPOSE = "holler-canary-persistent-runner"
 
 
 def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
@@ -52,10 +54,10 @@ def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
                 "credentials": ["claude-subscription-oauth", "codex-subscription-oauth"],
                 "source_checkout": False,
                 "artifact_sha256": request["artifact"].get("sha256", "produced-by-builder"),
-                "auth_volume": execution["auth_volume"],
+                "runner": execution["runner_name"],
                 "snapshot": execution["snapshot"],
-                "ephemeral": True,
-                "auto_delete_minutes": execution["auto_delete_minutes"],
+                "persistent": True,
+                "auto_stop_minutes": execution["runner_auto_stop_minutes"],
             },
         },
         "network_policy": {
@@ -73,7 +75,8 @@ def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
             "stop both clients",
             "stop hollerd",
             "download body-free evidence",
-            "delete credentialed sandbox",
+            "remove per-run files from the credentialed runner",
+            "stop the credentialed runner while retaining its OAuth filesystem",
             "delete uncredentialed builder sandbox",
         ],
     }
@@ -227,7 +230,6 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
     clients = request["clients"]
     go_toolchain = execution["go_toolchain"]
     daytona = Daytona()
-    auth_volume = daytona.volume.get(execution["auth_volume"], create=True)
     sandbox = daytona.create(
         CreateSandboxFromSnapshotParams(
             language="python",
@@ -298,55 +300,98 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": "PASS",
         "snapshot": execution["snapshot"],
-        "auth_volume": auth_volume.name,
         "credentials_in_snapshot": False,
     }
 
 
-def create_auth_sandbox(request: dict[str, Any]) -> dict[str, Any]:
+def sandbox_state(sandbox: Any) -> str:
+    state = getattr(sandbox, "state", "")
+    return str(getattr(state, "value", state)).lower()
+
+
+def validate_runner(sandbox: Any, execution: dict[str, Any]) -> None:
+    if sandbox.name != execution["runner_name"]:
+        raise RuntimeError("Daytona returned the wrong credentialed runner")
+    if sandbox.labels.get("purpose") != RUNNER_PURPOSE:
+        raise RuntimeError("refusing to use a runner without the Holler canary purpose label")
+    if sandbox.snapshot != execution["snapshot"]:
+        raise RuntimeError("credentialed runner snapshot does not match the approved request")
+    if sandbox.auto_delete_interval != -1:
+        raise RuntimeError("credentialed runner must have auto-delete disabled")
+    if sandbox.auto_stop_interval != execution["runner_auto_stop_minutes"]:
+        raise RuntimeError("credentialed runner auto-stop does not match the approved request")
+    if sandbox.domain_allow_list != ",".join(CREDENTIAL_DOMAINS):
+        raise RuntimeError("credentialed runner domain allowlist does not match the controller policy")
+    expected_env = {
+        "CLAUDE_CONFIG_DIR": f"{AUTH_ROOT}/claude",
+        "CODEX_HOME": f"{AUTH_ROOT}/codex",
+    }
+    if sandbox.env != expected_env:
+        raise RuntimeError("credentialed runner OAuth paths do not match the controller policy")
+    if sandbox.volumes:
+        raise RuntimeError("credentialed runner must not mount FUSE volumes")
+
+
+def start_runner(sandbox: Any) -> None:
+    if sandbox_state(sandbox) != "started":
+        sandbox.start(timeout=120)
+
+
+def create_auth_runner(request: dict[str, Any]) -> dict[str, Any]:
     require_committed_controller(request, SCRIPT_DIR.parent.parent)
     require_daytona_key()
     try:
-        from daytona import CreateSandboxFromSnapshotParams, Daytona, VolumeMount
+        from daytona import CreateSandboxFromSnapshotParams, Daytona
+        from daytona.common.errors import DaytonaNotFoundError
     except ImportError as error:
         raise RuntimeError(
             "Daytona SDK is missing; install scripts/canary/requirements-daytona.txt in an isolated venv"
         ) from error
     execution = request["execution"]
     daytona = Daytona()
-    auth_volume = daytona.volume.get(execution["auth_volume"], create=False)
-    mount = "/home/daytona/.holler-canary-auth"
-    sandbox = daytona.create(
-        CreateSandboxFromSnapshotParams(
-            language="python",
-            snapshot=execution["snapshot"],
-            ttl_minutes=120,
-            auto_delete_interval=0,
-            labels={"purpose": "holler-canary-auth-bootstrap"},
-            domain_allow_list=",".join(CREDENTIAL_DOMAINS),
-            env_vars={"CLAUDE_CONFIG_DIR": f"{mount}/claude", "CODEX_HOME": f"{mount}/codex"},
-            volumes=[VolumeMount(volume_id=auth_volume.id, mount_path=mount)],
-        ),
-        timeout=120,
-    )
+    reused = True
+    try:
+        sandbox = daytona.get(execution["runner_name"])
+    except DaytonaNotFoundError:
+        reused = False
+        sandbox = daytona.create(
+            CreateSandboxFromSnapshotParams(
+                name=execution["runner_name"],
+                language="python",
+                snapshot=execution["snapshot"],
+                auto_stop_interval=execution["runner_auto_stop_minutes"],
+                labels={"purpose": RUNNER_PURPOSE},
+                domain_allow_list=",".join(CREDENTIAL_DOMAINS),
+                env_vars={
+                    "CLAUDE_CONFIG_DIR": f"{AUTH_ROOT}/claude",
+                    "CODEX_HOME": f"{AUTH_ROOT}/codex",
+                },
+            ),
+            timeout=120,
+        )
+    validate_runner(sandbox, execution)
+    start_runner(sandbox)
     response = sandbox.process.exec(
-        f"mkdir -p {mount}/claude {mount}/codex && "
-        f"test -w {mount}/claude && test -w {mount}/codex",
+        f"umask 077 && mkdir -p {AUTH_ROOT}/claude {AUTH_ROOT}/codex && "
+        f"chmod 700 {AUTH_ROOT} {AUTH_ROOT}/claude {AUTH_ROOT}/codex && "
+        f"test -w {AUTH_ROOT}/claude && test -w {AUTH_ROOT}/codex",
         timeout=30,
     )
     if response.exit_code != 0:
-        sandbox.delete()
         detail = (response.result or "").strip()[-4000:]
         raise RuntimeError(
-            "could not initialize writable OAuth volume directories"
+            "could not initialize writable OAuth directories on the persistent runner"
             + (f":\n{detail}" if detail else "")
         )
     return {
         "status": "READY_FOR_INTERACTIVE_LOGIN",
         "sandbox_id": sandbox.id,
-        "expires_after_minutes": 120,
+        "sandbox_name": sandbox.name,
+        "persistent_filesystem": True,
+        "reused": reused,
+        "auto_stop_minutes": execution["runner_auto_stop_minutes"],
         "commands": ["claude auth login", "codex login"],
-        "note": "Run the commands in this sandbox's terminal, then delete the sandbox; the auth volume persists.",
+        "note": "Log in once, then keep this runner; stop/start preserves OAuth state.",
     }
 
 
@@ -368,67 +413,79 @@ def run_daytona(
     if not os.environ.get("DAYTONA_API_KEY"):
         raise RuntimeError("DAYTONA_API_KEY is not set")
     try:
-        from daytona import CreateSandboxFromSnapshotParams, Daytona, VolumeMount
+        from daytona import Daytona
+        from daytona.common.errors import DaytonaNotFoundError
     except ImportError as error:
         raise RuntimeError(
             "Daytona SDK is missing; install scripts/canary/requirements-daytona.txt in an isolated venv"
         ) from error
     execution = request["execution"]
     daytona = Daytona()
-    auth_volume = daytona.volume.get(execution["auth_volume"], create=False)
-    params = CreateSandboxFromSnapshotParams(
-        language="python",
-        snapshot=execution["snapshot"],
-        ephemeral=True,
-        ttl_minutes=max(1, (request["budget"]["wall_seconds"] + 59) // 60 + 10),
-        labels={"purpose": "holler-canary", "request": request["request_hash"][-12:]},
-        domain_allow_list=",".join(CREDENTIAL_DOMAINS),
-        env_vars={
-            "CLAUDE_CONFIG_DIR": "/home/daytona/.holler-canary-auth/claude",
-            "CODEX_HOME": "/home/daytona/.holler-canary-auth/codex",
-        },
-        volumes=[
-            VolumeMount(
-                volume_id=auth_volume.id,
-                mount_path="/home/daytona/.holler-canary-auth",
-            )
-        ],
-    )
-    sandbox = daytona.create(params, timeout=120)
-    succeeded = False
     try:
+        sandbox = daytona.get(execution["runner_name"])
+    except DaytonaNotFoundError as error:
+        raise RuntimeError("persistent Daytona runner does not exist; run the runner command first") from error
+    validate_runner(sandbox, execution)
+    if sandbox_state(sandbox) == "started":
+        sandbox.stop(timeout=120)
+    start_runner(sandbox)
+    succeeded = False
+    run_root = f"/tmp/holler-canary-{request['request_hash'][-16:]}"
+    try:
+        for client, command in (
+            ("Claude", "claude auth status >/dev/null 2>&1"),
+            ("Codex", "codex login status >/dev/null 2>&1"),
+        ):
+            preflight = sandbox.process.exec(command, timeout=60)
+            if preflight.exit_code != 0:
+                raise RuntimeError(f"{client} is not authenticated in the persistent runner")
         with tempfile.TemporaryDirectory(prefix="holler-canary-controller-") as directory:
             temporary = Path(directory)
             request_path = temporary / "request.json"
             request_path.write_text(json.dumps(request, sort_keys=True) + "\n", encoding="utf-8")
             runtime_path = temporary / "runtime.tar.gz"
             make_runtime_bundle(runtime_path)
-            remote_archive = f"/tmp/{archive.name}"
+            prepare = sandbox.process.exec(
+                f"umask 077 && mkdir {shlex.quote(run_root)} && chmod 700 {shlex.quote(run_root)}",
+                timeout=30,
+            )
+            if prepare.exit_code != 0:
+                raise RuntimeError("could not create an isolated per-run directory")
+            remote_archive = f"{run_root}/{archive.name}"
             sandbox.fs.upload_file(str(archive), remote_archive)
-            sandbox.fs.upload_file(str(request_path), "/tmp/holler-canary-request.json")
-            sandbox.fs.upload_file(str(runtime_path), "/tmp/holler-canary-runtime.tar.gz")
+            sandbox.fs.upload_file(str(request_path), f"{run_root}/request.json")
+            sandbox.fs.upload_file(str(runtime_path), f"{run_root}/runtime.tar.gz")
             command = " && ".join(
                 [
-                    "mkdir -p /tmp/holler-canary-runtime",
-                    "tar -xzf /tmp/holler-canary-runtime.tar.gz -C /tmp/holler-canary-runtime",
-                    "python3 /tmp/holler-canary-runtime/holler-canary/worker.py "
-                    "/tmp/holler-canary-request.json "
-                    f"{shlex.quote(remote_archive)} --output /tmp/holler-canary-evidence.json",
+                    f"mkdir {shlex.quote(run_root + '/runtime')}",
+                    f"tar -xzf {shlex.quote(run_root + '/runtime.tar.gz')} "
+                    f"-C {shlex.quote(run_root + '/runtime')}",
+                    f"CLAUDE_CONFIG_DIR={shlex.quote(AUTH_ROOT + '/claude')} "
+                    f"CODEX_HOME={shlex.quote(AUTH_ROOT + '/codex')} "
+                    f"python3 {shlex.quote(run_root + '/runtime/holler-canary/worker.py')} "
+                    f"{shlex.quote(run_root + '/request.json')} {shlex.quote(remote_archive)} "
+                    f"--output {shlex.quote(run_root + '/evidence.json')}",
                 ]
             )
             response = sandbox.process.exec(command, timeout=request["budget"]["wall_seconds"])
             if response.exit_code != 0:
                 raise RuntimeError(f"credentialed canary worker exited {response.exit_code}")
             output.parent.mkdir(parents=True, exist_ok=True)
-            sandbox.fs.download_file("/tmp/holler-canary-evidence.json", str(output))
+            sandbox.fs.download_file(f"{run_root}/evidence.json", str(output))
             evidence = json.loads(output.read_text(encoding="utf-8"))
             if evidence.get("request_hash") != request["request_hash"] or evidence.get("status") != "PASS":
                 raise RuntimeError("downloaded evidence is not a passing result for the approved request")
             succeeded = True
-            return {"sandbox_id": sandbox.id, "evidence": str(output), "status": "PASS"}
+            return {
+                "runner_id": sandbox.id,
+                "runner_name": sandbox.name,
+                "evidence": str(output),
+                "status": "PASS",
+            }
     finally:
         if succeeded or not keep_on_failure:
-            sandbox.delete()
+            sandbox.process.exec(f"rm -rf -- {shlex.quote(run_root)}", timeout=60)
+            sandbox.stop(timeout=120)
 
 
 def main() -> None:
@@ -456,13 +513,13 @@ def main() -> None:
     build_parser.add_argument("--output", type=Path, required=True)
     build_parser.add_argument("--execute", action="store_true")
 
-    bootstrap_parser = subparsers.add_parser("bootstrap", help="create the pinned client snapshot and empty auth volume")
+    bootstrap_parser = subparsers.add_parser("bootstrap", help="create the pinned credential-free client snapshot")
     bootstrap_parser.add_argument("request", type=Path)
     bootstrap_parser.add_argument("--execute", action="store_true")
 
-    auth_parser = subparsers.add_parser("auth-sandbox", help="create a temporary sandbox for interactive OAuth login")
-    auth_parser.add_argument("request", type=Path)
-    auth_parser.add_argument("--execute", action="store_true")
+    runner_parser = subparsers.add_parser("runner", help="create or verify the persistent OAuth runner")
+    runner_parser.add_argument("request", type=Path)
+    runner_parser.add_argument("--execute", action="store_true")
 
     args = parser.parse_args()
     if args.command == "plan":
@@ -497,10 +554,10 @@ def main() -> None:
             raise SystemExit("bootstrap is non-mutating unless --execute is supplied")
         print(json.dumps(bootstrap_daytona(load_request(args.request)), indent=2, sort_keys=True))
         return
-    if args.command == "auth-sandbox":
+    if args.command == "runner":
         if not args.execute:
-            raise SystemExit("auth-sandbox is non-mutating unless --execute is supplied")
-        print(json.dumps(create_auth_sandbox(load_request(args.request)), indent=2, sort_keys=True))
+            raise SystemExit("runner is non-mutating unless --execute is supplied")
+        print(json.dumps(create_auth_runner(load_request(args.request)), indent=2, sort_keys=True))
         return
     if not args.execute:
         raise SystemExit("probe is non-mutating unless --execute is supplied")
