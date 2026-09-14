@@ -29,7 +29,11 @@ scripts/build.sh
 run_key=${GITHUB_RUN_ID:-local-$(date -u +%Y%m%dT%H%M%SZ)-$$}
 evidence_root=${HOLLER_CI_EVIDENCE_ROOT:-"${repo_dir}/.runs/ci/${run_key}"}
 mkdir -p "$evidence_root"
-./.build/holler lab run --all --timeout 20s --output "${evidence_root}/lab"
+lab_summary="${evidence_root}/lab-results.json"
+if ! ./.build/holler lab run --all --timeout 20s --output "${evidence_root}/lab" >"$lab_summary"; then
+  cat "$lab_summary" >&2
+  exit 1
+fi
 
 version=${HOLLER_VERSION:-}
 if [ -z "$version" ]; then

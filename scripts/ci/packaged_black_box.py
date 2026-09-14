@@ -126,7 +126,8 @@ def main() -> None:
     audit_runner_home = os.environ.get("GITHUB_ACTIONS") == "true"
     before = host_snapshot(original_home, exclusions) if audit_runner_home else {}
 
-    with tempfile.TemporaryDirectory(prefix="holler ci ünicode ") as temporary:
+    temp_parent = "/tmp" if Path("/tmp").is_dir() else None
+    with tempfile.TemporaryDirectory(prefix="holler ci ünicode ", dir=temp_parent) as temporary:
         root = Path(temporary)
         extract_root = root / "installed product"
         extract_root.mkdir()

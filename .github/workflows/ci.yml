@@ -41,6 +41,7 @@ jobs:
             .runs/ci/**/evidence/junit.xml
             .runs/ci/**/evidence/events.json
           if-no-files-found: ignore
+          include-hidden-files: true
           retention-days: 7
       - name: Upload failure logs
         if: failure()
@@ -49,6 +50,7 @@ jobs:
           name: ci-failure-logs-${{ runner.os }}-${{ runner.arch }}
           path: .runs/ci/**/evidence/*.log
           if-no-files-found: ignore
+          include-hidden-files: true
           retention-days: 7
 
   macos-intel:
@@ -76,6 +78,7 @@ jobs:
             .runs/ci/**/evidence/junit.xml
             .runs/ci/**/evidence/events.json
           if-no-files-found: ignore
+          include-hidden-files: true
           retention-days: 7
       - name: Upload failure logs
         if: failure()
@@ -84,4 +87,5 @@ jobs:
           name: ci-failure-logs-${{ runner.os }}-${{ runner.arch }}
           path: .runs/ci/**/evidence/*.log
           if-no-files-found: ignore
+          include-hidden-files: true
           retention-days: 7
