@@ -232,7 +232,11 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
             f"@anthropic-ai/claude-code@{clients['claude']['version']}",
             f"@openai/codex@{clients['codex']['version']}",
         ]
-        install = "npm install --global " + " ".join(shlex.quote(value) for value in packages)
+        client_prefix = "/home/daytona/.holler-canary-tools"
+        install = (
+            f"npm install --global --prefix {shlex.quote(client_prefix)} "
+            + " ".join(shlex.quote(value) for value in packages)
+        )
         go_archive = f"/tmp/{go_toolchain['filename']}"
         command = " && ".join(
             [
@@ -251,6 +255,8 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
                 f"test \"$(go version | sed -E 's/^go version go([^ ]+).*/\\1/')\" = "
                 f"{shlex.quote(go_toolchain['version'])}",
                 install,
+                f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/claude')} /usr/local/bin/claude",
+                f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/codex')} /usr/local/bin/codex",
                 f"test \"$(claude --version | sed -E 's/[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+).*/\\1/')\" = {shlex.quote(clients['claude']['version'])}",
                 f"test \"$(codex --version | sed -E 's/[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+).*/\\1/')\" = {shlex.quote(clients['codex']['version'])}",
             ]
