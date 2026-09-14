@@ -255,8 +255,15 @@ def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
                 f"test \"$(go version | sed -E 's/^go version go([^ ]+).*/\\1/')\" = "
                 f"{shlex.quote(go_toolchain['version'])}",
                 install,
+                "mkdir -p /home/daytona/.local/bin",
+                f"ln -sfn {shlex.quote(client_prefix + '/bin/claude')} "
+                "/home/daytona/.local/bin/claude",
+                f"ln -sfn {shlex.quote(client_prefix + '/bin/codex')} "
+                "/home/daytona/.local/bin/codex",
                 f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/claude')} /usr/local/bin/claude",
                 f"sudo ln -sfn {shlex.quote(client_prefix + '/bin/codex')} /usr/local/bin/codex",
+                "test \"$(command -v claude)\" = /home/daytona/.local/bin/claude",
+                "test \"$(command -v codex)\" = /home/daytona/.local/bin/codex",
                 f"test \"$(claude --version | awk '{{print $1}}')\" = "
                 f"{shlex.quote(clients['claude']['version'])}",
                 f"test \"$(codex --version | awk '{{print $NF}}')\" = "
