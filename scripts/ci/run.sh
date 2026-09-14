@@ -45,4 +45,7 @@ artifact_root=${ARTIFACT_ROOT:-"${repo_dir}/dist"}
 HOLLER_VERSION="$version" ARTIFACT_ROOT="$artifact_root" scripts/package-release.sh
 archive="${artifact_root}/holler-${version}-$(go env GOOS)-$(go env GOARCH).tar.gz"
 python3 scripts/ci/verify_release_archive.py "$archive" --version "$version"
+GOCACHE=${GOCACHE:-$(go env GOCACHE)} \
+GOMODCACHE=${GOMODCACHE:-$(go env GOMODCACHE)} \
+GOPATH=${GOPATH:-$(go env GOPATH)} \
 python3 scripts/ci/packaged_black_box.py "$archive" --version "$version"

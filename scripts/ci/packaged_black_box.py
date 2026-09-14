@@ -46,29 +46,32 @@ def hash_bytes(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def normalized(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
 def inside(path: Path, parent: Path) -> bool:
-    try:
-        path.resolve().relative_to(parent.resolve())
-        return True
-    except ValueError:
-        return False
+    candidate = normalized(path)
+    root = normalized(parent)
+    return candidate == root or candidate.startswith(root + os.sep)
 
 
 def host_snapshot(home: Path, exclusions: list[Path]) -> dict[str, tuple[int, int, int, int]]:
     snapshot: dict[str, tuple[int, int, int, int]] = {}
     if not home.is_dir():
         return snapshot
-    normalized = [path.resolve() for path in exclusions if path.exists() and inside(path, home)]
+    excluded_paths = [normalized(path) for path in exclusions if path.exists() and inside(path, home)]
+
+    def excluded(path: Path) -> bool:
+        candidate = normalized(path)
+        return any(candidate == root or candidate.startswith(root + os.sep) for root in excluded_paths)
+
     for root, dirs, files in os.walk(home, topdown=True, followlinks=False):
         root_path = Path(root)
-        dirs[:] = [
-            name
-            for name in dirs
-            if not any(inside(root_path / name, excluded) for excluded in normalized)
-        ]
+        dirs[:] = [name for name in dirs if not excluded(root_path / name)]
         for name in [*dirs, *files]:
             path = root_path / name
-            if any(inside(path, excluded) for excluded in normalized):
+            if excluded(path):
                 continue
             try:
                 stat = path.lstat()
@@ -120,7 +123,8 @@ def main() -> None:
         value = os.environ.get(name, "").strip()
         if value:
             exclusions.append(Path(value))
-    before = host_snapshot(original_home, exclusions) if os.environ.get("CI") == "true" else {}
+    audit_runner_home = os.environ.get("GITHUB_ACTIONS") == "true"
+    before = host_snapshot(original_home, exclusions) if audit_runner_home else {}
 
     with tempfile.TemporaryDirectory(prefix="holler ci ünicode ") as temporary:
         root = Path(temporary)
@@ -139,7 +143,10 @@ def main() -> None:
         home = sandbox / "home"
         claude_home = sandbox / "claude config"
         codex_home = sandbox / "codex config"
-        runtime = sandbox / "holler runtime"
+        # Unix-domain socket limits are short on macOS. Keep the runtime path
+        # deliberately compact while exercising spaces and Unicode everywhere
+        # users commonly choose paths: installation, home, configs, and project.
+        runtime = root / "r"
         fake_bin = sandbox / "fake clients"
         fake_state = sandbox / "fake state"
         non_git = sandbox / "project with spaces π"
@@ -273,14 +280,18 @@ def main() -> None:
                 env=env,
                 cwd=non_git,
             )
-            if not isinstance(sent, dict) or sent.get("message_id", "") == "":
+            sent_message = sent.get("message", {}) if isinstance(sent, dict) else {}
+            message_id = sent_message.get("message_id") if isinstance(sent_message, dict) else None
+            if not isinstance(message_id, str) or not message_id:
                 fail(f"packaged send returned no message id: {sent}")
             claim = json_run(
                 [str(holler), "claim", "--socket", str(socket), "--actor", "receiver", "--run", "receiver-run"],
                 env=env,
                 cwd=non_git,
             )
-            if not isinstance(claim, dict) or claim.get("message_id") != sent.get("message_id"):
+            claimed_message = claim.get("message", {}) if isinstance(claim, dict) else {}
+            claimed_id = claimed_message.get("message_id") if isinstance(claimed_message, dict) else None
+            if claimed_id != message_id:
                 fail(f"packaged claim did not return the sent message: {claim}")
             token = claim.get("lease_token")
             if not isinstance(token, str) or not token:
@@ -296,7 +307,7 @@ def main() -> None:
                     "--run",
                     "receiver-run",
                     "--message",
-                    str(sent["message_id"]),
+                    message_id,
                     "--lease-token",
                     token,
                 ],
@@ -338,7 +349,7 @@ def main() -> None:
         finally:
             stop_leftover_daemon(pid_path)
 
-    if os.environ.get("CI") == "true":
+    if audit_runner_home:
         after = host_snapshot(original_home, exclusions)
         if before != after:
             created = sorted(after.keys() - before.keys())
