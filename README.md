@@ -477,6 +477,10 @@ what it is not, yet:
 includes `holler`, `hollerd`, and the matching connector marketplace. Keep
 `bin/` and `share/` under the extracted prefix, then run:
 
+- `holler-<version>-darwin-arm64.tar.gz` for Apple Silicon Macs;
+- `holler-<version>-darwin-amd64.tar.gz` for Intel Macs; and
+- `holler-<version>-linux-amd64.tar.gz` for x86-64 Linux.
+
 ```sh
 ./bin/holler setup claude
 ./bin/holler setup codex

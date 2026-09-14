@@ -8,12 +8,22 @@ on:
 permissions:
   contents: read
 
+env:
+  # Start report-only; promote to strict after the scoped runner-home audit has
+  # produced ten clean runs on both hosted images.
+  HOLLER_CI_HOME_AUDIT: report
+
 jobs:
   test:
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            machine: x86_64
+          - os: macos-latest
+            machine: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -24,9 +34,64 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: HOLLER_REQUIRE_OPENCODE_PLUGIN_TEST=1 go test ./...
-      - run: go vet ./...
-      - run: HOLLER_REQUIRE_OPENCODE_PLUGIN_TEST=1 go test -race ./...
-      - run: scripts/build.sh
-      - run: ./.build/holler lab run --all --timeout 20s
-      - run: HOLLER_VERSION=0.0.0-ci scripts/package-release.sh
+      - name: Run deterministic product suite
+        run: scripts/ci/run.sh
+        env:
+          EXPECTED_UNAME_MACHINE: ${{ matrix.machine }}
+      - name: Upload auditable test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            .runs/ci/**/evidence/junit.xml
+            .runs/ci/**/evidence/events.json
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-failure-logs-${{ runner.os }}-${{ runner.arch }}
+          path: .runs/ci/**/evidence/*.log
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
+
+  macos-intel:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run deterministic product suite
+        run: scripts/ci/run.sh
+        env:
+          EXPECTED_UNAME_MACHINE: x86_64
+      - name: Upload auditable test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            .runs/ci/**/evidence/junit.xml
+            .runs/ci/**/evidence/events.json
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-failure-logs-${{ runner.os }}-${{ runner.arch }}
+          path: .runs/ci/**/evidence/*.log
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
