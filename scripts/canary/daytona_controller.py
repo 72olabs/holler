@@ -206,7 +206,11 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
             )
             response = sandbox.process.exec(command, timeout=2400)
             if response.exit_code != 0:
-                raise RuntimeError(f"uncredentialed Daytona builder exited {response.exit_code}")
+                detail = (response.result or "").strip()[-4000:]
+                raise RuntimeError(
+                    f"uncredentialed Daytona builder exited {response.exit_code}"
+                    + (f":\n{detail}" if detail else "")
+                )
             platform_result = sandbox.process.exec("go env GOOS GOARCH", timeout=30)
             values = platform_result.result.split()
             if platform_result.exit_code != 0 or len(values) != 2:
