@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "C8",
   "name": "supported-client-matrix",
-  "description": "Repeat the cold and live paths at the documented minimum and tested client versions.",
+  "description": "Repeat the cold path and MCP send/claim/ack path at the documented minimum and tested client versions.",
   "required_clients": ["claude", "codex"],
   "estimated_model_turns": 4,
   "timeout_seconds": 900,
@@ -10,6 +10,6 @@
     "minimum-client-versions",
     "tested-client-versions",
     "cold-path-parity",
-    "live-path-parity"
+    "mcp-send-claim-ack-parity"
   ]
 }

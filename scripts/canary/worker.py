@@ -1571,7 +1571,12 @@ class Worker:
             if actor_delivery_counts(self.actor_directory(), actor=claude_actor) != (0, 0):
                 raise CanaryFailure(f"C8 {label} inbox was not empty")
         self.setup_connectors()
-        return ["minimum-client-versions", "tested-client-versions", "cold-path-parity", "live-path-parity"]
+        return [
+            "minimum-client-versions",
+            "tested-client-versions",
+            "cold-path-parity",
+            "mcp-send-claim-ack-parity",
+        ]
 
     def run(self) -> dict[str, Any]:
         requested = {scenario["id"] for scenario in self.request["scenarios"]}

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "C1",
   "name": "cold-offline-pickup",
-  "description": "Send while the recipient is offline, then prove startup hydration, MCP claim, reply, and acknowledgement after launch.",
+  "description": "Send while the recipient is offline, then prove startup hydration, MCP claim, and acknowledgement after launch.",
   "required_clients": ["claude", "codex"],
   "estimated_model_turns": 2,
   "timeout_seconds": 300,
@@ -10,7 +10,6 @@
     "durable-send",
     "offline-hydration",
     "mcp-claim",
-    "thread-reply",
     "mcp-ack"
   ]
 }
