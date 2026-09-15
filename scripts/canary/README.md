@@ -88,6 +88,39 @@ The scenario files are data rather than executable prompts. This keeps the
 test contract reviewable and gives the local fake driver and the remote worker
 the same IDs, timeouts, assertions, and estimated model-turn count.
 
+### Adding and selecting a scenario
+
+Contributors can add a test without changing a tier:
+
+1. Choose the next unused numeric ID and add
+   `scripts/canary/scenarios/C9.json`.
+2. Add `scripts/canary/handlers/C9.py` with a `run(worker)` function. Return
+   the JSON file's assertion names in exactly the declared order; a mismatch
+   fails the canary rather than publishing incomplete evidence.
+3. Add deterministic tests for helper or parsing logic under
+   `scripts/canary/tests/` and run `./scripts/ci/run.sh`.
+4. Commit the scenario, handler, and tests. The credentialed runner refuses an
+   uncommitted canary controller.
+5. Select the scenario through the normal front door:
+
+```sh
+python3 scripts/canary/harness.py check --tier core --scenario C9
+python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
+```
+
+Repeat `--scenario` to compose an ad hoc run. Explicit selection replaces the
+tier's default scenario list, while `--tier` remains the hard spend and wall
+clock envelope. C0 is always prepended, unknown and duplicate IDs are rejected,
+and each selection gets its own directory under `.runs/canary/checkpoints/`.
+The request hash binds the exact commit, scenario definitions, clients,
+artifact, and budget before any model call.
+
+Custom code runs beside subscription credentials, so handlers must be public,
+committed, reviewed code. The harness deliberately does not accept arbitrary
+script paths or load code from gitignored directories. See
+[`handlers/README.md`](handlers/README.md) for the handler contract and worker
+helpers.
+
 ## Cost controls
 
 The committed defaults are deliberately the cheapest suitable subscription
@@ -159,8 +192,9 @@ DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
   --execute
 ```
 
-The `run` command accepts the `core` tier today. It uploads only the approved
-archive, request, and small worker bundle; runs C0-C3; downloads body-free
+The `run` command accepts any validated built-in tier or explicit scenario
+selection. It uploads only the approved archive, request, and small worker bundle;
+downloads body-free
 evidence; removes the per-run files; and stops the persistent runner in a
 `finally` block. `--keep-on-failure` is available only for deliberate
 debugging.

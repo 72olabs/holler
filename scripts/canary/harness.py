@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -52,8 +53,19 @@ def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def checkpoint_directory(repo: Path, commit: str, tier: str) -> Path:
-    return repo.resolve() / ".runs" / "canary" / "checkpoints" / f"{commit[:12]}-{tier}"
+def checkpoint_directory(
+    repo: Path,
+    commit: str,
+    tier: str,
+    scenario_ids: list[str] | tuple[str, ...] | None = None,
+) -> Path:
+    namespace = tier
+    if scenario_ids:
+        joined = "-".join(scenario_ids)
+        if len(joined) > 48:
+            joined = "custom-" + hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
+        namespace = f"{tier}-{joined}"
+    return repo.resolve() / ".runs" / "canary" / "checkpoints" / f"{commit[:12]}-{namespace}"
 
 
 def command_for_checkpoint(
@@ -161,6 +173,8 @@ def forwarded_arguments(args: argparse.Namespace) -> list[str]:
             values.extend(["--" + name.replace("_", "-"), str(value)])
     if args.allow_model_override:
         values.append("--allow-model-override")
+    for scenario_id in getattr(args, "scenario_ids", None) or []:
+        values.extend(["--scenario", scenario_id])
     return values
 
 
@@ -174,6 +188,7 @@ def make_request(
         args.repo,
         ref=args.ref,
         tier=args.tier,
+        scenario_ids=args.scenario_ids,
         clients=selected_clients(args),
         artifact=artifact,
         upgrade_from=args.upgrade_from,
@@ -184,7 +199,13 @@ def make_request(
 
 
 def paths_for(args: argparse.Namespace, request: dict[str, Any]) -> dict[str, Path]:
-    root = args.output_dir or checkpoint_directory(args.repo, request["source"]["commit"], args.tier)
+    selected = [item["id"] for item in request["scenarios"]] if args.scenario_ids else None
+    root = args.output_dir or checkpoint_directory(
+        args.repo,
+        request["source"]["commit"],
+        args.tier,
+        selected,
+    )
     version = request["source"]["connector_version"]
     return {
         "root": root,
@@ -209,6 +230,7 @@ def reusable_artifact(
     paths: dict[str, Path],
     expected_commit: str,
     tier: str,
+    scenario_ids: list[str] | None = None,
 ) -> bool:
     if not paths["artifact"].is_file() or not paths["request"].is_file():
         return False
@@ -219,6 +241,7 @@ def reusable_artifact(
     return bool(
         request["source"]["commit"] == expected_commit
         and request["tier"] == tier
+        and (scenario_ids is None or [item["id"] for item in request["scenarios"]] == scenario_ids)
         and request["artifact"].get("sha256") == sha256_file(paths["artifact"])
     )
 
@@ -269,7 +292,10 @@ def check(args: argparse.Namespace) -> None:
                 "status": "READY_TO_BUILD",
                 "commit": request["source"]["commit"],
                 "tier": request["tier"],
-                "estimated_model_turns": request["budget"]["model_turns"],
+                "scenarios": [item["id"] for item in request["scenarios"]],
+                "estimated_model_turns": sum(
+                    item["estimated_model_turns"] for item in request["scenarios"]
+                ),
                 "draft_request": str(paths["draft_request"]),
                 "fake_evidence": str(paths["fake_evidence"]),
                 "plan": str(paths["plan"]),
@@ -305,6 +331,7 @@ def checkpoint(args: argparse.Namespace) -> None:
         paths=paths,
         expected_commit=draft["source"]["commit"],
         tier=args.tier,
+        scenario_ids=[item["id"] for item in draft["scenarios"]],
     )
     client_bundle = args.client_bundle
     if "C8" in scenario_ids and client_bundle is None:
@@ -377,6 +404,12 @@ def add_request_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
     parser.add_argument("--ref", default="HEAD")
     parser.add_argument("--tier", choices=TIER_SCENARIOS, default="core")
+    parser.add_argument(
+        "--scenario",
+        dest="scenario_ids",
+        action="append",
+        help="run this scenario instead of the tier's default set; repeat for more (C0 is automatic)",
+    )
     parser.add_argument("--runner-name", default="holler-canary-runner")
     parser.add_argument("--snapshot")
     parser.add_argument("--upgrade-from", type=Path)

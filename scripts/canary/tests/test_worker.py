@@ -7,7 +7,9 @@ import sys
 from pathlib import Path
 import tempfile
 import tarfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -96,6 +98,39 @@ class WorkerTests(unittest.TestCase):
                     "clean-teardown",
                 ],
             )
+
+    def test_committed_custom_handler_runs_and_reports_declared_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            handlers = root / "handlers"
+            handlers.mkdir()
+            (handlers / "C9.py").write_text(
+                'def run(worker):\n    return ["contributor-check"]\n',
+                encoding="utf-8",
+            )
+            worker = Worker.__new__(Worker)
+            worker.request = {
+                "request_hash": "sha256:request",
+                "source": {"commit": "abc"},
+                "tier": "core",
+                "scenarios": [
+                    {"id": "C9", "name": "Contributor scenario", "checks": ["contributor-check"]}
+                ],
+                "budget": {
+                    "claude_usd": 0.5,
+                    "codex_reported_tokens": 250_000,
+                    "model_turns": 8,
+                    "wall_seconds": 1800,
+                },
+            }
+            worker.results = []
+            worker.ledger = SimpleNamespace(as_dict=lambda: {"model_turns": 0})
+            worker.prepare = lambda: None
+            with patch("worker.SCRIPT_DIR", root):
+                evidence = worker.run()
+            self.assertEqual(evidence["results"][0]["assertions"], [
+                {"name": "contributor-check", "status": "PASS"}
+            ])
 
     def test_usage_parsers(self) -> None:
         events = "\n".join(

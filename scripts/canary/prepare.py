@@ -22,6 +22,12 @@ def main() -> None:
     parser.add_argument("--repo", type=Path, default=SCRIPT_DIR.parent.parent)
     parser.add_argument("--ref", default="HEAD", help="committed Git ref to test; no PR is required")
     parser.add_argument("--tier", choices=TIER_SCENARIOS, default="core")
+    parser.add_argument(
+        "--scenario",
+        dest="scenario_ids",
+        action="append",
+        help="run this scenario instead of the tier's default set; repeat for more (C0 is automatic)",
+    )
     parser.add_argument("--artifact", type=Path, help="optional already-built release archive")
     parser.add_argument("--upgrade-from", type=Path, help="checksum-bind the v0.7.1 upgrade fixture")
     parser.add_argument("--client-bundle", type=Path, help="checksum-bind the minimum-client bundle")
@@ -46,6 +52,7 @@ def main() -> None:
         args.repo,
         ref=args.ref,
         tier=args.tier,
+        scenario_ids=args.scenario_ids,
         clients=policy,
         artifact=args.artifact,
         upgrade_from=args.upgrade_from,

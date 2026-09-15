@@ -63,7 +63,8 @@ documented in [scripts/canary/README.md](scripts/canary/README.md).
 The committed defaults use Claude Haiku and `gpt-5.6-luna` at low reasoning
 effort. Model overrides require an explicit opt-in and become part of the
 request hash. See [scripts/canary/README.md](scripts/canary/README.md) for the
-test tiers, credential boundary, and approval flow.
+test tiers, credential boundary, approval flow, and the two-file contract for
+adding and running contributor-defined scenarios with `--scenario C<number>`.
 
 ## Design constraints
 

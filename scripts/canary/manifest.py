@@ -11,7 +11,14 @@ import subprocess
 from typing import Any
 
 from budget import budget_for_tier, validate_estimate
-from catalog import load_catalog, scenarios_for_tier
+from catalog import (
+    CatalogError,
+    load_catalog,
+    scenarios_for_ids,
+    scenarios_for_tier,
+    validate_custom_handlers,
+    validate_scenario,
+)
 from clients import MINIMUM_CLIENTS, assert_low_cost_defaults, client_policy
 
 
@@ -99,6 +106,7 @@ def create_request(
     *,
     ref: str,
     tier: str,
+    scenario_ids: list[str] | tuple[str, ...] | None = None,
     clients: dict[str, dict[str, Any]] | None = None,
     artifact: Path | None = None,
     upgrade_from: Path | None = None,
@@ -111,7 +119,12 @@ def create_request(
     tree = git(repo, "rev-parse", f"{commit}^{{tree}}")
     remote = git(repo, "remote", "get-url", "origin")
     catalog = load_catalog()
-    scenarios = scenarios_for_tier(tier, catalog)
+    validate_custom_handlers(catalog)
+    scenarios = (
+        scenarios_for_ids(scenario_ids, catalog)
+        if scenario_ids is not None
+        else scenarios_for_tier(tier, catalog)
+    )
     limits = budget_for_tier(tier)
     validate_estimate(scenarios, limits)
     selected_clients = clients or client_policy()
@@ -191,11 +204,20 @@ def validate_request(request: object, *, allow_model_override: bool = False) -> 
     scenarios = request["scenarios"]
     if not isinstance(scenarios, list) or not scenarios:
         raise ManifestError("request has no scenarios")
+    scenario_ids = [scenario.get("id") for scenario in scenarios if isinstance(scenario, dict)]
+    if len(scenario_ids) != len(scenarios) or len(scenario_ids) != len(set(scenario_ids)):
+        raise ManifestError("request scenario ids must be present and unique")
+    if scenario_ids[0] != "C0":
+        raise ManifestError("C0 must be the first scenario in every real-client request")
     for scenario in scenarios:
         if not isinstance(scenario, dict):
             raise ManifestError("scenario records must be objects")
         expected = scenario.get("definition_hash")
         unsigned = {key: value for key, value in scenario.items() if key != "definition_hash"}
+        try:
+            validate_scenario(unsigned, Path(f"request:{scenario.get('id', '?')}"))
+        except CatalogError as error:
+            raise ManifestError(str(error)) from error
         if expected != sha256_bytes(canonical_json(unsigned)):
             raise ManifestError(f"scenario {scenario.get('id', '?')} definition hash does not match")
     validate_estimate(scenarios, request["budget"])
@@ -220,12 +242,12 @@ def validate_request(request: object, *, allow_model_override: bool = False) -> 
     fixtures = request["fixtures"]
     if not isinstance(fixtures, dict):
         raise ManifestError("request fixtures must be an object")
-    scenario_ids = {scenario["id"] for scenario in scenarios}
+    scenario_id_set = set(scenario_ids)
     for name, scenario_id in (("upgrade_from", "C6"), ("client_bundle", "C8")):
         fixture = fixtures.get(name)
         if not isinstance(fixture, dict):
             raise ManifestError(f"request fixture {name} must be an object")
-        if fixture.get("required") is not (scenario_id in scenario_ids):
+        if fixture.get("required") is not (scenario_id in scenario_id_set):
             raise ManifestError(f"request fixture {name} requirement does not match scenarios")
     return request
 

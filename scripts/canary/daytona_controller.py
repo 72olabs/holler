@@ -175,7 +175,7 @@ def probe_daytona(*, keep: bool) -> dict[str, Any]:
     return result
 
 
-def make_runtime_bundle(output: Path) -> None:
+def make_runtime_bundle(output: Path, *, scenario_ids: set[str] | None = None) -> None:
     included = [
         "__init__.py",
         "budget.py",
@@ -189,6 +189,9 @@ def make_runtime_bundle(output: Path) -> None:
             bundle.add(SCRIPT_DIR / name, arcname=f"holler-canary/{name}")
         for scenario in sorted((SCRIPT_DIR / "scenarios").glob("C*.json")):
             bundle.add(scenario, arcname=f"holler-canary/scenarios/{scenario.name}")
+        for handler in sorted((SCRIPT_DIR / "handlers").glob("C*.py")):
+            if scenario_ids is None or handler.stem in scenario_ids:
+                bundle.add(handler, arcname=f"holler-canary/handlers/{handler.name}")
 
 
 def require_daytona_key() -> None:
@@ -727,7 +730,10 @@ def run_daytona(
             request_path = temporary / "request.json"
             request_path.write_text(json.dumps(request, sort_keys=True) + "\n", encoding="utf-8")
             runtime_path = temporary / "runtime.tar.gz"
-            make_runtime_bundle(runtime_path)
+            make_runtime_bundle(
+                runtime_path,
+                scenario_ids={item["id"] for item in request["scenarios"]},
+            )
             prepare = sandbox.process.exec(
                 f"umask 077 && mkdir {shlex.quote(run_root)} && chmod 700 {shlex.quote(run_root)}",
                 timeout=30,

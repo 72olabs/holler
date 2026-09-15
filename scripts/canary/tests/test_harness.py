@@ -28,6 +28,18 @@ class HarnessTests(unittest.TestCase):
             Path("/tmp/repo").resolve() / ".runs/canary/checkpoints/1234567890ab-core",
         )
 
+    def test_explicit_scenarios_have_an_isolated_checkpoint_directory(self) -> None:
+        root = checkpoint_directory(
+            Path("/tmp/repo"),
+            "1234567890abcdef",
+            "core",
+            ["C0", "C9"],
+        )
+        self.assertEqual(
+            root,
+            Path("/tmp/repo").resolve() / ".runs/canary/checkpoints/1234567890ab-core-C0-C9",
+        )
+
     def test_checkpoint_command_requires_exact_hash_for_second_phase(self) -> None:
         command = command_for_checkpoint(tier="core", approval="sha256:abc")
         self.assertEqual(
@@ -53,6 +65,7 @@ class HarnessTests(unittest.TestCase):
             claude_model = None
             codex_model = None
             allow_model_override = False
+            scenario_ids = ["C4", "C7"]
 
         command = command_for_checkpoint(
             tier="release",
@@ -63,6 +76,7 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("--ref candidate", command)
         self.assertIn("--runner-name runner-02", command)
         self.assertIn("--upgrade-from /tmp/v0.7.1.tar.gz", command)
+        self.assertIn("--scenario C4 --scenario C7", command)
         self.assertTrue(command.endswith("--approve sha256:abc"))
 
     def test_reusable_artifact_rejects_non_manifest(self) -> None:

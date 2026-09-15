@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,6 @@ from clients import (  # noqa: E402
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
 
 
-SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"}
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 TERMINAL_QUERY_RESPONSES = {
     b"\x1b[6n": b"\x1b[1;1R",
@@ -1016,8 +1016,8 @@ class Worker:
             )
         self.run_claude_lifecycle_preflight()
         return [
-            "archive-checksum", "clean-build-identity", "client-version-pins", "connector-doctor",
-            "interactive-onboarding", "codex-hook-trust", "claude-lifecycle-hook",
+            "archive-checksum", "archive-allowlist", "clean-build-identity", "client-version-pins",
+            "connector-doctor", "interactive-onboarding", "codex-hook-trust", "claude-lifecycle-hook",
         ]
 
     def scenario_c1(self) -> list[str]:
@@ -1579,29 +1579,48 @@ class Worker:
         ]
 
     def run(self) -> dict[str, Any]:
-        requested = {scenario["id"] for scenario in self.request["scenarios"]}
-        unsupported = requested - SUPPORTED_REAL_SCENARIOS
-        if unsupported:
-            raise CanaryFailure(
-                f"real worker currently supports the core tier only; unsupported scenarios: {sorted(unsupported)}"
-            )
-        self.prepare()
-        handlers = {
-            "C0": self.scenario_c0,
-            "C1": self.scenario_c1,
-            "C2": self.scenario_c2,
-            "C3": self.scenario_c3,
-            "C4": self.scenario_c4,
-            "C5": self.scenario_c5,
-            "C6": self.scenario_c6,
-            "C7": self.scenario_c7,
-            "C8": self.scenario_c8,
-        }
+        handlers: list[tuple[dict[str, Any], Any]] = []
         for scenario in self.request["scenarios"]:
+            handler_name = f"scenario_{scenario['id'].lower()}"
+            handler = getattr(self, handler_name, None)
+            if not callable(handler):
+                handler_path = SCRIPT_DIR / "handlers" / f"{scenario['id']}.py"
+                if handler_path.is_file():
+                    try:
+                        spec = importlib.util.spec_from_file_location(
+                            f"holler_canary_handler_{scenario['id'].lower()}",
+                            handler_path,
+                        )
+                        if spec is None or spec.loader is None:
+                            raise CanaryFailure(f"cannot load committed handler {handler_path.name}")
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                        module_run = getattr(module, "run", None)
+                        if callable(module_run):
+                            handler = lambda module_run=module_run: module_run(self)
+                    except CanaryFailure:
+                        raise
+                    except Exception as error:
+                        raise CanaryFailure(
+                            f"cannot load committed handler {handler_path.name}: "
+                            f"{type(error).__name__}"
+                        ) from error
+            if not callable(handler):
+                raise CanaryFailure(
+                    f"scenario {scenario['id']} has no committed worker method {handler_name} "
+                    f"or handlers/{scenario['id']}.py run(worker) function"
+                )
+            handlers.append((scenario, handler))
+        self.prepare()
+        for scenario, handler in handlers:
             self.active_scenario = scenario["id"]
             self.active_check = "scenario-start"
             started = time.monotonic()
-            checks = handlers[scenario["id"]]()
+            checks = handler()
+            if checks != scenario["checks"]:
+                raise CanaryFailure(
+                    f"scenario {scenario['id']} worker assertions do not match its committed definition"
+                )
             self.results.append(
                 {
                     "id": scenario["id"],
