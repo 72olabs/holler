@@ -81,3 +81,13 @@ func TestRuntimeBindingPreservesLauncherOverrides(t *testing.T) {
 		t.Fatalf("binding=%+v", binding)
 	}
 }
+
+func TestRuntimeBindingRejectsMalformedClaudePrintEnvelope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, err := connector.ResolveRuntimeBinding("claude", connector.RuntimeBinding{
+		Actor: "reviewer", RunID: "holler-claude-print-v1.not-base64", NameMode: bus.NameModeAllocate,
+	})
+	if err == nil {
+		t.Fatal("malformed Claude print binding was accepted")
+	}
+}

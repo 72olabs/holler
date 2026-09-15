@@ -1,7 +1,6 @@
 package connector_test
 
 import (
-	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -85,34 +84,18 @@ func TestBuildClaudeLaunchPreservesAllocatedIdentityInPrintMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.Args) < 2 || spec.Args[len(spec.Args)-2] != "--settings" {
-		t.Fatalf("print launch args = %v", spec.Args)
+	if spec.Env["HOLLER_RUN"] == "run-1" {
+		t.Fatalf("print launch did not transport its continuity binding: %+v", spec.Env)
 	}
-	var settings struct {
-		Env map[string]string `json:"env"`
+	t.Setenv("HOME", t.TempDir())
+	resolved, err := connector.ResolveRuntimeBinding("claude", connector.RuntimeBinding{
+		Actor: "reviewer", RunID: spec.Env["HOLLER_RUN"], NameMode: "allocate",
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal([]byte(spec.Args[len(spec.Args)-1]), &settings); err != nil {
-		t.Fatalf("decode identity settings: %v", err)
-	}
-	if settings.Env["HOLLER_NAME_MODE"] != "allocate" || settings.Env["HOLLER_LAUNCH_TAG"] != "tab-7" {
-		t.Fatalf("identity settings = %+v", settings.Env)
-	}
-}
-
-func TestBuildClaudeLaunchRejectsConflictingPrintSettings(t *testing.T) {
-	for _, args := range [][]string{
-		{"--print", "--settings", "/tmp/custom.json"},
-		{"-p", "--settings={\"env\":{}}"},
-	} {
-		_, err := connector.BuildClaudeLaunch(connector.ClaudeLaunchConfig{
-			ConnectorConfig: connector.ClaudeConnectorConfig{
-				AttentionMode: connector.AttentionHookLongPoll, Actor: "reviewer", NameMode: "allocate",
-			},
-			HollerBinary: "/bin/holler", RunID: "run-1", LaunchTag: "tab-7", ExtraArgs: args,
-		})
-		if err == nil {
-			t.Fatalf("conflicting args were accepted: %v", args)
-		}
+	if resolved.RunID != "run-1" || resolved.LaunchTag != "tab-7" {
+		t.Fatalf("resolved print binding = %+v", resolved)
 	}
 }
 

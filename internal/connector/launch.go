@@ -3,7 +3,6 @@ package connector
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -86,23 +85,6 @@ func BuildClaudeLaunch(config ClaudeLaunchConfig) (LaunchSpec, error) {
 		config.RunID = runID
 	}
 	args := append([]string(nil), config.ExtraArgs...)
-	if config.LaunchTag != "" && claudePrintMode(args) {
-		for _, arg := range args {
-			if controlledLongOption(arg, "--settings") {
-				return LaunchSpec{}, fmt.Errorf("Claude --settings conflicts with Holler's allocated print-mode identity overlay; move those settings to a standard Claude settings file")
-			}
-		}
-		overlay, err := json.Marshal(map[string]interface{}{
-			"env": map[string]string{
-				"HOLLER_NAME_MODE":  connectorConfig.NameMode,
-				"HOLLER_LAUNCH_TAG": config.LaunchTag,
-			},
-		})
-		if err != nil {
-			return LaunchSpec{}, fmt.Errorf("encode Claude identity settings: %w", err)
-		}
-		args = append(args, "--settings", string(overlay))
-	}
 	environment := map[string]string{
 		"HOLLER_BIN":              config.HollerBinary,
 		"HOLLER_ACTOR":            connectorConfig.Actor,
@@ -120,6 +102,12 @@ func BuildClaudeLaunch(config ClaudeLaunchConfig) (LaunchSpec, error) {
 		environment["HOLLER_CONNECTOR_CONFIG"] = config.ConnectorPath
 	}
 	addLaunchNamingEnvironment(environment, connectorConfig.NameMode, config.LaunchTag, config.Takeover)
+	if config.LaunchTag != "" && claudePrintMode(args) {
+		// Claude's print/SDK entrypoint can omit HOLLER_LAUNCH_TAG from hook
+		// subprocesses while preserving HOLLER_RUN. Carry both values through
+		// that surviving field, then decode them before runtime validation.
+		environment["HOLLER_RUN"] = encodeClaudePrintRunBinding(config.RunID, config.LaunchTag)
+	}
 	return LaunchSpec{Command: config.ClaudeBinary, Args: args, Env: environment, RunID: config.RunID}, nil
 }
 
