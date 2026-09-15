@@ -9,7 +9,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from clients import client_policy
-from daytona_controller import CREDENTIAL_DOMAINS, execution_plan, validate_runner
+from daytona_controller import BUILDER_DOMAINS, CREDENTIAL_DOMAINS, execution_plan, validate_runner
 from manifest import create_request
 from run import run_fake
 
@@ -41,6 +41,8 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(plan["models"]["codex"], "gpt-5.6-luna")
         self.assertIn("go-1-26-0", plan["resource_policy"]["canary"]["snapshot"])
         self.assertIn("*.claude.com", plan["network_policy"]["canary"])
+        self.assertEqual(plan["network_policy"]["builder"], BUILDER_DOMAINS)
+        self.assertIn("proxy.golang.org", plan["network_policy"]["builder"])
 
     def test_persistent_runner_policy_is_verified(self) -> None:
         request = create_request(REPO, ref="HEAD", tier="core", clients=client_policy())

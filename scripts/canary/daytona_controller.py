@@ -33,6 +33,16 @@ CREDENTIAL_DOMAINS = [
     "chatgpt.com",
     "*.chatgpt.com",
 ]
+BUILDER_DOMAINS = [
+    "github.com",
+    "*.github.com",
+    "*.githubusercontent.com",
+    "go.dev",
+    "*.go.dev",
+    "proxy.golang.org",
+    "sum.golang.org",
+    "storage.googleapis.com",
+]
 AUTH_ROOT = "/home/daytona/.holler-canary-auth"
 RUNNER_PURPOSE = "holler-canary-persistent-runner"
 
@@ -63,7 +73,7 @@ def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
         },
         "network_policy": {
             "credentialed_sandbox_enforced": True,
-            "builder": ["source-host", "go-modules"],
+            "builder": BUILDER_DOMAINS,
             "canary": CREDENTIAL_DOMAINS,
         },
         "budget": request["budget"],
@@ -189,6 +199,7 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
                 ephemeral=True,
                 ttl_minutes=60,
                 labels={"purpose": "holler-canary-builder", "commit": source["commit"][:12]},
+                domain_allow_list=",".join(BUILDER_DOMAINS),
             ),
             timeout=120,
         )
