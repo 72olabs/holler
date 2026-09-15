@@ -12,6 +12,7 @@ from clients import (
     claude_print_command,
     client_policy,
     codex_exec_command,
+    codex_live_command,
 )
 
 
@@ -25,7 +26,15 @@ class ClientPolicyTests(unittest.TestCase):
         self.assertIn("--max-budget-usd", claude)
         self.assertIn("gpt-5.6-luna", codex)
         self.assertIn('model_reasoning_effort="low"', codex)
+        self.assertIn('model_provider="openai-http"', codex)
+        self.assertIn("model_providers.openai-http.supports_websockets=false", codex)
         self.assertNotIn("fast", " ".join(codex))
+
+    def test_live_codex_uses_persisted_hook_trust(self) -> None:
+        command = codex_live_command(client_policy()["codex"])
+        self.assertNotIn("--dangerously-bypass-hook-trust", command)
+        self.assertIn('model_provider="openai-http"', command)
+        self.assertIn("model_providers.openai-http.supports_websockets=false", command)
 
     def test_expensive_override_requires_explicit_allowance(self) -> None:
         with self.assertRaises(ValueError):

@@ -25,6 +25,22 @@ DEFAULT_CLIENTS = {
     },
 }
 
+# Daytona's credentialed runner proxy rejects the Codex Responses WebSocket.
+# Keep the pinned subscription login but use the supported custom-provider
+# settings to select the HTTP/SSE transport for canary traffic.
+CODEX_HTTP_PROVIDER_ARGS = [
+    "--config",
+    'model_provider="openai-http"',
+    "--config",
+    'model_providers.openai-http.name="OpenAI HTTP"',
+    "--config",
+    'model_providers.openai-http.base_url="https://chatgpt.com/backend-api/codex"',
+    "--config",
+    "model_providers.openai-http.requires_openai_auth=true",
+    "--config",
+    "model_providers.openai-http.supports_websockets=false",
+]
+
 
 def client_policy(
     *,
@@ -88,6 +104,7 @@ def codex_exec_command(config: dict[str, Any]) -> list[str]:
         "read-only",
         "--config",
         f'model_reasoning_effort="{config["reasoning_effort"]}"',
+        *CODEX_HTTP_PROVIDER_ARGS,
         "-",
     ]
 
@@ -102,6 +119,7 @@ def codex_live_command(config: dict[str, Any]) -> list[str]:
         "read-only",
         "--config",
         f'model_reasoning_effort="{config["reasoning_effort"]}"',
+        *CODEX_HTTP_PROVIDER_ARGS,
     ]
 
 

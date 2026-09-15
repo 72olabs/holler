@@ -16,11 +16,14 @@ from worker import (
     claude_fixture_ready,
     claude_cost,
     codex_reported_tokens,
+    codex_config_with_trusted_fixture,
+    codex_hook_trust_ready,
     doctor_command,
     lifecycle_evidence_complete,
     make_failure_evidence,
     marker_instruction,
     parse_version,
+    terminal_query_responses,
 )
 
 
@@ -82,6 +85,28 @@ class WorkerTests(unittest.TestCase):
             finally:
                 process.close()
 
+    def test_pty_child_exit_is_reported_as_canary_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            process = PtyProcess(
+                ["/bin/sh", "-c", "exit 0"],
+                cwd=Path(directory),
+                env={},
+            )
+            try:
+                with self.assertRaisesRegex(CanaryFailure, "exited before"):
+                    process.wait_until_ready("never rendered", 2)
+            finally:
+                process.close()
+
+    def test_terminal_query_responses_cover_codex_startup_probes(self) -> None:
+        queries = b"\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c"
+        replies = terminal_query_responses(queries)
+        self.assertIn(b"\x1b[1;1R", replies)
+        self.assertIn(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\", replies)
+        self.assertIn(b"\x1b]11;rgb:0000/0000/0000\x1b\\", replies)
+        self.assertIn(b"\x1b[?0u", replies)
+        self.assertIn(b"\x1b[?1;2c", replies)
+
     def test_pty_submit_rejects_marker_in_prompt(self) -> None:
         process = PtyProcess.__new__(PtyProcess)
         with self.assertRaisesRegex(CanaryFailure, "contains its expected output marker"):
@@ -134,6 +159,32 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(claude_fixture_ready(config, fixture=fixture, version="2.1.259"))
         config["projects"][str(fixture)]["hasTrustDialogAccepted"] = False
         self.assertFalse(claude_fixture_ready(config, fixture=fixture, version="2.1.259"))
+
+    def test_codex_fixture_trust_merge_preserves_generated_policy(self) -> None:
+        fixture = Path("/home/daytona/.holler-canary-workspace")
+        original = '[profiles.holler]\nsandbox_mode = "read-only"\n'
+        updated = codex_config_with_trusted_fixture(original, fixture)
+        self.assertIn(original, updated)
+        self.assertIn('[projects."/home/daytona/.holler-canary-workspace"]', updated)
+        self.assertIn('trust_level = "trusted"', updated)
+        self.assertEqual(codex_config_with_trusted_fixture(updated, fixture), updated)
+
+    def test_codex_hook_trust_requires_both_packaged_hooks(self) -> None:
+        config = {
+            "hooks": {
+                "state": {
+                    "holler@holler:hooks/hooks.json:session_start:0:0": {
+                        "trusted_hash": "sha256:" + "a" * 64,
+                    },
+                    "holler@holler:hooks/hooks.json:session_end:0:0": {
+                        "trusted_hash": "sha256:" + "b" * 64,
+                    },
+                }
+            }
+        }
+        self.assertTrue(codex_hook_trust_ready(config))
+        del config["hooks"]["state"]["holler@holler:hooks/hooks.json:session_end:0:0"]
+        self.assertFalse(codex_hook_trust_ready(config))
 
     def test_runtime_bundle_contains_worker_without_tests(self) -> None:
         import tarfile

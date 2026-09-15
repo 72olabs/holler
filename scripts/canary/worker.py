@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -11,11 +13,14 @@ import pty
 import re
 import selectors
 import signal
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
+import termios
 import time
+import tomllib
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -29,10 +34,64 @@ from manifest import ManifestError, canonical_json, load_request, sha256_bytes, 
 
 SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3"}
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+TERMINAL_QUERY_RESPONSES = {
+    b"\x1b[6n": b"\x1b[1;1R",
+    b"\x1b[c": b"\x1b[?1;2c",
+    b"\x1b[>c": b"\x1b[>0;0;0c",
+    b"\x1b[?u": b"\x1b[?0u",
+    b"\x1b]10;?\x07": b"\x1b]10;rgb:ffff/ffff/ffff\x07",
+    b"\x1b]10;?\x1b\\": b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\",
+    b"\x1b]11;?\x07": b"\x1b]11;rgb:0000/0000/0000\x07",
+    b"\x1b]11;?\x1b\\": b"\x1b]11;rgb:0000/0000/0000\x1b\\",
+}
+
+
+def terminal_query_responses(data: bytes, *, previous_tail_length: int = 0) -> bytes:
+    """Return standard terminal replies for queries ending in newly read bytes."""
+    replies = bytearray()
+    for query, response in TERMINAL_QUERY_RESPONSES.items():
+        start = 0
+        while True:
+            index = data.find(query, start)
+            if index < 0:
+                break
+            if index + len(query) > previous_tail_length:
+                replies.extend(response)
+            start = index + len(query)
+    return bytes(replies)
 
 
 class CanaryFailure(RuntimeError):
     pass
+
+
+class PtyChild:
+    """Small wait/poll adapter for a child created by forkpty."""
+
+    def __init__(self, pid: int, command: list[str]):
+        self.pid = pid
+        self.command = command
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self.returncode is not None:
+            return self.returncode
+        try:
+            waited, status = os.waitpid(self.pid, os.WNOHANG)
+        except ChildProcessError:
+            return self.returncode
+        if waited == self.pid:
+            self.returncode = os.waitstatus_to_exitcode(status)
+        return self.returncode
+
+    def wait(self, timeout: float) -> int:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = self.poll()
+            if result is not None:
+                return result
+            time.sleep(0.05)
+        raise subprocess.TimeoutExpired(self.command, timeout)
 
 
 def make_failure_evidence(
@@ -172,12 +231,50 @@ def claude_fixture_ready(config: object, *, fixture: Path, version: str) -> bool
     projects = config.get("projects")
     project = projects.get(str(fixture)) if isinstance(projects, dict) else None
     return (
-        config.get("theme") == "dark"
-        and config.get("hasCompletedOnboarding") is True
+        config.get("hasCompletedOnboarding") is True
         and config.get("lastOnboardingVersion") == version
         and isinstance(project, dict)
         and project.get("hasTrustDialogAccepted") is True
     )
+
+
+def codex_config_with_trusted_fixture(text: str, fixture: Path) -> str:
+    """Merge one trusted cleanroom project into Codex TOML without altering policy."""
+    section = f"[projects.{json.dumps(str(fixture))}]"
+    pattern = re.compile(rf"(?ms)^{re.escape(section)}\n(?P<body>.*?)(?=^\[|\Z)")
+    match = pattern.search(text)
+    if match:
+        body = match.group("body")
+        trust = re.compile(r'(?m)^trust_level[ \t]*=[ \t]*"[^"]*"[ \t]*$')
+        if trust.search(body):
+            updated = trust.sub('trust_level = "trusted"', body, count=1)
+        else:
+            updated = 'trust_level = "trusted"\n' + body
+        return text[: match.start("body")] + updated + text[match.end("body") :]
+    separator = "" if not text or text.endswith("\n\n") else "\n" if text.endswith("\n") else "\n\n"
+    return text + separator + section + '\ntrust_level = "trusted"\n'
+
+
+def codex_hook_trust_ready(config: object) -> bool:
+    """Require persisted trust for Holler's SessionStart and SessionEnd hooks."""
+    if not isinstance(config, dict):
+        return False
+    hooks = config.get("hooks")
+    state = hooks.get("state") if isinstance(hooks, dict) else None
+    if not isinstance(state, dict):
+        return False
+    trusted_events: set[str] = set()
+    for key, value in state.items():
+        if not isinstance(key, str) or not key.startswith("holler@holler:hooks/hooks.json:"):
+            continue
+        trusted_hash = value.get("trusted_hash") if isinstance(value, dict) else None
+        if not isinstance(trusted_hash, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", trusted_hash):
+            continue
+        if ":session_start:" in key:
+            trusted_events.add("session_start")
+        if ":session_end:" in key:
+            trusted_events.add("session_end")
+    return trusted_events == {"session_start", "session_end"}
 
 
 def doctor_command(
@@ -202,20 +299,18 @@ def doctor_command(
 
 class PtyProcess:
     def __init__(self, command: list[str], *, cwd: Path, env: dict[str, str]):
-        master, slave = pty.openpty()
+        pid, master = pty.fork()
+        if pid == 0:
+            try:
+                os.chdir(cwd)
+                os.execvpe(command[0], command, env)
+            except BaseException:
+                os._exit(127)
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         self.master = master
         self.buffer = bytearray()
-        self.process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=env,
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            start_new_session=True,
-            close_fds=True,
-        )
-        os.close(slave)
+        self.query_tail = b""
+        self.process = PtyChild(pid, command)
         os.set_blocking(master, False)
         self.selector = selectors.DefaultSelector()
         self.selector.register(master, selectors.EVENT_READ)
@@ -226,6 +321,9 @@ class PtyProcess:
     def checkpoint(self) -> int:
         self._read_available(0)
         return len(self.buffer)
+
+    def normalized_output(self, *, after: int = 0) -> str:
+        return ANSI_ESCAPE.sub("", self.buffer[after:].decode("utf-8", errors="replace"))
 
     def wait_until_quiet(self, timeout: float, *, quiet_seconds: float = 0.5) -> None:
         """Wait until an interactive client has rendered output and stopped repainting."""
@@ -289,23 +387,42 @@ class PtyProcess:
                 chunk = os.read(key.fd, 65536)
             except BlockingIOError:
                 continue
+            except OSError as error:
+                if error.errno == errno.EIO:
+                    return
+                raise
             if chunk:
                 self.buffer.extend(chunk)
+                combined = self.query_tail + chunk
+                response = terminal_query_responses(
+                    combined,
+                    previous_tail_length=len(self.query_tail),
+                )
+                if response:
+                    os.write(self.master, response)
+                maximum = max(len(query) for query in TERMINAL_QUERY_RESPONSES)
+                self.query_tail = combined[-(maximum - 1):]
 
     def close(self) -> None:
         if self.process.poll() is None:
-            self.send("\x03")
+            self._signal(signal.SIGTERM)
             try:
                 self.process.wait(timeout=8)
             except subprocess.TimeoutExpired:
-                os.killpg(self.process.pid, signal.SIGTERM)
-                try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                    self.process.wait(timeout=5)
+                self._signal(signal.SIGKILL)
+                self.process.wait(timeout=5)
         self.selector.close()
         os.close(self.master)
+
+    def _signal(self, requested: signal.Signals) -> None:
+        try:
+            os.killpg(self.process.pid, requested)
+        except (ProcessLookupError, PermissionError):
+            if self.process.poll() is None:
+                try:
+                    os.kill(self.process.pid, requested)
+                except ProcessLookupError:
+                    pass
 
 
 class Worker:
@@ -417,6 +534,56 @@ class Worker:
             env=self.env,
             timeout=120,
         )
+        self.install_codex_fixture_trust()
+        self.ensure_codex_hook_trust()
+
+    def install_codex_fixture_trust(self) -> None:
+        path = Path(self.env["CODEX_HOME"]) / "config.toml"
+        try:
+            current = path.read_text(encoding="utf-8") if path.exists() else ""
+            updated = codex_config_with_trusted_fixture(current, self.fixture)
+            descriptor, temporary = tempfile.mkstemp(prefix=".config.toml.", dir=path.parent)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(updated)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        except OSError as error:
+            raise CanaryFailure("could not install Codex cleanroom fixture trust") from error
+
+    def ensure_codex_hook_trust(self) -> None:
+        """Approve the packaged hooks through Codex's real first-launch review."""
+        args = codex_live_command(self.request["clients"]["codex"])[1:]
+        process = PtyProcess(
+            self.launcher("codex", "canary-codex", "c0-codex-trust", args),
+            cwd=self.fixture,
+            env=self.env,
+        )
+        try:
+            process.wait_until_quiet(60, quiet_seconds=2)
+            tail = process.normalized_output()[-5000:]
+            if "Hooks need review" in tail:
+                if "2 hooks are new or changed" not in tail:
+                    raise CanaryFailure("Codex requested trust for an unexpected number of hooks")
+                after = process.checkpoint()
+                process.send("\x1b[B")
+                process.wait_for("› 2. Trust all and continue", 5, after=after)
+                after = process.checkpoint()
+                process.send("\r")
+                process.wait_for("Ask Codex to do anything", 30, after=after)
+                process.wait_until_quiet(30, quiet_seconds=2)
+            elif "Ask Codex to do anything" not in tail:
+                raise CanaryFailure("Codex hook-trust review did not reach an input-ready state")
+        finally:
+            process.close()
+        path = Path(self.env["CODEX_HOME"]) / "config.toml"
+        try:
+            config = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as error:
+            raise CanaryFailure("Codex hook-trust state is unavailable") from error
+        if not codex_hook_trust_ready(config):
+            raise CanaryFailure("Codex did not persist trust for both packaged Holler hooks")
 
     def launcher(self, harness: str, actor: str, run_id: str, client_args: list[str]) -> list[str]:
         return [
@@ -584,7 +751,7 @@ class Worker:
         self.run_claude_lifecycle_preflight()
         return [
             "archive-checksum", "clean-build-identity", "client-version-pins", "connector-doctor",
-            "interactive-onboarding", "claude-lifecycle-hook",
+            "interactive-onboarding", "codex-hook-trust", "claude-lifecycle-hook",
         ]
 
     def scenario_c1(self) -> list[str]:
@@ -635,7 +802,10 @@ class Worker:
             codex = PtyProcess(
                 self.launcher("codex", "canary-codex", "c2-codex", codex_args), cwd=self.fixture, env=self.env
             )
-            codex.wait_until_ready("? for shortcuts", 60)
+            codex.wait_until_ready("Ask Codex to do anything", 60)
+            codex.wait_until_quiet(30, quiet_seconds=2)
+            if "Hooks need review" in codex.normalized_output()[-5000:]:
+                raise CanaryFailure("Codex hook trust was not ready before C2")
             self.ledger.ensure_capacity(client="codex", turns=1)
             codex.submit(
                 f"Use Holler bus_send to actor canary-claude with idempotency key {token}. "

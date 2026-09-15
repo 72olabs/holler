@@ -61,7 +61,9 @@ models:
 - Codex: `gpt-5.6-luna`, low reasoning effort, with fast mode left disabled.
   Codex reports token usage; the controller stops before starting another turn
   once the request's reported-token, total-turn, or wall-clock limit is
-  exhausted.
+  exhausted. Daytona rejects the client's Responses WebSocket, so canaries use
+  the same ChatGPT subscription login through a pinned HTTP/SSE custom-provider
+  configuration.
 
 Changing either model requires both an explicit command-line override and
 `--allow-model-override`. The selected model is included in the approved
@@ -170,7 +172,10 @@ idempotently seeds only a dark theme, the pinned completed-onboarding version,
 and trust for `/home/daytona/.holler-canary-workspace`; it preserves all other
 Claude configuration and never prints or exports credentials. C0 verifies that
 non-secret state, then runs `claude --init-only` to require Holler's actual
-`SessionStart` registration and hydration without a model call.
+`SessionStart` registration and hydration without a model call. C0 also opens
+Codex's real first-launch review, selects “Trust all” only when exactly Holler's
+two lifecycle hooks are pending, and verifies that Codex persisted SHA-256 trust
+records for both hooks before any model call.
 
 Interactive scenarios wait for the live Holler registration before submitting
 input, send the terminal Enter key rather than a newline, and use expected
