@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -9,7 +11,13 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from clients import client_policy
-from daytona_controller import BUILDER_DOMAINS, CREDENTIAL_DOMAINS, execution_plan, validate_runner
+from daytona_controller import (
+    BUILDER_DOMAINS,
+    CREDENTIAL_DOMAINS,
+    claude_fixture_state_source,
+    execution_plan,
+    validate_runner,
+)
 from manifest import create_request
 from run import run_fake
 
@@ -64,6 +72,21 @@ class RunnerTests(unittest.TestCase):
         runner.volumes = ["unexpected"]
         with self.assertRaisesRegex(RuntimeError, "must not mount FUSE volumes"):
             validate_runner(runner, execution)
+
+    def test_claude_fixture_state_preserves_existing_account_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".claude.json"
+            path.write_text(json.dumps({"oauthAccount": {"accountUuid": "keep-me"}}))
+            source = claude_fixture_state_source(
+                config_path=str(path),
+                fixture="/cleanroom",
+                version="2.1.259",
+            )
+            exec(source, {})
+            config = json.loads(path.read_text())
+        self.assertEqual(config["oauthAccount"], {"accountUuid": "keep-me"})
+        self.assertTrue(config["hasCompletedOnboarding"])
+        self.assertTrue(config["projects"]["/cleanroom"]["hasTrustDialogAccepted"])
 
 
 if __name__ == "__main__":

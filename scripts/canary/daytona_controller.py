@@ -47,6 +47,46 @@ AUTH_ROOT = "/home/daytona/.holler-canary-auth"
 RUNNER_PURPOSE = "holler-canary-persistent-runner"
 
 
+def claude_fixture_state_source(*, config_path: str, fixture: str, version: str) -> str:
+    """Build the credential-preserving mutation used inside the runner."""
+    return "\n".join(
+        [
+            "import json, os, tempfile",
+            "from pathlib import Path",
+            f"path = Path({config_path!r})",
+            f"fixture = {fixture!r}",
+            "data = json.loads(path.read_text()) if path.exists() else {}",
+            "data['theme'] = 'dark'",
+            "data['hasCompletedOnboarding'] = True",
+            f"data['lastOnboardingVersion'] = {version!r}",
+            "data.setdefault('projects', {}).setdefault(fixture, {})['hasTrustDialogAccepted'] = True",
+            "fd, temporary = tempfile.mkstemp(prefix='.claude.json.', dir=path.parent)",
+            "try:",
+            "    with os.fdopen(fd, 'w') as stream:",
+            "        json.dump(data, stream, separators=(',', ':'))",
+            "        stream.write('\\n')",
+            "        stream.flush()",
+            "        os.fsync(stream.fileno())",
+            "    os.chmod(temporary, 0o600)",
+            "    os.replace(temporary, path)",
+            "finally:",
+            "    if os.path.exists(temporary): os.unlink(temporary)",
+        ]
+    )
+
+
+def install_claude_fixture_state(sandbox: Any, execution: dict[str, Any], version: str) -> None:
+    """Seed only non-secret Claude UI state for the dedicated cleanroom fixture."""
+    source = claude_fixture_state_source(
+        config_path=AUTH_ROOT + "/claude/.claude.json",
+        fixture=execution["runner_fixture"],
+        version=version,
+    )
+    response = sandbox.process.exec(f"python3 -c {shlex.quote(source)}", timeout=30)
+    if response.exit_code != 0:
+        raise RuntimeError("could not install Claude's non-secret cleanroom fixture state")
+
+
 def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
     execution = request["execution"]
     return {
@@ -420,6 +460,7 @@ def create_auth_runner(request: dict[str, Any]) -> dict[str, Any]:
             "could not initialize writable OAuth directories on the persistent runner"
             + (f":\n{detail}" if detail else "")
         )
+    install_claude_fixture_state(sandbox, execution, request["clients"]["claude"]["version"])
     return {
         "status": "READY_FOR_INTERACTIVE_LOGIN",
         "sandbox_id": sandbox.id,
@@ -430,11 +471,10 @@ def create_auth_runner(request: dict[str, Any]) -> dict[str, Any]:
         "commands": [
             "claude auth login",
             "codex login",
-            f"cd {execution['runner_fixture']} && claude",
         ],
         "note": (
-            "Log in once, then launch Claude once in the stable fixture to complete its "
-            "non-secret theme and project-trust onboarding. Stop/start preserves this state."
+            "Log in once. The runner idempotently installs only Claude's non-secret theme and "
+            "project-trust state for the dedicated empty fixture; stop/start preserves OAuth."
         ),
     }
 
@@ -483,18 +523,7 @@ def run_daytona(
             preflight = sandbox.process.exec(command, timeout=60)
             if preflight.exit_code != 0:
                 raise RuntimeError(f"{client} is not authenticated in the persistent runner")
-        fixture = shlex.quote(execution["runner_fixture"])
-        interactive = sandbox.process.exec(
-            f"cd {fixture} && timeout --signal=TERM --kill-after=5s 45s "
-            "claude --init-only >/dev/null 2>&1",
-            timeout=60,
-        )
-        if interactive.exit_code != 0:
-            raise RuntimeError(
-                "Claude interactive onboarding or stable-fixture trust is incomplete; "
-                f"open the runner, run `cd {execution['runner_fixture']} && claude`, "
-                "complete the non-secret prompts, then exit and retry"
-            )
+        install_claude_fixture_state(sandbox, execution, request["clients"]["claude"]["version"])
         with tempfile.TemporaryDirectory(prefix="holler-canary-controller-") as directory:
             temporary = Path(directory)
             request_path = temporary / "request.json"

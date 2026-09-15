@@ -165,14 +165,12 @@ becomes part of the operator-approved request before running the real canary.
 
 The real worker becomes usable only after the named runner exists, the pinned
 clients are present in its base snapshot, both authentication preflights
-succeed, and Claude's one-time interactive onboarding is complete. After the
-two login commands, launch `claude` once from
-`/home/daytona/.holler-canary-workspace`, choose a non-secret terminal theme,
-trust that dedicated empty Git fixture, and exit. The controller runs
-`claude --init-only` there before every credentialed canary and fails before a
-model call if onboarding or trust is incomplete. C0 then verifies Holler's
-actual Claude `SessionStart` registration and hydration through the same
-zero-model lifecycle path.
+succeed, and Claude's interactive onboarding state is complete. The controller
+idempotently seeds only a dark theme, the pinned completed-onboarding version,
+and trust for `/home/daytona/.holler-canary-workspace`; it preserves all other
+Claude configuration and never prints or exports credentials. C0 verifies that
+non-secret state, then runs `claude --init-only` to require Holler's actual
+`SessionStart` registration and hydration without a model call.
 
 Interactive scenarios wait for the live Holler registration before submitting
 input, send the terminal Enter key rather than a newline, and use expected

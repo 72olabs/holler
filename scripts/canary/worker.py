@@ -164,6 +164,21 @@ def lifecycle_evidence_complete(events: object, *, actor: str, run_id: str) -> b
     return {"session.registered", "startup.hydrated"}.issubset(seen)
 
 
+def claude_fixture_ready(config: object, *, fixture: Path, version: str) -> bool:
+    """Check the non-secret Claude preferences required for an unattended cleanroom TUI."""
+    if not isinstance(config, dict):
+        return False
+    projects = config.get("projects")
+    project = projects.get(str(fixture)) if isinstance(projects, dict) else None
+    return (
+        config.get("theme") == "dark"
+        and config.get("hasCompletedOnboarding") is True
+        and config.get("lastOnboardingVersion") == version
+        and isinstance(project, dict)
+        and project.get("hasTrustDialogAccepted") is True
+    )
+
+
 def doctor_command(
     holler: Path,
     *,
@@ -458,6 +473,19 @@ class Worker:
         if not self.has_lifecycle_evidence("canary-claude", run_id):
             raise CanaryFailure("Claude init-only did not produce registration and hydration evidence")
 
+    def validate_claude_fixture(self) -> None:
+        path = Path(self.env["CLAUDE_CONFIG_DIR"]) / ".claude.json"
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise CanaryFailure("Claude cleanroom fixture state is unavailable") from error
+        if not claude_fixture_ready(
+            config,
+            fixture=self.fixture,
+            version=self.request["clients"]["claude"]["version"],
+        ):
+            raise CanaryFailure("Claude cleanroom fixture state is incomplete")
+
     def run_claude(self, actor: str, run_id: str, prompt: str, max_usd: float = 0.10) -> str:
         self.ledger.ensure_capacity(client="claude", turns=1)
         command = claude_print_command(self.request["clients"]["claude"], max_usd)[1:]
@@ -511,6 +539,7 @@ class Worker:
             versions[name] = parse_version(output)
             if versions[name] != config["version"]:
                 raise CanaryFailure(f"{name} version {versions[name]} does not match pin {config['version']}")
+        self.validate_claude_fixture()
         self.setup_connectors()
         for name, actor, attention in (
             ("claude", "canary-claude", "hook-long-poll"),

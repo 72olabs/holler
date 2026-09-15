@@ -13,6 +13,7 @@ from daytona_controller import make_runtime_bundle
 from worker import (
     CanaryFailure,
     PtyProcess,
+    claude_fixture_ready,
     claude_cost,
     codex_reported_tokens,
     doctor_command,
@@ -87,6 +88,18 @@ class WorkerTests(unittest.TestCase):
     def test_lifecycle_evidence_rejects_invalid_shape(self) -> None:
         with self.assertRaisesRegex(CanaryFailure, "not a list"):
             lifecycle_evidence_complete({}, actor="canary-claude", run_id="run-1")
+
+    def test_claude_fixture_requires_onboarding_version_and_project_trust(self) -> None:
+        fixture = Path("/home/daytona/.holler-canary-workspace")
+        config = {
+            "theme": "dark",
+            "hasCompletedOnboarding": True,
+            "lastOnboardingVersion": "2.1.259",
+            "projects": {str(fixture): {"hasTrustDialogAccepted": True}},
+        }
+        self.assertTrue(claude_fixture_ready(config, fixture=fixture, version="2.1.259"))
+        config["projects"][str(fixture)]["hasTrustDialogAccepted"] = False
+        self.assertFalse(claude_fixture_ready(config, fixture=fixture, version="2.1.259"))
 
     def test_runtime_bundle_contains_worker_without_tests(self) -> None:
         import tarfile
