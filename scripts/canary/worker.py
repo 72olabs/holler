@@ -1051,6 +1051,26 @@ class Worker:
             time.sleep(0.25)
         raise CanaryFailure(f"{actor} did not create a live registration")
 
+    def wait_for_no_live_registration(
+        self,
+        actor: str,
+        run_id: str,
+        *,
+        harness: str,
+        timeout: float = 30,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            live_actor = actor_for_run(
+                self.actor_directory(), run_id=run_id, harness=harness
+            )
+            if live_actor is None:
+                return
+            if live_actor != actor:
+                raise CanaryFailure(f"{run_id} remained live under an unexpected actor")
+            time.sleep(0.25)
+        raise CanaryFailure(f"{actor} retained a live registration for {run_id}")
+
     def has_lifecycle_evidence(self, actor: str, run_id: str) -> bool:
         events = self.operational_events()
         return lifecycle_evidence_complete(events, actor=actor, run_id=run_id)
@@ -1342,6 +1362,7 @@ class Worker:
             self.launcher("claude", "canary-claude", "c2-claude", claude_args), cwd=self.fixture, env=self.env
         )
         codex: PtyProcess | None = None
+        claude_closed = False
         try:
             self.wait_for_live_registration("canary-claude", "c2-claude")
             claude.wait_until_ready("$", 60, suffix=True)
@@ -1383,11 +1404,19 @@ class Worker:
             self.ledger.ensure_capacity(client="codex", turns=1)
             codex.wait_for(codex_acked, 180, after=codex_wake_after)
             self.ledger.charge(client="codex", turns=1)
+            self.active_check = "c2-claude-graceful-exit"
+            claude.graceful_claude_exit()
+            claude_closed = True
         finally:
             if codex is not None:
                 codex.close()
-            claude.close()
+            if not claude_closed:
+                claude.close()
             self.ledger.charge(client="controller", turns=0, wall_seconds=time.monotonic() - started)
+        self.active_check = "c2-claude-session-ended"
+        self.wait_for_no_live_registration(
+            "canary-claude", "c2-claude", harness="claude"
+        )
         self.certify("claude", "canary-claude", "c2-claude", "hook-long-poll")
         self.certify("codex", "canary-codex", "c2-codex", "native-queue")
         return [
@@ -1403,7 +1432,7 @@ class Worker:
             f"Use Holler bus_send to actor canary-claude with body token {token} and idempotency key {token}. "
             "Stop after the tool succeeds.",
         )
-        self.active_check = "c3-pre-restart-delivery-state"
+        self.active_check = "c3-sent-message-correlation"
         message_id = sent_message_id(
             self.durable_events(),
             from_actor="canary-codex",
@@ -1411,17 +1440,21 @@ class Worker:
             recipient_actor="canary-claude",
         )
         events = self.operational_events()
-        if (
-            not delivery_was_queued(events, message_id=message_id, actor="canary-claude")
-            or delivery_event_attempts(events, message_id=message_id, actor="canary-claude")
-            or delivery_was_acked(events, message_id=message_id, actor="canary-claude")
-            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0)
-        ):
-            raise CanaryFailure("C3 durable message was not queued exactly once before restart")
+        self.active_check = "c3-pre-restart-queued-event"
+        if not delivery_was_queued(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 durable message has no queued event before restart")
+        self.active_check = "c3-pre-restart-unclaimed"
+        if delivery_event_attempts(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 durable message was claimed before restart")
+        if delivery_was_acked(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 durable message was acknowledged before restart")
+        self.active_check = "c3-pre-restart-inbox-count"
+        if actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0):
+            raise CanaryFailure("C3 durable message was not the sole queued inbox delivery")
         self.active_check = "c3-daemon-restart"
         self.stop_daemon()
         self.start_daemon()
-        self.active_check = "c3-post-restart-delivery-state"
+        self.active_check = "c3-post-restart-correlation"
         restarted_message_id = sent_message_id(
             self.durable_events(),
             from_actor="canary-codex",
@@ -1429,14 +1462,19 @@ class Worker:
             recipient_actor="canary-claude",
         )
         events = self.operational_events()
-        if (
-            restarted_message_id != message_id
-            or not delivery_was_queued(events, message_id=message_id, actor="canary-claude")
-            or delivery_event_attempts(events, message_id=message_id, actor="canary-claude")
-            or delivery_was_acked(events, message_id=message_id, actor="canary-claude")
-            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0)
-        ):
-            raise CanaryFailure("C3 queued delivery did not survive daemon restart unchanged")
+        if restarted_message_id != message_id:
+            raise CanaryFailure("C3 message identity changed across daemon restart")
+        self.active_check = "c3-post-restart-queued-event"
+        if not delivery_was_queued(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 queued event did not survive daemon restart")
+        self.active_check = "c3-post-restart-unclaimed"
+        if delivery_event_attempts(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 delivery was claimed during daemon restart")
+        if delivery_was_acked(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 delivery was acknowledged during daemon restart")
+        self.active_check = "c3-post-restart-inbox-count"
+        if actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0):
+            raise CanaryFailure("C3 queued inbox state changed across daemon restart")
         self.active_check = "c3-claude-claim-ack"
         self.run_claude(
             "canary-claude", "c3-claude",

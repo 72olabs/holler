@@ -49,6 +49,57 @@ from worker import (
 
 
 class WorkerTests(unittest.TestCase):
+    def test_wait_for_no_live_registration_accepts_ended_session(self) -> None:
+        worker = SimpleNamespace(
+            actor_directory=lambda: {
+                "actors": [
+                    {
+                        "actor": "canary-claude",
+                        "sessions": [
+                            {
+                                "run_id": "c2-claude",
+                                "harness": "claude",
+                                "state": "ended",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        Worker.wait_for_no_live_registration(
+            worker,
+            "canary-claude",
+            "c2-claude",
+            harness="claude",
+            timeout=0.01,
+        )
+
+    def test_wait_for_no_live_registration_rejects_wrong_actor(self) -> None:
+        worker = SimpleNamespace(
+            actor_directory=lambda: {
+                "actors": [
+                    {
+                        "actor": "unexpected-actor",
+                        "sessions": [
+                            {
+                                "run_id": "c2-claude",
+                                "harness": "claude",
+                                "state": "live",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        with self.assertRaisesRegex(CanaryFailure, "unexpected actor"):
+            Worker.wait_for_no_live_registration(
+                worker,
+                "canary-claude",
+                "c2-claude",
+                harness="claude",
+                timeout=0.01,
+            )
+
     def test_sent_message_id_correlates_body_free_durable_event(self) -> None:
         events = [
             {
