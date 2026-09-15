@@ -421,8 +421,8 @@ def run_daytona(
     keep_on_failure: bool,
 ) -> dict[str, Any]:
     require_committed_controller(request, SCRIPT_DIR.parent.parent)
-    if request["tier"] != "core":
-        raise RuntimeError("the credentialed worker currently accepts only the core tier")
+    if request["tier"] not in {"preflight", "core"}:
+        raise RuntimeError("the credentialed worker currently accepts only the preflight and core tiers")
     approved_artifact = request["artifact"]
     if not approved_artifact.get("sha256"):
         raise RuntimeError("the approved request must include an artifact checksum")
@@ -485,10 +485,27 @@ def run_daytona(
                     f"--output {shlex.quote(run_root + '/evidence.json')}",
                 ]
             )
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.unlink(missing_ok=True)
             response = sandbox.process.exec(command, timeout=request["budget"]["wall_seconds"])
             if response.exit_code != 0:
-                raise RuntimeError(f"credentialed canary worker exited {response.exit_code}")
-            output.parent.mkdir(parents=True, exist_ok=True)
+                failure_location = ""
+                try:
+                    sandbox.fs.download_file(f"{run_root}/evidence.json", str(output))
+                    failure_evidence = json.loads(output.read_text(encoding="utf-8"))
+                    allowed_scenarios = {"initialization", *(item["id"] for item in request["scenarios"])}
+                    failed_scenario = failure_evidence.get("failure", {}).get("scenario")
+                    if (
+                        failure_evidence.get("request_hash") == request["request_hash"]
+                        and failure_evidence.get("status") == "FAIL"
+                        and failed_scenario in allowed_scenarios
+                    ):
+                        failure_location = f" in {failed_scenario}; body-free evidence: {output}"
+                except Exception:
+                    output.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"credentialed canary worker exited {response.exit_code}{failure_location}"
+                )
             sandbox.fs.download_file(f"{run_root}/evidence.json", str(output))
             evidence = json.loads(output.read_text(encoding="utf-8"))
             if evidence.get("request_hash") != request["request_hash"] or evidence.get("status") != "PASS":

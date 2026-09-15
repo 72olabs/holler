@@ -34,6 +34,32 @@ class CanaryFailure(RuntimeError):
     pass
 
 
+def make_failure_evidence(
+    request: dict[str, Any],
+    *,
+    results: list[dict[str, Any]],
+    usage: dict[str, Any],
+    scenario: str,
+    error: BaseException,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "holler-canary-evidence",
+        "driver": "real",
+        "request_hash": request["request_hash"],
+        "source": request["source"],
+        "tier": request["tier"],
+        "status": "FAIL",
+        "results": results,
+        "failure": {"scenario": scenario, "type": type(error).__name__},
+        "usage": usage,
+        "limits": request["budget"],
+        "message_bodies_included": False,
+    }
+    evidence["evidence_hash"] = sha256_bytes(canonical_json(evidence))
+    return evidence
+
+
 def run_command(
     command: list[str],
     *,
@@ -221,6 +247,7 @@ class Worker:
         self.ledger = BudgetLedger(request["budget"])
         self.daemon: subprocess.Popen[str] | None = None
         self.results: list[dict[str, Any]] = []
+        self.active_scenario = "initialization"
 
     def prepare(self) -> None:
         for directory in (self.home, self.fixture, self.runtime, self.package.parent):
@@ -489,6 +516,7 @@ class Worker:
             "C3": self.scenario_c3,
         }
         for scenario in self.request["scenarios"]:
+            self.active_scenario = scenario["id"]
             started = time.monotonic()
             checks = handlers[scenario["id"]]()
             self.results.append(
@@ -530,11 +558,21 @@ def main() -> None:
         worker = Worker(request, args.archive.resolve(), Path(directory))
         try:
             evidence = worker.run()
+        except (BudgetExceeded, CanaryFailure, ManifestError) as error:
+            evidence = make_failure_evidence(
+                request,
+                results=worker.results,
+                usage=worker.ledger.as_dict(),
+                scenario=worker.active_scenario,
+                error=error,
+            )
         finally:
             worker.stop_daemon()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({"status": evidence["status"], "output": str(args.output)}, sort_keys=True))
+    if evidence["status"] != "PASS":
+        raise SystemExit("canary failed; inspect the body-free evidence")
 
 
 if __name__ == "__main__":

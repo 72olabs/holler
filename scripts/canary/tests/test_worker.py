@@ -10,7 +10,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from daytona_controller import make_runtime_bundle
-from worker import claude_cost, codex_reported_tokens, doctor_command, parse_version
+from worker import claude_cost, codex_reported_tokens, doctor_command, make_failure_evidence, parse_version
 
 
 class WorkerTests(unittest.TestCase):
@@ -52,6 +52,23 @@ class WorkerTests(unittest.TestCase):
         claude = doctor_command(Path("/bin/holler"), harness="claude", **common)
         self.assertIn("/auth/codex/holler.config.toml", codex)
         self.assertNotIn("--policy", claude)
+
+    def test_failure_evidence_does_not_include_exception_message(self) -> None:
+        evidence = make_failure_evidence(
+            {
+                "request_hash": "sha256:request",
+                "source": {"commit": "abc"},
+                "tier": "core",
+                "budget": {"model_turns": 8},
+            },
+            results=[],
+            usage={"model_turns": 1},
+            scenario="C1",
+            error=RuntimeError("sensitive prompt or peer message"),
+        )
+        self.assertEqual(evidence["failure"], {"scenario": "C1", "type": "RuntimeError"})
+        self.assertNotIn("sensitive", json.dumps(evidence))
+        self.assertFalse(evidence["message_bodies_included"])
 
 
 if __name__ == "__main__":
