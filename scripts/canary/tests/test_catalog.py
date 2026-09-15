@@ -28,9 +28,9 @@ class CatalogTests(unittest.TestCase):
             with self.subTest(tier=tier):
                 validate_estimate(scenarios_for_tier(tier, catalog), budget_for_tier(tier))
 
-    def test_release_tier_is_twelve_turns(self) -> None:
+    def test_release_tier_is_eleven_turns(self) -> None:
         scenarios = scenarios_for_tier("release", load_catalog())
-        self.assertEqual(sum(item["estimated_model_turns"] for item in scenarios), 12)
+        self.assertEqual(sum(item["estimated_model_turns"] for item in scenarios), 11)
 
     def test_explicit_selection_prepends_c0_and_preserves_order(self) -> None:
         scenarios = scenarios_for_ids(["C3", "C1"], load_catalog())

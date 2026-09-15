@@ -2,9 +2,9 @@
   "schema_version": 1,
   "id": "C3",
   "name": "daemon-restart-delivery",
-  "description": "Restart hollerd with a committed message outstanding and prove reconnect, redelivery, and terminal acknowledgement.",
-  "required_clients": ["claude", "codex"],
-  "estimated_model_turns": 2,
+  "description": "Inject a non-waking message through Holler's versioned API, restart hollerd, and prove real-client reconnect, hydration, delivery continuity, and terminal acknowledgement.",
+  "required_clients": ["claude"],
+  "estimated_model_turns": 1,
   "timeout_seconds": 360,
   "checks": [
     "daemon-restart",

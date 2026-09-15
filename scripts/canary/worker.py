@@ -1433,19 +1433,30 @@ class Worker:
 
     def scenario_c3(self) -> list[str]:
         token = "C3-" + self.request["request_hash"][-12:]
-        self.active_check = "c3-codex-send"
-        self.run_codex(
-            "canary-codex", "c3-codex",
-            f"Use Holler bus_send to actor canary-claude with body token {token} and idempotency key {token}. "
-            "Stop after the tool succeeds.",
+        self.active_check = "c3-controller-send"
+        sent = self.json_command(
+            [
+                str(self.holler), "send", "--socket", str(self.socket),
+                "--actor", "c3-controller", "--run", "c3-controller",
+                "--project", "canary", "--channel", "direct",
+                "--delivery", "non-blocking", "--to-actor", "canary-claude",
+                "--idempotency-key", token,
+                "--body", json.dumps({"text": f"daemon restart token {token}"}),
+            ]
         )
+        message = sent.get("message") if isinstance(sent, dict) else None
+        sent_message = message.get("message_id") if isinstance(message, dict) else None
+        if not isinstance(sent_message, str) or not sent_message:
+            raise CanaryFailure("C3 deterministic send returned no message ID")
         self.active_check = "c3-sent-message-correlation"
         message_id = sent_message_id(
             self.durable_events(),
-            from_actor="canary-codex",
-            from_run="c3-codex",
+            from_actor="c3-controller",
+            from_run="c3-controller",
             recipient_actor="canary-claude",
         )
+        if message_id != sent_message:
+            raise CanaryFailure("C3 durable event did not match the deterministic send")
         events = self.operational_events()
         self.active_check = "c3-pre-restart-queued-event"
         if not delivery_was_queued(events, message_id=message_id, actor="canary-claude"):
@@ -1464,8 +1475,8 @@ class Worker:
         self.active_check = "c3-post-restart-correlation"
         restarted_message_id = sent_message_id(
             self.durable_events(),
-            from_actor="canary-codex",
-            from_run="c3-codex",
+            from_actor="c3-controller",
+            from_run="c3-controller",
             recipient_actor="canary-claude",
         )
         events = self.operational_events()

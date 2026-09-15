@@ -80,13 +80,17 @@ scenario, model, and budget hashes, but never credentials or message bodies.
 | Tier | Scenarios | Model turns | Intended use |
 |---|---|---:|---|
 | `preflight` | C0 | 0 | Packaging and environment only |
-| `core` | C0-C3 | 8 | Checkpoint commits and pre-PR canaries |
-| `release` | C0-C4, C6 | 12 | Release candidate gate |
-| `extended` | C0-C8 | 24 | Scheduled compatibility and failure testing |
+| `core` | C0-C3 | 7 | Checkpoint commits and pre-PR canaries |
+| `release` | C0-C4, C6 | 11 | Release candidate gate |
+| `extended` | C0-C8 | 23 | Scheduled compatibility and failure testing |
 
 The scenario files are data rather than executable prompts. This keeps the
 test contract reviewable and gives the local fake driver and the remote worker
 the same IDs, timeouts, assertions, and estimated model-turn count.
+
+Spend model turns only on the behavior a scenario is meant to prove. Use the
+controller's versioned Holler API for deterministic setup and teardown unless
+the scenario explicitly tests a real client's ability to perform that action.
 
 ### Adding and selecting a scenario
 
