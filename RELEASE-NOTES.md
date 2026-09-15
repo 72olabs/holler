@@ -12,7 +12,8 @@ repeatable for both maintainers and coding agents.
   setup/removal, daemon lifecycle, and extracted-product black-box checks.
 - Add token-budgeted C0-C8 real-client canaries with isolated Daytona build and
   credential runners, checksum-bound requests and evidence, low-cost model
-  defaults, and an exact-hash approval gate.
+  defaults, an exact-hash approval gate, and body-free durable-state assertions
+  that do not depend on agents echoing completion markers.
 - Add an agent-facing `doctor`/`check`/`checkpoint` workflow that hides provider
   mechanics, preserves OAuth state in one persistent runner, and can test any
   committed branch checkpoint before a pull request.

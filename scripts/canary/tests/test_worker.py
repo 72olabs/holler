@@ -4,6 +4,7 @@ import json
 import io
 import os
 import signal
+import sqlite3
 import sys
 from pathlib import Path
 import tempfile
@@ -37,6 +38,7 @@ from worker import (
     lifecycle_evidence_complete,
     make_failure_evidence,
     marker_instruction,
+    message_delivery_state,
     minted_actors,
     parse_version,
     run_with_timeout,
@@ -47,6 +49,85 @@ from worker import (
 
 
 class WorkerTests(unittest.TestCase):
+    def test_message_delivery_state_returns_one_body_free_correlation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "holler.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE messages (
+                    message_id TEXT PRIMARY KEY,
+                    from_actor TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    body BLOB NOT NULL
+                );
+                CREATE TABLE deliveries (
+                    message_id TEXT NOT NULL,
+                    recipient_actor TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempt INTEGER NOT NULL
+                );
+                INSERT INTO messages VALUES ('msg-1', 'sender', 'key-1', 'secret body');
+                INSERT INTO deliveries VALUES ('msg-1', 'recipient', 'acked', 1);
+                """
+            )
+            connection.commit()
+            connection.close()
+            self.assertEqual(
+                message_delivery_state(
+                    database,
+                    from_actor="sender",
+                    idempotency_key="key-1",
+                    recipient_actor="recipient",
+                ),
+                ("msg-1", "acked", 1),
+            )
+
+    def test_message_delivery_state_rejects_missing_or_duplicate_correlations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "holler.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE messages (
+                    message_id TEXT PRIMARY KEY,
+                    from_actor TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL
+                );
+                CREATE TABLE deliveries (
+                    message_id TEXT NOT NULL,
+                    recipient_actor TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempt INTEGER NOT NULL
+                );
+                """
+            )
+            connection.close()
+            with self.assertRaisesRegex(CanaryFailure, "exactly one delivery"):
+                message_delivery_state(
+                    database,
+                    from_actor="sender",
+                    idempotency_key="missing",
+                    recipient_actor="recipient",
+                )
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                INSERT INTO messages VALUES ('msg-1', 'sender', 'duplicate');
+                INSERT INTO deliveries VALUES ('msg-1', 'recipient', 'queued', 0);
+                INSERT INTO deliveries VALUES ('msg-1', 'recipient', 'claimed', 1);
+                """
+            )
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(CanaryFailure, "exactly one delivery"):
+                message_delivery_state(
+                    database,
+                    from_actor="sender",
+                    idempotency_key="duplicate",
+                    recipient_actor="recipient",
+                )
+
     def test_handler_context_has_no_raw_worker_reference(self) -> None:
         worker = SimpleNamespace(
             fixture=Path("/tmp/fixture"),

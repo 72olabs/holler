@@ -238,6 +238,46 @@ def sqlite_scalar(database: Path, query: str, *parameters: object) -> Any:
     return row[0]
 
 
+def message_delivery_state(
+    database: Path,
+    *,
+    from_actor: str,
+    idempotency_key: str,
+    recipient_actor: str,
+) -> tuple[str, str, int]:
+    """Return one correlation-safe delivery row without exposing its message body."""
+    connection: sqlite3.Connection | None = None
+    try:
+        uri = f"file:{database}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=5)
+        rows = connection.execute(
+            """
+            SELECT messages.message_id, deliveries.state, deliveries.attempt
+            FROM messages
+            JOIN deliveries USING (message_id)
+            WHERE messages.from_actor = ?
+              AND messages.idempotency_key = ?
+              AND deliveries.recipient_actor = ?
+            """,
+            (from_actor, idempotency_key, recipient_actor),
+        ).fetchall()
+    except sqlite3.Error as error:
+        raise CanaryFailure(f"cannot inspect canary delivery state: {error}") from error
+    finally:
+        if connection is not None:
+            connection.close()
+    if len(rows) != 1:
+        raise CanaryFailure("canary correlation did not resolve exactly one delivery")
+    message_id, state, attempt = rows[0]
+    if (
+        not isinstance(message_id, str)
+        or not isinstance(state, str)
+        or not isinstance(attempt, int)
+    ):
+        raise CanaryFailure("canary delivery row has an invalid shape")
+    return message_id, state, attempt
+
+
 def codex_reported_tokens(output: str) -> int:
     last_usage: dict[str, Any] | None = None
     for line in output.splitlines():
@@ -1243,20 +1283,40 @@ class Worker:
 
     def scenario_c1(self) -> list[str]:
         token = "C1-" + self.request["request_hash"][-12:]
-        sent = self.run_codex(
+        self.active_check = "c1-codex-send"
+        self.run_codex(
             "canary-codex", "c1-codex",
             f"Use Holler bus_send to send exactly one durable message to actor canary-claude. "
-            f"The body must contain token {token}. Use idempotency key {token}. Finish with marker C1_SENT.",
+            f"The body must contain token {token}. Use idempotency key {token}. Stop after the tool succeeds.",
         )
-        if "C1_SENT" not in sent:
-            raise CanaryFailure("Codex did not report the C1 send marker")
-        received = self.run_claude(
+        self.active_check = "c1-offline-delivery-state"
+        _, state, attempt = message_delivery_state(
+            self.database,
+            from_actor="canary-codex",
+            idempotency_key=token,
+            recipient_actor="canary-claude",
+        )
+        if (state, attempt) != ("queued", 0) or actor_delivery_counts(
+            self.actor_directory(), actor="canary-claude"
+        ) != (1, 0):
+            raise CanaryFailure("C1 durable message was not queued exactly once")
+        self.active_check = "c1-claude-claim-ack"
+        self.run_claude(
             "canary-claude", "c1-claude",
             f"Use bus_inbox to claim the offline Holler message containing {token}, then bus_ack its lease. "
-            "Do not echo its full body. Finish with marker C1_ACKED.",
+            "Do not echo its full body. Stop after the acknowledgement succeeds.",
         )
-        if "C1_ACKED" not in received:
-            raise CanaryFailure("Claude did not report the C1 acknowledgement marker")
+        self.active_check = "c1-terminal-delivery-state"
+        _, state, attempt = message_delivery_state(
+            self.database,
+            from_actor="canary-codex",
+            idempotency_key=token,
+            recipient_actor="canary-claude",
+        )
+        if (state, attempt) != ("acked", 1) or actor_delivery_counts(
+            self.actor_directory(), actor="canary-claude"
+        ) != (0, 0):
+            raise CanaryFailure("C1 delivery was not acknowledged exactly once")
         return ["durable-send", "offline-hydration", "mcp-claim", "mcp-ack"]
 
     def scenario_c2(self) -> list[str]:
@@ -1327,22 +1387,62 @@ class Worker:
 
     def scenario_c3(self) -> list[str]:
         token = "C3-" + self.request["request_hash"][-12:]
-        sent = self.run_codex(
+        self.active_check = "c3-codex-send"
+        self.run_codex(
             "canary-codex", "c3-codex",
             f"Use Holler bus_send to actor canary-claude with body token {token} and idempotency key {token}. "
-            "Finish with marker C3_SENT.",
+            "Stop after the tool succeeds.",
         )
-        if "C3_SENT" not in sent:
-            raise CanaryFailure("Codex did not report the C3 send marker")
+        self.active_check = "c3-pre-restart-delivery-state"
+        message_id, state, attempt = message_delivery_state(
+            self.database,
+            from_actor="canary-codex",
+            idempotency_key=token,
+            recipient_actor="canary-claude",
+        )
+        if (state, attempt) != ("queued", 0) or actor_delivery_counts(
+            self.actor_directory(), actor="canary-claude"
+        ) != (1, 0):
+            raise CanaryFailure("C3 durable message was not queued exactly once before restart")
+        self.active_check = "c3-daemon-restart"
         self.stop_daemon()
         self.start_daemon()
-        received = self.run_claude(
+        self.active_check = "c3-post-restart-delivery-state"
+        restarted_message_id, state, attempt = message_delivery_state(
+            self.database,
+            from_actor="canary-codex",
+            idempotency_key=token,
+            recipient_actor="canary-claude",
+        )
+        if (
+            restarted_message_id != message_id
+            or (state, attempt) != ("queued", 0)
+            or actor_delivery_counts(
+                self.actor_directory(), actor="canary-claude"
+            ) != (1, 0)
+        ):
+            raise CanaryFailure("C3 queued delivery did not survive daemon restart unchanged")
+        self.active_check = "c3-claude-claim-ack"
+        self.run_claude(
             "canary-claude", "c3-claude",
             f"Use bus_inbox to claim the Holler message containing {token}, then bus_ack its lease. "
-            "Finish with marker C3_ACKED.",
+            "Stop after the acknowledgement succeeds.",
         )
-        if "C3_ACKED" not in received:
-            raise CanaryFailure("Claude did not report the C3 acknowledgement marker")
+        self.active_check = "c3-terminal-delivery-state"
+        terminal_message_id, state, attempt = message_delivery_state(
+            self.database,
+            from_actor="canary-codex",
+            idempotency_key=token,
+            recipient_actor="canary-claude",
+        )
+        if (
+            terminal_message_id != message_id
+            or (state, attempt) != ("acked", 1)
+            or actor_delivery_counts(
+                self.actor_directory(), actor="canary-claude"
+            ) != (0, 0)
+        ):
+            raise CanaryFailure("C3 delivery was not acknowledged exactly once after restart")
         return ["daemon-restart", "client-reconnect", "no-message-loss", "no-duplicate-processing"]
 
     def scenario_c4(self) -> list[str]:
