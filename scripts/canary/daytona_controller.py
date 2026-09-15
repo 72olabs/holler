@@ -199,6 +199,11 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
                     "tar -xf /tmp/holler-source.tar -C /tmp/holler-build",
                     "mkdir -p /tmp/holler-dist",
                     "cd /tmp/holler-build/holler-source",
+                    "git init -q",
+                    "git remote add origin https://github.com/72olabs/holler.git",
+                    "git add -A",
+                    "git -c user.name='Holler Canary Builder' "
+                    "-c user.email=canary-builder@invalid commit -qm imported-source",
                     f"HOLLER_COMMIT={shlex.quote(source['commit'])} HOLLER_DIRTY=false "
                     f"HOLLER_VERSION={shlex.quote(source['connector_version'])} "
                     "ARTIFACT_ROOT=/tmp/holler-dist HOLLER_CI_HOME_AUDIT=off ./scripts/ci/run.sh",
