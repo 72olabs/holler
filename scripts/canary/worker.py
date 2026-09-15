@@ -243,6 +243,11 @@ class PtyProcess:
                 return
         raise CanaryFailure("interactive client did not reach a stable input-ready state")
 
+    def wait_until_ready(self, timeout: float) -> None:
+        """Wait for the input footer shared by the pinned Claude and Codex TUIs."""
+        self.wait_for("? for shortcuts", timeout)
+        self.wait_until_quiet(min(timeout, 10))
+
     def submit(self, prompt: str, *, marker: str, timeout: float) -> None:
         if marker in prompt:
             raise CanaryFailure("interactive prompt contains its expected output marker")
@@ -598,7 +603,7 @@ class Worker:
         codex: PtyProcess | None = None
         try:
             self.wait_for_live_registration("canary-claude", "c2-claude")
-            claude.wait_until_quiet(30)
+            claude.wait_until_ready(60)
             self.ledger.ensure_capacity(client="claude", turns=1)
             claude.submit(
                 "Initialize Holler and wait for Holler attention. If Holler wakes you later, claim and "
@@ -613,7 +618,7 @@ class Worker:
             codex = PtyProcess(
                 self.launcher("codex", "canary-codex", "c2-codex", codex_args), cwd=self.fixture, env=self.env
             )
-            codex.wait_until_quiet(30)
+            codex.wait_until_ready(60)
             self.ledger.ensure_capacity(client="codex", turns=1)
             codex.submit(
                 f"Use Holler bus_send to actor canary-claude with idempotency key {token}. "

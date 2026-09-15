@@ -57,6 +57,19 @@ class WorkerTests(unittest.TestCase):
             finally:
                 process.close()
 
+    def test_pty_ready_waits_for_real_input_footer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            process = PtyProcess(
+                ["/bin/sh", "-c", "printf 'loading'; sleep 0.2; printf '? for shortcuts'; sleep 2"],
+                cwd=Path(directory),
+                env={},
+            )
+            try:
+                process.wait_until_ready(2)
+                self.assertIn(b"? for shortcuts", process.buffer)
+            finally:
+                process.close()
+
     def test_pty_submit_rejects_marker_in_prompt(self) -> None:
         process = PtyProcess.__new__(PtyProcess)
         with self.assertRaisesRegex(CanaryFailure, "contains its expected output marker"):
