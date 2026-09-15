@@ -258,9 +258,15 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
                     "git add -A",
                     "git -c user.name='Holler Canary Builder' "
                     "-c user.email=canary-builder@invalid commit -qm imported-source",
+                    "if test -x ./scripts/ci/run.sh; then "
                     f"HOLLER_COMMIT={shlex.quote(source['commit'])} HOLLER_DIRTY=false "
                     f"HOLLER_VERSION={shlex.quote(source['connector_version'])} "
-                    "ARTIFACT_ROOT=/tmp/holler-dist HOLLER_CI_HOME_AUDIT=off ./scripts/ci/run.sh",
+                    "ARTIFACT_ROOT=/tmp/holler-dist HOLLER_CI_HOME_AUDIT=off ./scripts/ci/run.sh; "
+                    "elif test -x ./scripts/package-release.sh; then "
+                    f"HOLLER_COMMIT={shlex.quote(source['commit'])} HOLLER_DIRTY=false "
+                    f"HOLLER_VERSION={shlex.quote(source['connector_version'])} "
+                    "ARTIFACT_ROOT=/tmp/holler-dist ./scripts/package-release.sh; "
+                    "else echo 'no supported release build entrypoint' >&2; exit 127; fi",
                 ]
             )
             response = sandbox.process.exec(command, timeout=2400)
