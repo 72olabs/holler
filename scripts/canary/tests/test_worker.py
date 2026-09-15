@@ -11,6 +11,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from daytona_controller import make_runtime_bundle
 from worker import (
+    actor_delivery_counts,
     CanaryFailure,
     PtyProcess,
     claude_fixture_ready,
@@ -21,7 +22,6 @@ from worker import (
     delivery_event_attempts,
     delivery_was_acked,
     doctor_command,
-    inbox_item,
     lifecycle_evidence_complete,
     make_failure_evidence,
     marker_instruction,
@@ -153,12 +153,14 @@ class WorkerTests(unittest.TestCase):
 
     def test_c4_metadata_helpers_require_same_message_and_actor(self) -> None:
         message_id = "msg-1"
-        items = [
-            {"message_id": message_id, "state": "claimed", "attempt": 1, "available": False},
-            {"message_id": "msg-2", "state": "queued", "attempt": 0, "available": True},
-        ]
-        self.assertEqual(inbox_item(items, message_id=message_id), items[0])
-        self.assertIsNone(inbox_item(items, message_id="missing"))
+        directory = {
+            "actors": [
+                {"actor": "canary-claude", "unclaimed_messages": 0, "active_claims": 1},
+                {"actor": "another", "unclaimed_messages": 2, "active_claims": 0},
+            ]
+        }
+        self.assertEqual(actor_delivery_counts(directory, actor="canary-claude"), (0, 1))
+        self.assertEqual(actor_delivery_counts(directory, actor="missing"), (0, 0))
 
         events = [
             {
@@ -192,11 +194,14 @@ class WorkerTests(unittest.TestCase):
         )
         self.assertTrue(delivery_was_acked(events, message_id=message_id, actor="canary-claude"))
 
-    def test_c4_metadata_helpers_reject_invalid_or_duplicate_inbox(self) -> None:
-        with self.assertRaisesRegex(CanaryFailure, "not a list"):
-            inbox_item({}, message_id="msg-1")
-        with self.assertRaisesRegex(CanaryFailure, "duplicate rows"):
-            inbox_item([{"message_id": "msg-1"}, {"message_id": "msg-1"}], message_id="msg-1")
+    def test_c4_metadata_helpers_reject_invalid_directory(self) -> None:
+        with self.assertRaisesRegex(CanaryFailure, "invalid shape"):
+            actor_delivery_counts({}, actor="canary-claude")
+        with self.assertRaisesRegex(CanaryFailure, "invalid delivery counts"):
+            actor_delivery_counts(
+                {"actors": [{"actor": "canary-claude", "unclaimed_messages": "one"}]},
+                actor="canary-claude",
+            )
 
     def test_claude_fixture_requires_onboarding_version_and_project_trust(self) -> None:
         fixture = Path("/home/daytona/.holler-canary-workspace")
@@ -272,9 +277,13 @@ class WorkerTests(unittest.TestCase):
             results=[],
             usage={"model_turns": 1},
             scenario="C1",
+            check="c1-claim",
             error=RuntimeError("sensitive prompt or peer message"),
         )
-        self.assertEqual(evidence["failure"], {"scenario": "C1", "type": "RuntimeError"})
+        self.assertEqual(
+            evidence["failure"],
+            {"scenario": "C1", "check": "c1-claim", "type": "RuntimeError"},
+        )
         self.assertNotIn("sensitive", json.dumps(evidence))
         self.assertFalse(evidence["message_bodies_included"])
 

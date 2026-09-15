@@ -100,6 +100,7 @@ def make_failure_evidence(
     results: list[dict[str, Any]],
     usage: dict[str, Any],
     scenario: str,
+    check: str,
     error: BaseException,
 ) -> dict[str, Any]:
     evidence: dict[str, Any] = {
@@ -111,7 +112,7 @@ def make_failure_evidence(
         "tier": request["tier"],
         "status": "FAIL",
         "results": results,
-        "failure": {"scenario": scenario, "type": type(error).__name__},
+        "failure": {"scenario": scenario, "check": check, "type": type(error).__name__},
         "usage": usage,
         "limits": request["budget"],
         "message_bodies_included": False,
@@ -224,14 +225,19 @@ def lifecycle_evidence_complete(events: object, *, actor: str, run_id: str) -> b
     return {"session.registered", "startup.hydrated"}.issubset(seen)
 
 
-def inbox_item(items: object, *, message_id: str) -> dict[str, Any] | None:
-    """Return one body-free inbox metadata row for a message."""
-    if not isinstance(items, list):
-        raise CanaryFailure("inbox metadata is not a list")
-    matches = [item for item in items if isinstance(item, dict) and item.get("message_id") == message_id]
-    if len(matches) > 1:
-        raise CanaryFailure("inbox contains duplicate rows for one message")
-    return matches[0] if matches else None
+def actor_delivery_counts(directory: object, *, actor: str) -> tuple[int, int]:
+    """Return operator-observed unclaimed and active-claim counts for one actor."""
+    if not isinstance(directory, dict) or not isinstance(directory.get("actors"), list):
+        raise CanaryFailure("actor directory has an invalid shape")
+    for entry in directory["actors"]:
+        if not isinstance(entry, dict) or entry.get("actor") != actor:
+            continue
+        unclaimed = entry.get("unclaimed_messages")
+        active = entry.get("active_claims")
+        if not isinstance(unclaimed, int) or not isinstance(active, int):
+            raise CanaryFailure("actor directory has invalid delivery counts")
+        return unclaimed, active
+    return 0, 0
 
 
 def delivery_event_attempts(events: object, *, message_id: str, actor: str) -> list[int]:
@@ -446,14 +452,18 @@ class PtyProcess:
                 maximum = max(len(query) for query in TERMINAL_QUERY_RESPONSES)
                 self.query_tail = combined[-(maximum - 1):]
 
-    def close(self) -> None:
+    def close(self, *, abrupt: bool = False) -> None:
         if self.process.poll() is None:
-            self._signal(signal.SIGTERM)
-            try:
-                self.process.wait(timeout=8)
-            except subprocess.TimeoutExpired:
+            if abrupt:
                 self._signal(signal.SIGKILL)
                 self.process.wait(timeout=5)
+            else:
+                self._signal(signal.SIGTERM)
+                try:
+                    self.process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    self._signal(signal.SIGKILL)
+                    self.process.wait(timeout=5)
         self.selector.close()
         os.close(self.master)
 
@@ -499,6 +509,7 @@ class Worker:
         self.daemon: subprocess.Popen[str] | None = None
         self.results: list[dict[str, Any]] = []
         self.active_scenario = "initialization"
+        self.active_check = "initialization"
 
     def prepare(self) -> None:
         for directory in (self.home, self.runtime, self.package.parent):
@@ -692,23 +703,22 @@ class Worker:
         events = self.json_command(
             [
                 str(self.holler), "events", "--socket", str(self.socket), "--partition", "canary",
-                "--stream", "operational", "--after", "0", "--limit", "100",
+                "--stream", "operational", "--after", "0", "--limit", "1000",
             ]
         )
         if not isinstance(events, list):
             raise CanaryFailure("operational lifecycle events are not a list")
         return events
 
-    def inbox_metadata(self, actor: str, run_id: str) -> list[dict[str, Any]]:
-        items = self.json_command(
+    def actor_directory(self) -> dict[str, Any]:
+        directory = self.json_command(
             [
-                str(self.holler), "inbox", "--socket", str(self.socket),
-                "--actor", actor, "--run", run_id, "--limit", "100",
+                str(self.holler), "who", "--socket", str(self.socket), "--all", "--limit", "100",
             ]
         )
-        if not isinstance(items, list):
-            raise CanaryFailure("inbox metadata is not a list")
-        return items
+        if not isinstance(directory, dict):
+            raise CanaryFailure("actor directory is not an object")
+        return directory
 
     def run_claude_lifecycle_preflight(self) -> None:
         run_id = "c0-claude-init"
@@ -919,6 +929,7 @@ class Worker:
         return ["daemon-restart", "client-reconnect", "no-message-loss", "no-duplicate-processing"]
 
     def scenario_c4(self) -> list[str]:
+        self.active_check = "c4-durable-send"
         token = "C4-" + self.request["request_hash"][-12:]
         sent = self.json_command(
             [
@@ -934,73 +945,72 @@ class Worker:
         if not isinstance(message_id, str) or not message_id:
             raise CanaryFailure("C4 durable send returned no message ID")
 
-        marker = "C4_CLAIMED"
         command = claude_live_command(self.request["clients"]["claude"])[1:]
         claude = PtyProcess(
             self.launcher("claude", "canary-claude", "c4-claim-holder", command),
             cwd=self.fixture,
             env=self.env,
         )
-        claimed_item: dict[str, Any] | None = None
         try:
+            self.active_check = "c4-live-registration"
             self.wait_for_live_registration("canary-claude", "c4-claim-holder")
+            self.active_check = "c4-live-readiness"
             claude.wait_until_ready("$", 60, suffix=True)
+            self.active_check = "c4-first-claim"
             self.ledger.ensure_capacity(client="claude", turns=1)
-            claude.submit(
+            claude.send(
                 f"Use bus_claim to claim message ID {message_id} with lease_seconds 15. "
-                "Do not acknowledge, nack, or extend the lease. After the claim succeeds, finish with "
-                f"{marker_instruction(marker)}.",
-                marker=marker,
-                timeout=180,
+                "Do not acknowledge, nack, or extend the lease. Return after the claim succeeds."
             )
+            time.sleep(0.1)
+            claude.send("\r")
+            deadline = time.monotonic() + 180
+            attempts: list[int] = []
+            while time.monotonic() < deadline:
+                attempts = delivery_event_attempts(
+                    self.operational_events(), message_id=message_id, actor="canary-claude"
+                )
+                if attempts == [1]:
+                    break
+                if claude.process.poll() is not None:
+                    raise CanaryFailure("C4 claim holder exited before claiming the message")
+                time.sleep(0.25)
             self.ledger.charge(client="claude", turns=1)
-            claimed_item = inbox_item(
-                self.inbox_metadata("canary-claude", "c4-inspect-claimed"),
-                message_id=message_id,
-            )
-            if (
-                claimed_item is None
-                or claimed_item.get("state") != "claimed"
-                or claimed_item.get("available") is not False
-                or claimed_item.get("attempt") != 1
-            ):
+            self.active_check = "c4-claimed-state"
+            if attempts != [1] or actor_delivery_counts(
+                self.actor_directory(), actor="canary-claude"
+            ) != (0, 1):
                 raise CanaryFailure("C4 first claim was not active and unavailable")
         finally:
-            claude.close()
+            claude.close(abrupt=True)
 
         deadline = time.monotonic() + 30
-        expired_item: dict[str, Any] | None = None
+        expired_counts = (0, 0)
+        self.active_check = "c4-lease-expiry"
         while time.monotonic() < deadline:
-            expired_item = inbox_item(
-                self.inbox_metadata("canary-claude", "c4-inspect-expired"),
-                message_id=message_id,
+            expired_counts = actor_delivery_counts(
+                self.actor_directory(), actor="canary-claude"
             )
-            if expired_item is not None and expired_item.get("available") is True:
+            if expired_counts == (1, 0):
                 break
             time.sleep(0.25)
-        if (
-            expired_item is None
-            or expired_item.get("message_id") != message_id
-            or expired_item.get("state") != "claimed"
-            or expired_item.get("attempt") != 1
-            or expired_item.get("available") is not True
-        ):
+        if expired_counts != (1, 0):
             raise CanaryFailure("C4 lease did not expire into redelivery for the same message")
 
+        self.active_check = "c4-redelivery-claim-ack"
         acknowledged = self.run_claude(
             "canary-claude",
-            "c4-redelivery",
+            "c4-claim-holder",
             f"Use bus_claim to reclaim exact message ID {message_id}. Verify the returned attempt is 2, "
             "then bus_ack that lease. Do not echo the body. Finish with marker C4_ACKED.",
         )
         if "C4_ACKED" not in acknowledged:
             raise CanaryFailure("Claude did not report the C4 terminal acknowledgement marker")
 
-        if inbox_item(
-            self.inbox_metadata("canary-claude", "c4-inspect-acked"),
-            message_id=message_id,
-        ) is not None:
+        self.active_check = "c4-terminal-state"
+        if actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (0, 0):
             raise CanaryFailure("C4 message remained in the inbox after acknowledgement")
+        self.active_check = "c4-event-correlation"
         events = self.operational_events()
         if delivery_event_attempts(events, message_id=message_id, actor="canary-claude") != [1, 2]:
             raise CanaryFailure("C4 did not record exactly two ordered claims for the same message")
@@ -1025,6 +1035,7 @@ class Worker:
         }
         for scenario in self.request["scenarios"]:
             self.active_scenario = scenario["id"]
+            self.active_check = "scenario-start"
             started = time.monotonic()
             checks = handlers[scenario["id"]]()
             self.results.append(
@@ -1072,6 +1083,7 @@ def main() -> None:
                 results=worker.results,
                 usage=worker.ledger.as_dict(),
                 scenario=worker.active_scenario,
+                check=worker.active_check,
                 error=error,
             )
         finally:
