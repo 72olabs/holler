@@ -16,11 +16,15 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from daytona_controller import make_runtime_bundle
+from budget import BudgetLedger
+from handler_contract import HandlerContractError, load_handler
 from worker import (
     actor_delivery_counts,
     actor_for_run,
     alias_collision_visible,
     CanaryFailure,
+    BudgetedInteractiveSession,
+    HandlerContext,
     PtyProcess,
     claude_fixture_ready,
     claude_cost,
@@ -43,6 +47,77 @@ from worker import (
 
 
 class WorkerTests(unittest.TestCase):
+    def test_handler_context_has_no_raw_worker_reference(self) -> None:
+        worker = SimpleNamespace(
+            fixture=Path("/tmp/fixture"),
+            request={
+                "request_hash": "sha256:" + "a" * 64,
+                "clients": {"claude": {}, "codex": {}},
+            },
+            run_claude=lambda *args: "",
+            run_codex=lambda *args: "",
+            wait_for_live_registration=lambda *args: None,
+            handler_query=lambda *args, **kwargs: {},
+            launcher=lambda *args: [],
+            env={},
+            ledger=BudgetLedger({
+                "claude_usd": 1.0,
+                "codex_reported_tokens": 100,
+                "model_turns": 2,
+                "wall_seconds": 60,
+            }),
+            active_check="initialization",
+        )
+        context = HandlerContext(worker)
+        self.assertFalse(hasattr(context, "worker"))
+        self.assertFalse(hasattr(context, "__dict__"))
+        self.assertEqual(context.marker("C9_DONE"), "C9_DONE_AAAAAAAAAAAA")
+
+    def test_interactive_turn_charges_only_after_expected_marker(self) -> None:
+        limits = {
+            "claude_usd": 1.0,
+            "codex_reported_tokens": 100,
+            "model_turns": 2,
+            "wall_seconds": 60,
+        }
+        ledger = BudgetLedger(limits)
+        session = BudgetedInteractiveSession(
+            client="codex",
+            actor="c9-codex",
+            run_id="c9-run",
+            extra_args=(),
+            config={},
+            launcher=lambda *args: [],
+            wait_for_registration=lambda *args: None,
+            fixture=Path("/tmp/fixture"),
+            env={},
+            ledger=ledger,
+            marker_suffix="AAAAAAAAAAAA",
+        )
+        session.process = SimpleNamespace(submit=lambda *args, **kwargs: None)
+        session.turn("encoded completion instruction", "C9_DONE_AAAAAAAAAAAA", timeout=1)
+        self.assertEqual(ledger.model_turns, 1)
+
+        failing = BudgetedInteractiveSession(
+            client="codex",
+            actor="c9-codex",
+            run_id="c9-fail",
+            extra_args=(),
+            config={},
+            launcher=lambda *args: [],
+            wait_for_registration=lambda *args: None,
+            fixture=Path("/tmp/fixture"),
+            env={},
+            ledger=ledger,
+            marker_suffix="AAAAAAAAAAAA",
+        )
+        failing.process = SimpleNamespace(
+            submit=lambda *args, **kwargs: (_ for _ in ()).throw(CanaryFailure("missing marker"))
+        )
+        with self.assertRaisesRegex(CanaryFailure, "missing marker"):
+            failing.turn("encoded completion instruction", "C9_FAIL_AAAAAAAAAAAA", timeout=1)
+        self.assertEqual(ledger.model_turns, 1)
+
     def test_safe_extract_accepts_internal_binary_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -107,7 +182,7 @@ class WorkerTests(unittest.TestCase):
             handlers = root / "handlers"
             handlers.mkdir()
             (handlers / "C9.py").write_text(
-                'def run(worker):\n    return ["contributor-check"]\n',
+                'def run(context):\n    return ["contributor-check"]\n',
                 encoding="utf-8",
             )
             worker = Worker.__new__(Worker)
@@ -119,6 +194,7 @@ class WorkerTests(unittest.TestCase):
                     {
                         "id": "C9",
                         "name": "Contributor scenario",
+                        "estimated_model_turns": 0,
                         "timeout_seconds": 180,
                         "checks": ["contributor-check"],
                     }
@@ -131,17 +207,84 @@ class WorkerTests(unittest.TestCase):
                 },
             }
             worker.results = []
-            worker.ledger = SimpleNamespace(as_dict=lambda: {"model_turns": 0})
+            worker.fixture = root
+            worker.ledger = SimpleNamespace(model_turns=0, as_dict=lambda: {"model_turns": 0})
             worker.prepare = lambda: None
             with patch("worker.SCRIPT_DIR", root):
                 evidence = worker.run()
             self.assertEqual(evidence["results"][0]["assertions"], [
                 {"name": "contributor-check", "status": "PASS"}
             ])
+            self.assertEqual(evidence["results"][0]["estimated_model_turns"], 0)
+            self.assertEqual(evidence["results"][0]["observed_model_turns"], 0)
+
+    def test_custom_handler_assertions_must_match_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            handlers = root / "handlers"
+            handlers.mkdir()
+            (handlers / "C9.py").write_text(
+                'def run(context):\n    return ["undeclared-check"]\n',
+                encoding="utf-8",
+            )
+            worker = Worker.__new__(Worker)
+            worker.request = {
+                "request_hash": "sha256:request",
+                "source": {"commit": "abc"},
+                "tier": "core",
+                "scenarios": [{
+                    "id": "C9",
+                    "name": "Contributor scenario",
+                    "estimated_model_turns": 0,
+                    "timeout_seconds": 180,
+                    "checks": ["declared-check"],
+                }],
+                "budget": {
+                    "claude_usd": 0.5,
+                    "codex_reported_tokens": 250_000,
+                    "model_turns": 8,
+                    "wall_seconds": 1800,
+                },
+            }
+            worker.results = []
+            worker.fixture = root
+            worker.ledger = SimpleNamespace(model_turns=0, as_dict=lambda: {"model_turns": 0})
+            worker.prepare = lambda: None
+            with patch("worker.SCRIPT_DIR", root), self.assertRaisesRegex(
+                CanaryFailure,
+                "assertions do not match",
+            ):
+                worker.run()
+
+    def test_custom_handler_requires_callable_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "C9.py"
+            path.write_text("VALUE = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(HandlerContractError, "must define callable run"):
+                load_handler(path)
+
+    def test_custom_handler_import_failure_reports_only_error_type(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "C9.py"
+            path.write_text('raise RuntimeError("private detail")\n', encoding="utf-8")
+            with self.assertRaises(HandlerContractError) as raised:
+                load_handler(path)
+            self.assertIn("RuntimeError", str(raised.exception))
+            self.assertNotIn("private detail", str(raised.exception))
+
+    def test_custom_handler_static_tripwire_rejects_process_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "C9.py"
+            path.write_text("import subprocess\ndef run(context): return []\n", encoding="utf-8")
+            with self.assertRaisesRegex(HandlerContractError, "static tripwire"):
+                load_handler(path)
 
     def test_scenario_timeout_is_enforced(self) -> None:
         def expire() -> list[str]:
-            signal.pause()
+            try:
+                signal.pause()
+            except Exception:
+                return []
 
         with self.assertRaisesRegex(CanaryFailure, "C9 exceeded its 1-second timeout"):
             run_with_timeout(expire, 1, "C9")
@@ -415,6 +558,7 @@ class WorkerTests(unittest.TestCase):
             with tarfile.open(path, "r:gz") as bundle:
                 names = set(bundle.getnames())
         self.assertIn("holler-canary/worker.py", names)
+        self.assertIn("holler-canary/handler_contract.py", names)
         self.assertIn("holler-canary/scenarios/C0.json", names)
         self.assertFalse(any("tests" in name for name in names))
 

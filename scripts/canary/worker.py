@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,6 +21,7 @@ import sys
 import tarfile
 import tempfile
 import termios
+import threading
 import time
 import tomllib
 from typing import Any
@@ -38,6 +38,7 @@ from clients import (  # noqa: E402
     codex_exec_command,
     codex_live_command,
 )
+from handler_contract import HandlerContractError, handler_path, load_handler  # noqa: E402
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
 
 
@@ -69,28 +70,37 @@ def terminal_query_responses(data: bytes, *, previous_tail_length: int = 0) -> b
     return bytes(replies)
 
 
+class CanaryFailure(RuntimeError):
+    pass
+
+
+class ScenarioTimeout(BaseException):
+    """Internal timeout signal that ordinary handler exception blocks cannot swallow."""
+
+
 def run_with_timeout(handler: Any, seconds: int, scenario_id: str) -> list[str]:
     """Enforce a scenario's committed wall-clock limit inside the worker process."""
+    if threading.current_thread() is not threading.main_thread():
+        raise CanaryFailure("scenario timeouts require the worker main thread")
     previous_handler = signal.getsignal(signal.SIGALRM)
 
     def timeout_handler(_signum: int, _frame: Any) -> None:
-        raise CanaryFailure(f"scenario {scenario_id} exceeded its {seconds}-second timeout")
+        raise ScenarioTimeout
 
     signal.signal(signal.SIGALRM, timeout_handler)
     previous_timer = signal.setitimer(signal.ITIMER_REAL, float(seconds))
     try:
-        return handler()
+        try:
+            return handler()
+        except ScenarioTimeout as error:
+            raise CanaryFailure(
+                f"scenario {scenario_id} exceeded its {seconds}-second timeout"
+            ) from error
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
         if previous_timer[0] > 0:
             signal.setitimer(signal.ITIMER_REAL, *previous_timer)
-
-
-class CanaryFailure(RuntimeError):
-    pass
-
-
 class PtyChild:
     """Small wait/poll adapter for a child created by forkpty."""
 
@@ -596,6 +606,178 @@ class PtyProcess:
                     pass
 
 
+class BudgetedInteractiveSession:
+    """Interactive client session whose turns are accounted by the shared ledger."""
+
+    def __init__(
+        self,
+        *,
+        client: str,
+        actor: str,
+        run_id: str,
+        extra_args: tuple[str, ...],
+        config: dict[str, Any],
+        launcher: Any,
+        wait_for_registration: Any,
+        fixture: Path,
+        env: dict[str, str],
+        ledger: BudgetLedger,
+        marker_suffix: str,
+    ):
+        if client not in {"claude", "codex"}:
+            raise CanaryFailure(f"unsupported interactive client {client!r}")
+        self.client = client
+        self.actor = actor
+        self.run_id = run_id
+        self.extra_args = extra_args
+        self.config = config
+        self.launcher = launcher
+        self.wait_for_registration = wait_for_registration
+        self.fixture = fixture
+        self.env = env
+        self.ledger = ledger
+        self.marker_suffix = marker_suffix
+        self.process: PtyProcess | None = None
+
+    def __enter__(self) -> "BudgetedInteractiveSession":
+        command = (
+            claude_live_command(self.config)[1:]
+            if self.client == "claude"
+            else codex_live_command(self.config)[1:]
+        )
+        self.process = PtyProcess(
+            self.launcher(self.client, self.actor, self.run_id, [*command, *self.extra_args]),
+            cwd=self.fixture,
+            env=self.env,
+        )
+        try:
+            if self.client == "claude":
+                self.process.wait_until_ready("$", 60, suffix=True)
+            else:
+                self.process.wait_until_ready("Ask Codex to do anything", 60)
+                self.process.wait_until_quiet(30, quiet_seconds=2)
+                if "Hooks need review" in self.process.normalized_output()[-5000:]:
+                    raise CanaryFailure("Codex hook trust was not ready before interactive handler")
+            self.wait_for_registration(self.actor, self.run_id)
+            return self
+        except BaseException:
+            self.process.close()
+            self.process = None
+            raise
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> bool:
+        if self.process is not None:
+            self.process.close()
+            self.process = None
+        return False
+
+    def turn(self, prompt: str, expect_marker: str, timeout: float = 180) -> None:
+        if self.process is None:
+            raise CanaryFailure("interactive turn requires an open context manager")
+        if not expect_marker.endswith(f"_{self.marker_suffix}") or expect_marker in prompt:
+            raise CanaryFailure("interactive expected marker is invalid or appears in its prompt")
+        self.ledger.ensure_capacity(client=self.client, turns=1)
+        started = time.monotonic()
+        self.process.submit(prompt, marker=expect_marker, timeout=timeout)
+        self.ledger.charge(
+            client=self.client,
+            turns=1,
+            wall_seconds=time.monotonic() - started,
+        )
+
+
+class HandlerContext:
+    """Narrow, budget-aware API for committed contributor handlers."""
+
+    __slots__ = (
+        "_fixture",
+        "_marker_suffix",
+        "_run_claude",
+        "_run_codex",
+        "_interactive",
+        "_wait_for_registration",
+        "_query",
+        "_set_check",
+    )
+
+    def __init__(self, worker: "Worker"):
+        self._fixture = worker.fixture
+        self._marker_suffix = worker.request["request_hash"][-12:].upper()
+        self._run_claude = worker.run_claude
+        self._run_codex = worker.run_codex
+        self._wait_for_registration = worker.wait_for_live_registration
+        self._set_check = lambda name: setattr(worker, "active_check", name)
+        self._query = worker.handler_query
+        self._interactive = lambda client, actor, run_id, extra_args: BudgetedInteractiveSession(
+            client=client,
+            actor=actor,
+            run_id=run_id,
+            extra_args=extra_args,
+            config=worker.request["clients"][client],
+            launcher=worker.launcher,
+            wait_for_registration=worker.wait_for_live_registration,
+            fixture=worker.fixture,
+            env=worker.env,
+            ledger=worker.ledger,
+            marker_suffix=self._marker_suffix,
+        )
+
+    @property
+    def fixture(self) -> Path:
+        return self._fixture
+
+    def marker(self, name: str) -> str:
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", name):
+            raise CanaryFailure("handler marker names must be uppercase identifiers")
+        return f"{name}_{self._marker_suffix}"
+
+    def marker_instruction(self, expected: str) -> str:
+        return marker_instruction(expected)
+
+    def run_claude(self, actor: str, run_id: str, prompt: str, expect: str) -> str:
+        self._guard_prompt(prompt, expect)
+        output = self._run_claude(actor, run_id, prompt)
+        if expect not in output:
+            raise CanaryFailure("Claude did not report the expected handler marker")
+        return output
+
+    def run_codex(self, actor: str, run_id: str, prompt: str, expect: str) -> str:
+        self._guard_prompt(prompt, expect)
+        output = self._run_codex(actor, run_id, prompt)
+        if expect not in output:
+            raise CanaryFailure("Codex did not report the expected handler marker")
+        return output
+
+    def interactive(
+        self,
+        client: str,
+        actor: str,
+        run_id: str,
+        extra_args: tuple[str, ...] = (),
+    ) -> BudgetedInteractiveSession:
+        if not all(isinstance(item, str) for item in extra_args):
+            raise CanaryFailure("interactive extra arguments must be strings")
+        return self._interactive(client, actor, run_id, extra_args)
+
+    def wait_for_live_registration(self, actor: str, run_id: str, timeout: float = 60) -> None:
+        self._wait_for_registration(actor, run_id, timeout)
+
+    def query(self, kind: str, *, partition: str = "canary") -> Any:
+        return self._query(kind, partition=partition)
+
+    def check(self, name: str) -> None:
+        if not name or len(name) > 128:
+            raise CanaryFailure("handler check names must contain 1-128 characters")
+        self._set_check(name)
+
+    def fail(self, reason: str) -> None:
+        raise CanaryFailure(reason)
+
+    def _guard_prompt(self, prompt: str, expect: str) -> None:
+        if not expect.endswith(f"_{self._marker_suffix}") or expect in prompt:
+            raise CanaryFailure("handler expected marker is invalid or appears in its prompt")
+
+
 class Worker:
     def __init__(
         self,
@@ -833,6 +1015,27 @@ class Worker:
             return json.loads(result.stdout)
         except json.JSONDecodeError as error:
             raise CanaryFailure(f"cannot decode {Path(command[0]).name} JSON output") from error
+
+    def handler_query(self, kind: str, *, partition: str = "canary") -> Any:
+        if kind == "directory":
+            return self.actor_directory()
+        if kind == "operational-events":
+            return self.operational_events(partition)
+        if kind == "durable-events":
+            return self.durable_events(partition)
+        if kind == "conditions":
+            return self.json_command(
+                [
+                    str(self.holler),
+                    "conditions",
+                    "list",
+                    "--socket",
+                    str(self.socket),
+                    "--limit",
+                    "100",
+                ]
+            )
+        raise CanaryFailure(f"unsupported handler query {kind!r}")
 
     def operational_events(self, partition: str = "canary") -> list[dict[str, Any]]:
         return self.events(partition=partition, stream="operational")
@@ -1597,57 +1800,54 @@ class Worker:
         ]
 
     def run(self) -> dict[str, Any]:
-        handlers: list[tuple[dict[str, Any], Any]] = []
+        handlers: list[tuple[dict[str, Any], Any, bool]] = []
         for scenario in self.request["scenarios"]:
             handler_name = f"scenario_{scenario['id'].lower()}"
             handler = getattr(self, handler_name, None)
+            custom = not callable(handler)
             if not callable(handler):
-                handler_path = SCRIPT_DIR / "handlers" / f"{scenario['id']}.py"
-                if handler_path.is_file():
-                    try:
-                        spec = importlib.util.spec_from_file_location(
-                            f"holler_canary_handler_{scenario['id'].lower()}",
-                            handler_path,
-                        )
-                        if spec is None or spec.loader is None:
-                            raise CanaryFailure(f"cannot load committed handler {handler_path.name}")
-                        module = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(module)
-                        module_run = getattr(module, "run", None)
-                        if callable(module_run):
-                            handler = lambda module_run=module_run: module_run(self)
-                    except CanaryFailure:
-                        raise
-                    except Exception as error:
-                        raise CanaryFailure(
-                            f"cannot load committed handler {handler_path.name}: "
-                            f"{type(error).__name__}"
-                        ) from error
+                try:
+                    custom_path = handler_path(SCRIPT_DIR / "handlers", scenario["id"])
+                    handler = load_handler(custom_path)
+                except HandlerContractError as error:
+                    raise CanaryFailure(
+                        f"cannot load committed handler {scenario['id']}: {type(error).__name__}"
+                    ) from error
             if not callable(handler):
-                raise CanaryFailure(
-                    f"scenario {scenario['id']} has no committed worker method {handler_name} "
-                    f"or handlers/{scenario['id']}.py run(worker) function"
-                )
-            handlers.append((scenario, handler))
+                raise CanaryFailure(f"scenario {scenario['id']} has no callable handler")
+            handlers.append((scenario, handler, custom))
         self.prepare()
-        for scenario, handler in handlers:
+        context = HandlerContext(self)
+        for scenario, handler, custom in handlers:
             self.active_scenario = scenario["id"]
             self.active_check = "scenario-start"
             started = time.monotonic()
-            checks = run_with_timeout(handler, scenario["timeout_seconds"], scenario["id"])
+            turns_before = self.ledger.model_turns
+            operation = (lambda handler=handler: handler(context)) if custom else handler
+            checks = run_with_timeout(operation, scenario["timeout_seconds"], scenario["id"])
+            observed_turns = self.ledger.model_turns - turns_before
+            estimated_turns = scenario["estimated_model_turns"]
             if checks != scenario["checks"]:
                 raise CanaryFailure(
                     f"scenario {scenario['id']} worker assertions do not match its committed definition"
                 )
-            self.results.append(
-                {
-                    "id": scenario["id"],
-                    "name": scenario["name"],
-                    "status": "PASS",
-                    "duration_seconds": round(time.monotonic() - started, 3),
-                    "assertions": [{"name": check, "status": "PASS"} for check in checks],
-                }
-            )
+            result = {
+                "id": scenario["id"],
+                "name": scenario["name"],
+                "status": "PASS",
+                "duration_seconds": round(time.monotonic() - started, 3),
+                "estimated_model_turns": estimated_turns,
+                "observed_model_turns": observed_turns,
+                "assertions": [{"name": check, "status": "PASS"} for check in checks],
+            }
+            if observed_turns != estimated_turns:
+                result["status"] = "FAIL"
+                self.results.append(result)
+                raise CanaryFailure(
+                    f"scenario {scenario['id']} used {observed_turns} model turns; "
+                    f"its committed estimate is {estimated_turns}"
+                )
+            self.results.append(result)
         evidence: dict[str, Any] = {
             "schema_version": 1,
             "kind": "holler-canary-evidence",

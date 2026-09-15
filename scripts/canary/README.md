@@ -94,7 +94,7 @@ Contributors can add a test without changing a tier:
 
 1. Choose the next unused numeric ID and add
    `scripts/canary/scenarios/C9.json`.
-2. Add `scripts/canary/handlers/C9.py` with a `run(worker)` function. Return
+2. Add `scripts/canary/handlers/C9.py` with a `run(context)` function. Return
    the JSON file's assertion names in exactly the declared order; a mismatch
    fails the canary rather than publishing incomplete evidence.
 3. Add deterministic tests for helper or parsing logic under
@@ -116,8 +116,13 @@ The request hash binds the exact commit, scenario definitions, clients,
 artifact, and budget before any model call.
 
 Custom code runs beside subscription credentials, so handlers must be public,
-committed, reviewed code. The harness deliberately does not accept arbitrary
-script paths or load code from gitignored directories. See
+committed, reviewed code. `HandlerContext` prevents accidental unbudgeted use;
+it is not a security sandbox. Commit review plus exact-tree approval remains
+the credential boundary. The harness deliberately does not accept arbitrary
+script paths or load code from gitignored directories. It imports each selected
+handler in a short-lived credential-free process before building, enforces the
+declared per-scenario timeout and exact model-turn estimate, and applies a static
+tripwire against direct process, PTY, socket, signal, or Worker access. See
 [`handlers/README.md`](handlers/README.md) for the handler contract and worker
 helpers.
 

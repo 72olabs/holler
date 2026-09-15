@@ -181,6 +181,7 @@ def make_runtime_bundle(output: Path, *, scenario_ids: set[str] | None = None) -
         "budget.py",
         "catalog.py",
         "clients.py",
+        "handler_contract.py",
         "manifest.py",
         "worker.py",
     ]

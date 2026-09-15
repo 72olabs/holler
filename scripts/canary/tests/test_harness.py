@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -17,6 +18,7 @@ from harness import (  # noqa: E402
     forwarded_arguments,
     reusable_artifact,
     runtime_python,
+    validate_selected_handlers,
 )
 
 
@@ -93,6 +95,28 @@ class HarnessTests(unittest.TestCase):
                     tier="core",
                 )
             )
+
+    def test_check_prevalidates_only_selected_custom_handlers(self) -> None:
+        request = {"scenarios": [{"id": "C0"}, {"id": "C9"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            handlers = Path(directory)
+            (handlers / "C9.py").write_text(
+                "def run(context): return []\n",
+                encoding="utf-8",
+            )
+            with patch("harness.HANDLER_DIR", handlers):
+                self.assertEqual(validate_selected_handlers(request), ["C9"])
+
+    def test_check_rejects_invalid_custom_handler_before_build(self) -> None:
+        request = {"scenarios": [{"id": "C0"}, {"id": "C9"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            handlers = Path(directory)
+            (handlers / "C9.py").write_text("VALUE = 1\n", encoding="utf-8")
+            with patch("harness.HANDLER_DIR", handlers), self.assertRaisesRegex(
+                RuntimeError,
+                "must define callable run",
+            ):
+                validate_selected_handlers(request)
 
 
 if __name__ == "__main__":

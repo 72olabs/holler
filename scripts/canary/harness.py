@@ -20,7 +20,7 @@ REPO_ROOT = SCRIPT_DIR.parent.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from catalog import TIER_SCENARIOS  # noqa: E402
+from catalog import BUILTIN_SCENARIOS, HANDLER_DIR, TIER_SCENARIOS  # noqa: E402
 from clients import assert_low_cost_defaults, client_policy  # noqa: E402
 from daytona_controller import (  # noqa: E402
     build_client_bundle,
@@ -51,6 +51,38 @@ def emit_event(phase: str, status: str, **fields: object) -> None:
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def validate_selected_handlers(request: dict[str, Any]) -> list[str]:
+    """Import selected custom handlers in a short-lived credential-free process."""
+    validated: list[str] = []
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONIOENCODING": "utf-8",
+    }
+    validator = SCRIPT_DIR / "handler_contract.py"
+    for scenario in request["scenarios"]:
+        scenario_id = scenario["id"]
+        if scenario_id in BUILTIN_SCENARIOS:
+            continue
+        try:
+            result = subprocess.run(
+                [sys.executable, str(validator), str(HANDLER_DIR), scenario_id],
+                cwd=REPO_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"custom handler {scenario_id} validation timed out") from error
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()[-1000:]
+            raise RuntimeError(f"custom handler {scenario_id} validation failed: {detail}")
+        validated.append(scenario_id)
+    return validated
 
 
 def checkpoint_directory(
@@ -282,6 +314,7 @@ def doctor(args: argparse.Namespace) -> None:
 
 def check(args: argparse.Namespace) -> None:
     request = make_request(args)
+    validated_handlers = validate_selected_handlers(request)
     paths = paths_for(args, request)
     write_json(paths["draft_request"], request)
     write_json(paths["fake_evidence"], run_fake(request))
@@ -293,6 +326,7 @@ def check(args: argparse.Namespace) -> None:
                 "commit": request["source"]["commit"],
                 "tier": request["tier"],
                 "scenarios": [item["id"] for item in request["scenarios"]],
+                "validated_custom_handlers": validated_handlers,
                 "estimated_model_turns": sum(
                     item["estimated_model_turns"] for item in request["scenarios"]
                 ),
@@ -318,6 +352,7 @@ def checkpoint(args: argparse.Namespace) -> None:
     ensure_managed_runtime(args.repo)
     emit_event("contract", "STARTED", tier=args.tier)
     draft = make_request(args)
+    validate_selected_handlers(draft)
     paths = paths_for(args, draft)
     paths["root"].mkdir(parents=True, exist_ok=True)
     write_json(paths["draft_request"], draft)
