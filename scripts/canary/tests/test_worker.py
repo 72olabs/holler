@@ -18,7 +18,10 @@ from worker import (
     codex_reported_tokens,
     codex_config_with_trusted_fixture,
     codex_hook_trust_ready,
+    delivery_event_attempts,
+    delivery_was_acked,
     doctor_command,
+    inbox_item,
     lifecycle_evidence_complete,
     make_failure_evidence,
     marker_instruction,
@@ -147,6 +150,53 @@ class WorkerTests(unittest.TestCase):
     def test_lifecycle_evidence_rejects_invalid_shape(self) -> None:
         with self.assertRaisesRegex(CanaryFailure, "not a list"):
             lifecycle_evidence_complete({}, actor="canary-claude", run_id="run-1")
+
+    def test_c4_metadata_helpers_require_same_message_and_actor(self) -> None:
+        message_id = "msg-1"
+        items = [
+            {"message_id": message_id, "state": "claimed", "attempt": 1, "available": False},
+            {"message_id": "msg-2", "state": "queued", "attempt": 0, "available": True},
+        ]
+        self.assertEqual(inbox_item(items, message_id=message_id), items[0])
+        self.assertIsNone(inbox_item(items, message_id="missing"))
+
+        events = [
+            {
+                "kind": "delivery.claimed",
+                "message_id": message_id,
+                "actor_id": "canary-claude",
+                "payload": {"attempt": 1},
+            },
+            {
+                "kind": "delivery.claimed",
+                "message_id": message_id,
+                "actor_id": "another-actor",
+                "payload": {"attempt": 99},
+            },
+            {
+                "kind": "delivery.claimed",
+                "message_id": message_id,
+                "actor_id": "canary-claude",
+                "payload": {"attempt": 2},
+            },
+            {
+                "kind": "delivery.acked",
+                "message_id": message_id,
+                "actor_id": "canary-claude",
+                "payload": {},
+            },
+        ]
+        self.assertEqual(
+            delivery_event_attempts(events, message_id=message_id, actor="canary-claude"),
+            [1, 2],
+        )
+        self.assertTrue(delivery_was_acked(events, message_id=message_id, actor="canary-claude"))
+
+    def test_c4_metadata_helpers_reject_invalid_or_duplicate_inbox(self) -> None:
+        with self.assertRaisesRegex(CanaryFailure, "not a list"):
+            inbox_item({}, message_id="msg-1")
+        with self.assertRaisesRegex(CanaryFailure, "duplicate rows"):
+            inbox_item([{"message_id": "msg-1"}, {"message_id": "msg-1"}], message_id="msg-1")
 
     def test_claude_fixture_requires_onboarding_version_and_project_trust(self) -> None:
         fixture = Path("/home/daytona/.holler-canary-workspace")

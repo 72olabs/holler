@@ -32,7 +32,7 @@ from clients import claude_live_command, claude_print_command, codex_exec_comman
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
 
 
-SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3"}
+SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3", "C4"}
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 TERMINAL_QUERY_RESPONSES = {
     b"\x1b[6n": b"\x1b[1;1R",
@@ -222,6 +222,49 @@ def lifecycle_evidence_complete(events: object, *, actor: str, run_id: str) -> b
         if payload.get("harness") == "claude":
             seen.add(str(event.get("kind")))
     return {"session.registered", "startup.hydrated"}.issubset(seen)
+
+
+def inbox_item(items: object, *, message_id: str) -> dict[str, Any] | None:
+    """Return one body-free inbox metadata row for a message."""
+    if not isinstance(items, list):
+        raise CanaryFailure("inbox metadata is not a list")
+    matches = [item for item in items if isinstance(item, dict) and item.get("message_id") == message_id]
+    if len(matches) > 1:
+        raise CanaryFailure("inbox contains duplicate rows for one message")
+    return matches[0] if matches else None
+
+
+def delivery_event_attempts(events: object, *, message_id: str, actor: str) -> list[int]:
+    """Return recorded claim attempts for a message without retaining its body."""
+    if not isinstance(events, list):
+        raise CanaryFailure("operational lifecycle events are not a list")
+    attempts: list[int] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if (
+            event.get("kind") != "delivery.claimed"
+            or event.get("message_id") != message_id
+            or event.get("actor_id") != actor
+        ):
+            continue
+        payload = event.get("payload")
+        attempt = payload.get("attempt") if isinstance(payload, dict) else None
+        if isinstance(attempt, int):
+            attempts.append(attempt)
+    return attempts
+
+
+def delivery_was_acked(events: object, *, message_id: str, actor: str) -> bool:
+    if not isinstance(events, list):
+        raise CanaryFailure("operational lifecycle events are not a list")
+    return any(
+        isinstance(event, dict)
+        and event.get("kind") == "delivery.acked"
+        and event.get("message_id") == message_id
+        and event.get("actor_id") == actor
+        for event in events
+    )
 
 
 def claude_fixture_ready(config: object, *, fixture: Path, version: str) -> bool:
@@ -635,20 +678,37 @@ class Worker:
         raise CanaryFailure(f"{actor} did not create a live registration")
 
     def has_lifecycle_evidence(self, actor: str, run_id: str) -> bool:
-        result = run_command(
+        events = self.operational_events()
+        return lifecycle_evidence_complete(events, actor=actor, run_id=run_id)
+
+    def json_command(self, command: list[str], *, timeout: int = 30) -> Any:
+        result = run_command(command, cwd=self.fixture, env=self.env, timeout=timeout)
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise CanaryFailure(f"cannot decode {Path(command[0]).name} JSON output") from error
+
+    def operational_events(self) -> list[dict[str, Any]]:
+        events = self.json_command(
             [
                 str(self.holler), "events", "--socket", str(self.socket), "--partition", "canary",
                 "--stream", "operational", "--after", "0", "--limit", "100",
-            ],
-            cwd=self.fixture,
-            env=self.env,
-            timeout=30,
+            ]
         )
-        try:
-            events = json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            raise CanaryFailure("cannot decode operational lifecycle events") from error
-        return lifecycle_evidence_complete(events, actor=actor, run_id=run_id)
+        if not isinstance(events, list):
+            raise CanaryFailure("operational lifecycle events are not a list")
+        return events
+
+    def inbox_metadata(self, actor: str, run_id: str) -> list[dict[str, Any]]:
+        items = self.json_command(
+            [
+                str(self.holler), "inbox", "--socket", str(self.socket),
+                "--actor", actor, "--run", run_id, "--limit", "100",
+            ]
+        )
+        if not isinstance(items, list):
+            raise CanaryFailure("inbox metadata is not a list")
+        return items
 
     def run_claude_lifecycle_preflight(self) -> None:
         run_id = "c0-claude-init"
@@ -858,6 +918,96 @@ class Worker:
             raise CanaryFailure("Claude did not report the C3 acknowledgement marker")
         return ["daemon-restart", "client-reconnect", "no-message-loss", "no-duplicate-processing"]
 
+    def scenario_c4(self) -> list[str]:
+        token = "C4-" + self.request["request_hash"][-12:]
+        sent = self.json_command(
+            [
+                str(self.holler), "send", "--socket", str(self.socket),
+                "--actor", "c4-controller", "--run", "c4-controller",
+                "--project", "canary", "--channel", "direct",
+                "--to-actor", "canary-claude", "--idempotency-key", token,
+                "--body", json.dumps({"text": f"claim-crash-redelivery token {token}"}),
+            ]
+        )
+        message = sent.get("message") if isinstance(sent, dict) else None
+        message_id = message.get("message_id") if isinstance(message, dict) else None
+        if not isinstance(message_id, str) or not message_id:
+            raise CanaryFailure("C4 durable send returned no message ID")
+
+        marker = "C4_CLAIMED"
+        command = claude_live_command(self.request["clients"]["claude"])[1:]
+        claude = PtyProcess(
+            self.launcher("claude", "canary-claude", "c4-claim-holder", command),
+            cwd=self.fixture,
+            env=self.env,
+        )
+        claimed_item: dict[str, Any] | None = None
+        try:
+            self.wait_for_live_registration("canary-claude", "c4-claim-holder")
+            claude.wait_until_ready("$", 60, suffix=True)
+            self.ledger.ensure_capacity(client="claude", turns=1)
+            claude.submit(
+                f"Use bus_claim to claim message ID {message_id} with lease_seconds 15. "
+                "Do not acknowledge, nack, or extend the lease. After the claim succeeds, finish with "
+                f"{marker_instruction(marker)}.",
+                marker=marker,
+                timeout=180,
+            )
+            self.ledger.charge(client="claude", turns=1)
+            claimed_item = inbox_item(
+                self.inbox_metadata("canary-claude", "c4-inspect-claimed"),
+                message_id=message_id,
+            )
+            if (
+                claimed_item is None
+                or claimed_item.get("state") != "claimed"
+                or claimed_item.get("available") is not False
+                or claimed_item.get("attempt") != 1
+            ):
+                raise CanaryFailure("C4 first claim was not active and unavailable")
+        finally:
+            claude.close()
+
+        deadline = time.monotonic() + 30
+        expired_item: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            expired_item = inbox_item(
+                self.inbox_metadata("canary-claude", "c4-inspect-expired"),
+                message_id=message_id,
+            )
+            if expired_item is not None and expired_item.get("available") is True:
+                break
+            time.sleep(0.25)
+        if (
+            expired_item is None
+            or expired_item.get("message_id") != message_id
+            or expired_item.get("state") != "claimed"
+            or expired_item.get("attempt") != 1
+            or expired_item.get("available") is not True
+        ):
+            raise CanaryFailure("C4 lease did not expire into redelivery for the same message")
+
+        acknowledged = self.run_claude(
+            "canary-claude",
+            "c4-redelivery",
+            f"Use bus_claim to reclaim exact message ID {message_id}. Verify the returned attempt is 2, "
+            "then bus_ack that lease. Do not echo the body. Finish with marker C4_ACKED.",
+        )
+        if "C4_ACKED" not in acknowledged:
+            raise CanaryFailure("Claude did not report the C4 terminal acknowledgement marker")
+
+        if inbox_item(
+            self.inbox_metadata("canary-claude", "c4-inspect-acked"),
+            message_id=message_id,
+        ) is not None:
+            raise CanaryFailure("C4 message remained in the inbox after acknowledgement")
+        events = self.operational_events()
+        if delivery_event_attempts(events, message_id=message_id, actor="canary-claude") != [1, 2]:
+            raise CanaryFailure("C4 did not record exactly two ordered claims for the same message")
+        if not delivery_was_acked(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C4 did not record the terminal acknowledgement")
+        return ["claim-before-crash", "lease-expiry", "redelivery-same-message-id", "terminal-ack"]
+
     def run(self) -> dict[str, Any]:
         requested = {scenario["id"] for scenario in self.request["scenarios"]}
         unsupported = requested - SUPPORTED_REAL_SCENARIOS
@@ -871,6 +1021,7 @@ class Worker:
             "C1": self.scenario_c1,
             "C2": self.scenario_c2,
             "C3": self.scenario_c3,
+            "C4": self.scenario_c4,
         }
         for scenario in self.request["scenarios"]:
             self.active_scenario = scenario["id"]
