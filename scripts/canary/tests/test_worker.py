@@ -49,6 +49,85 @@ from worker import (
 
 
 class WorkerTests(unittest.TestCase):
+    def test_c3_uses_one_controller_message_across_restart_and_terminal_state(self) -> None:
+        worker = object.__new__(Worker)
+        worker.request = {"request_hash": "sha256:" + "a" * 64}
+        worker.holler = Path("/test/holler")
+        worker.socket = Path("/test/holler.sock")
+        worker.active_check = "initialization"
+        commands: list[list[str]] = []
+        worker.json_command = lambda command: (
+            commands.append(command) or {"message": {"message_id": "msg-1"}}
+        )
+        worker.durable_events = lambda: [
+            {
+                "kind": "message.sent",
+                "message_id": "msg-1",
+                "actor_id": "c3-controller",
+                "payload": {
+                    "from_run": "c3-controller",
+                    "recipients": ["canary-claude"],
+                },
+            }
+        ]
+        queued = {
+            "kind": "delivery.queued",
+            "message_id": "msg-1",
+            "actor_id": "canary-claude",
+        }
+        lifecycle = [
+            {
+                "kind": "session.registered",
+                "actor_id": "canary-claude",
+                "payload": {"run_id": "c3-claude", "harness": "claude"},
+            },
+            {
+                "kind": "startup.hydrated",
+                "actor_id": "canary-claude",
+                "payload": {"run_id": "c3-claude", "harness": "claude"},
+            },
+        ]
+        operational = iter(
+            [
+                [queued],
+                [queued],
+                [
+                    queued,
+                    {
+                        "kind": "delivery.claimed",
+                        "message_id": "msg-1",
+                        "actor_id": "canary-claude",
+                        "payload": {"attempt": 1},
+                    },
+                    {
+                        "kind": "delivery.acked",
+                        "message_id": "msg-1",
+                        "actor_id": "canary-claude",
+                    },
+                    *lifecycle,
+                ],
+            ]
+        )
+        worker.operational_events = lambda: next(operational)
+        directories = iter(
+            [
+                {"actors": [{"actor": "canary-claude", "unclaimed_messages": 1, "active_claims": 0}]},
+                {"actors": [{"actor": "canary-claude", "unclaimed_messages": 1, "active_claims": 0}]},
+                {"actors": [{"actor": "canary-claude", "unclaimed_messages": 0, "active_claims": 0}]},
+            ]
+        )
+        worker.actor_directory = lambda: next(directories)
+        worker.stop_daemon = lambda: None
+        worker.start_daemon = lambda: None
+        worker.run_claude = lambda *args: ""
+
+        self.assertEqual(
+            worker.scenario_c3(),
+            ["daemon-restart", "client-reconnect", "no-message-loss", "no-duplicate-processing"],
+        )
+        self.assertIn("non-blocking", commands[0])
+        self.assertEqual(worker.active_check, "c3-terminal-lifecycle")
+
     def test_graceful_exit_sweeps_hook_monitor_process_group(self) -> None:
         process = object.__new__(PtyProcess)
         observed: list[signal.Signals] = []

@@ -1499,24 +1499,32 @@ class Worker:
             f"Use bus_inbox to claim the Holler message containing {token}, then bus_ack its lease. "
             "Stop after the acknowledgement succeeds.",
         )
-        self.active_check = "c3-terminal-delivery-state"
+        self.active_check = "c3-terminal-correlation"
         terminal_message_id = sent_message_id(
             self.durable_events(),
-            from_actor="canary-codex",
-            from_run="c3-codex",
+            from_actor="c3-controller",
+            from_run="c3-controller",
             recipient_actor="canary-claude",
         )
+        if terminal_message_id != message_id:
+            raise CanaryFailure("C3 message identity changed after client reconnect")
         events = self.operational_events()
-        if (
-            terminal_message_id != message_id
-            or delivery_event_attempts(events, message_id=message_id, actor="canary-claude") != [1]
-            or not delivery_was_acked(events, message_id=message_id, actor="canary-claude")
-            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (0, 0)
-            or not lifecycle_evidence_complete(
-                events, actor="canary-claude", run_id="c3-claude"
-            )
+        self.active_check = "c3-terminal-claim-attempts"
+        if delivery_event_attempts(
+            events, message_id=message_id, actor="canary-claude"
+        ) != [1]:
+            raise CanaryFailure("C3 delivery was not claimed exactly once after restart")
+        self.active_check = "c3-terminal-ack-event"
+        if not delivery_was_acked(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 delivery was not acknowledged after restart")
+        self.active_check = "c3-terminal-inbox-count"
+        if actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (0, 0):
+            raise CanaryFailure("C3 delivery remained in the inbox after acknowledgement")
+        self.active_check = "c3-terminal-lifecycle"
+        if not lifecycle_evidence_complete(
+            events, actor="canary-claude", run_id="c3-claude"
         ):
-            raise CanaryFailure("C3 delivery was not acknowledged exactly once after restart")
+            raise CanaryFailure("C3 Claude reconnect lifecycle evidence was incomplete")
         return ["daemon-restart", "client-reconnect", "no-message-loss", "no-duplicate-processing"]
 
     def scenario_c4(self) -> list[str]:
