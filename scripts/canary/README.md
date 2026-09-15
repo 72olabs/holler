@@ -5,18 +5,57 @@ private Claude Code and Codex canaries. It lets a coding agent prepare a test
 for any committed Git SHA without opening a pull request. The credentialed run
 is a separate, explicitly approved operation.
 
-The normal flow is:
+## Agent quickstart
+
+Coding agents use one front door and do not need the Daytona CLI or provider
+API details:
+
+```sh
+python3 scripts/canary/harness.py doctor
+python3 scripts/canary/harness.py doctor --execute
+python3 scripts/canary/harness.py check --tier core
+python3 scripts/canary/harness.py checkpoint --tier core --execute
+```
+
+The first doctor command is local and non-mutating and reports `LOCAL_READY`
+because it does not claim to know remote credential state. With `--execute`, it starts
+the existing persistent runner only when needed, verifies its policy and both
+OAuth sessions without printing account data, and restores its initial power
+state. The checkpoint command installs the pinned Daytona Python SDK into the
+gitignored `.runs/canary/venv` when necessary, builds the exact committed
+Linux artifact in an uncredentialed sandbox, and then stops with
+`APPROVAL_REQUIRED`. Inspect the generated request and plan, then paste the
+exact command it prints. That second invocation reuses the checksum-verified
+artifact and runs the credentialed canary. It will not accept `yes` or another
+generic approval in place of the exact request hash.
+
+Progress events are emitted as body-free JSON lines on stderr so an agent can
+report whether it is preparing the contract, installing the managed runtime,
+building or reusing an artifact, waiting for approval, or running the
+credentialed canary. The final machine-readable result is written to stdout.
+
+An operator must expose `DAYTONA_API_KEY` to the agent process and perform the
+one-time runner bootstrap and Claude/Codex interactive logins described below.
+Agents never need the key value in a prompt, and the harness never prints it.
+The common `core` workflow needs no other provider knowledge. The `release`
+and `extended` tiers additionally require the checksum-verified v0.7.1 Linux
+archive through `--upgrade-from`; `extended` builds and caches its pinned
+minimum-client bundle automatically.
+
+The underlying flow is:
 
 1. Commit the candidate changes on a topic branch.
 2. Prepare an immutable request for that commit.
 3. Run the fake driver and inspect the Daytona plan without spending tokens.
-4. Approve the printed `request_hash`.
-5. Run the approved request in Daytona using dedicated test subscriptions.
+4. Build the artifact and approve the printed `request_hash`.
+5. Rerun the printed command to execute the approved request using dedicated
+   test subscriptions.
 6. Fix on the branch, create another checkpoint commit, and repeat.
 7. Open the PR only after the release-tier canary passes; squash-merge after
    review.
 
-The zero-cost preparation steps are:
+The lower-level zero-cost preparation steps remain available for harness
+development and debugging:
 
 ```sh
 python3 scripts/canary/prepare.py \
@@ -87,6 +126,13 @@ Each run begins with a stop/start boundary, uses a private per-run directory,
 downloads body-free evidence, removes that directory, and stops the runner.
 Evidence contains IDs, hashes, versions, assertions, timings, and usage
 totals—not peer message bodies or auth files.
+
+The controller requests explicit sandbox domain allowlists on Daytona Tier 3
+and Tier 4. Daytona Tier 1 and Tier 2 reject sandbox overrides because their
+organization-level restriction is mandatory; on that exact response, the
+controller retries creation without an override and records
+`organization-tier` in the sandbox labels and build result. Other network
+policy errors fail closed. See [Daytona's network-limit semantics](https://www.daytona.io/docs/en/network-limits/#tier-based-network-restrictions).
 
 Use the provider probe only when you explicitly want to create a billable
 sandbox:

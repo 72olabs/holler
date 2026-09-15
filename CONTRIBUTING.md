@@ -49,16 +49,16 @@ and tree, test scenarios, client versions, low-cost models, and spend limits to
 one reviewable hash:
 
 ```sh
-python3 scripts/canary/prepare.py \
-  --ref HEAD \
-  --tier core \
-  --output .runs/canary/request.json
-python3 scripts/canary/run.py \
-  .runs/canary/request.json \
-  --driver fake \
-  --output .runs/canary/fake-evidence.json
-python3 scripts/canary/daytona_controller.py plan .runs/canary/request.json
+python3 scripts/canary/harness.py doctor
+python3 scripts/canary/harness.py doctor --execute
+python3 scripts/canary/harness.py check --tier core
+python3 scripts/canary/harness.py checkpoint --tier core --execute
 ```
+
+The final command builds the exact artifact and stops at the immutable request
+hash. Review it, then run the approval command printed by the harness. Agents
+do not need the Daytona CLI; provider setup and one-time subscription login are
+documented in [scripts/canary/README.md](scripts/canary/README.md).
 
 The committed defaults use Claude Haiku and `gpt-5.6-luna` at low reasoning
 effort. Model overrides require an explicit opt-in and become part of the

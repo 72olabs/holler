@@ -47,6 +47,10 @@ BUILDER_DOMAINS = [
 ]
 AUTH_ROOT = "/home/daytona/.holler-canary-auth"
 RUNNER_PURPOSE = "holler-canary-persistent-runner"
+NETWORK_POLICY_LABEL = "holler-network-policy"
+NETWORK_POLICY_SANDBOX = "sandbox-allowlist"
+NETWORK_POLICY_ORGANIZATION = "organization-tier"
+NETWORK_OVERRIDE_REJECTION = "Network access is restricted and cannot be overridden at the sandbox level"
 
 
 def claude_fixture_state_source(*, config_path: str, fixture: str, version: str) -> str:
@@ -115,8 +119,11 @@ def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
         },
         "network_policy": {
             "credentialed_sandbox_enforced": True,
-            "builder": BUILDER_DOMAINS,
-            "canary": CREDENTIAL_DOMAINS,
+            "requested_builder_domains": BUILDER_DOMAINS,
+            "requested_canary_domains": CREDENTIAL_DOMAINS,
+            "enforcement": (
+                "sandbox allowlist where supported; otherwise Daytona's mandatory organization-tier restriction"
+            ),
         },
         "budget": request["budget"],
         "models": {
@@ -198,12 +205,42 @@ def require_committed_controller(request: dict[str, Any], repo: Path) -> None:
         raise RuntimeError("scripts/canary has uncommitted changes; commit and prepare a new request")
 
 
+def create_with_network_policy(
+    daytona: Any,
+    params_type: Any,
+    *,
+    params: dict[str, Any],
+    domains: list[str],
+    timeout: int,
+    bad_request_type: type[Exception],
+) -> tuple[Any, str]:
+    """Use a sandbox allowlist when supported, or mandatory tier policy otherwise."""
+    sandbox_params = dict(params)
+    sandbox_labels = dict(sandbox_params.get("labels", {}))
+    sandbox_labels[NETWORK_POLICY_LABEL] = NETWORK_POLICY_SANDBOX
+    sandbox_params["labels"] = sandbox_labels
+    sandbox_params["domain_allow_list"] = ",".join(domains)
+    try:
+        return daytona.create(params_type(**sandbox_params), timeout=timeout), NETWORK_POLICY_SANDBOX
+    except bad_request_type as error:
+        if NETWORK_OVERRIDE_REJECTION not in str(error):
+            raise RuntimeError("Daytona rejected the requested sandbox network policy") from error
+    organization_params = dict(params)
+    organization_labels = dict(organization_params.get("labels", {}))
+    organization_labels[NETWORK_POLICY_LABEL] = NETWORK_POLICY_ORGANIZATION
+    organization_params["labels"] = organization_labels
+    return (
+        daytona.create(params_type(**organization_params), timeout=timeout),
+        NETWORK_POLICY_ORGANIZATION,
+    )
+
+
 def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[str, Any]:
     require_committed_controller(request, repo)
     require_daytona_key()
     try:
         from daytona import CreateSandboxFromSnapshotParams, Daytona
-        from daytona.common.errors import DaytonaNotFoundError
+        from daytona.common.errors import DaytonaBadRequestError, DaytonaNotFoundError
     except ImportError as error:
         raise RuntimeError(
             "Daytona SDK is missing; install scripts/canary/requirements-daytona.txt in an isolated venv"
@@ -234,16 +271,19 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
             validate_runner(credentialed_runner, execution)
             if sandbox_state(credentialed_runner) == "started":
                 credentialed_runner.stop(timeout=120)
-        sandbox = daytona.create(
-            CreateSandboxFromSnapshotParams(
-                language="python",
-                snapshot=execution["snapshot"],
-                ephemeral=True,
-                ttl_minutes=60,
-                labels={"purpose": "holler-canary-builder", "commit": source["commit"][:12]},
-                domain_allow_list=",".join(BUILDER_DOMAINS),
-            ),
+        sandbox, network_policy = create_with_network_policy(
+            daytona,
+            CreateSandboxFromSnapshotParams,
+            params={
+                "language": "python",
+                "snapshot": execution["snapshot"],
+                "ephemeral": True,
+                "ttl_minutes": 60,
+                "labels": {"purpose": "holler-canary-builder", "commit": source["commit"][:12]},
+            },
+            domains=BUILDER_DOMAINS,
             timeout=120,
+            bad_request_type=DaytonaBadRequestError,
         )
         try:
             sandbox.fs.upload_file(str(source_archive), "/tmp/holler-source.tar")
@@ -292,7 +332,12 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
             Path(str(output) + ".sha256").write_text(f"{digest}  {output.name}\n", encoding="utf-8")
         finally:
             sandbox.delete()
-    return {"status": "PASS", "artifact": str(output), "sha256": sha256_file(output)}
+    return {
+        "status": "PASS",
+        "artifact": str(output),
+        "sha256": sha256_file(output),
+        "network_policy": network_policy,
+    }
 
 
 def build_client_bundle(request: dict[str, Any], *, output: Path) -> dict[str, Any]:
@@ -301,7 +346,7 @@ def build_client_bundle(request: dict[str, Any], *, output: Path) -> dict[str, A
     require_daytona_key()
     try:
         from daytona import CreateSandboxFromSnapshotParams, Daytona
-        from daytona.common.errors import DaytonaNotFoundError
+        from daytona.common.errors import DaytonaBadRequestError, DaytonaNotFoundError
     except ImportError as error:
         raise RuntimeError(
             "Daytona SDK is missing; install scripts/canary/requirements-daytona.txt in an isolated venv"
@@ -316,16 +361,19 @@ def build_client_bundle(request: dict[str, Any], *, output: Path) -> dict[str, A
         validate_runner(runner, execution)
         if sandbox_state(runner) == "started":
             runner.stop(timeout=120)
-    sandbox = daytona.create(
-        CreateSandboxFromSnapshotParams(
-            language="python",
-            snapshot=execution["snapshot"],
-            ephemeral=True,
-            ttl_minutes=30,
-            labels={"purpose": "holler-canary-client-bundle"},
-            domain_allow_list=",".join(BUILDER_DOMAINS),
-        ),
+    sandbox, network_policy = create_with_network_policy(
+        daytona,
+        CreateSandboxFromSnapshotParams,
+        params={
+            "language": "python",
+            "snapshot": execution["snapshot"],
+            "ephemeral": True,
+            "ttl_minutes": 30,
+            "labels": {"purpose": "holler-canary-client-bundle"},
+        },
+        domains=BUILDER_DOMAINS,
         timeout=120,
+        bad_request_type=DaytonaBadRequestError,
     )
     try:
         claude = MINIMUM_CLIENTS["claude"]
@@ -356,7 +404,12 @@ def build_client_bundle(request: dict[str, Any], *, output: Path) -> dict[str, A
         sandbox.fs.download_file("/tmp/holler-client-matrix.tar.gz", str(output))
     finally:
         sandbox.delete()
-    return {"status": "PASS", "artifact": str(output), "sha256": sha256_file(output)}
+    return {
+        "status": "PASS",
+        "artifact": str(output),
+        "sha256": sha256_file(output),
+        "network_policy": network_policy,
+    }
 
 
 def validate_fixture(request: dict[str, Any], name: str, path: Path | None) -> Path | None:
@@ -478,7 +531,11 @@ def validate_runner(sandbox: Any, execution: dict[str, Any]) -> None:
         raise RuntimeError("credentialed runner must have auto-delete disabled")
     if sandbox.auto_stop_interval != execution["runner_auto_stop_minutes"]:
         raise RuntimeError("credentialed runner auto-stop does not match the approved request")
-    if sandbox.domain_allow_list != ",".join(CREDENTIAL_DOMAINS):
+    policy = sandbox.labels.get(NETWORK_POLICY_LABEL, "")
+    if policy == NETWORK_POLICY_ORGANIZATION:
+        if sandbox.domain_allow_list not in (None, ""):
+            raise RuntimeError("organization-tier runner unexpectedly has a sandbox domain allowlist")
+    elif sandbox.domain_allow_list != ",".join(CREDENTIAL_DOMAINS):
         raise RuntimeError("credentialed runner domain allowlist does not match the controller policy")
     expected_env = {
         "CLAUDE_CONFIG_DIR": f"{AUTH_ROOT}/claude",
@@ -500,7 +557,7 @@ def create_auth_runner(request: dict[str, Any]) -> dict[str, Any]:
     require_daytona_key()
     try:
         from daytona import CreateSandboxFromSnapshotParams, Daytona
-        from daytona.common.errors import DaytonaNotFoundError
+        from daytona.common.errors import DaytonaBadRequestError, DaytonaNotFoundError
     except ImportError as error:
         raise RuntimeError(
             "Daytona SDK is missing; install scripts/canary/requirements-daytona.txt in an isolated venv"
@@ -512,20 +569,23 @@ def create_auth_runner(request: dict[str, Any]) -> dict[str, Any]:
         sandbox = daytona.get(execution["runner_name"])
     except DaytonaNotFoundError:
         reused = False
-        sandbox = daytona.create(
-            CreateSandboxFromSnapshotParams(
-                name=execution["runner_name"],
-                language="python",
-                snapshot=execution["snapshot"],
-                auto_stop_interval=execution["runner_auto_stop_minutes"],
-                labels={"purpose": RUNNER_PURPOSE},
-                domain_allow_list=",".join(CREDENTIAL_DOMAINS),
-                env_vars={
+        sandbox, _ = create_with_network_policy(
+            daytona,
+            CreateSandboxFromSnapshotParams,
+            params={
+                "name": execution["runner_name"],
+                "language": "python",
+                "snapshot": execution["snapshot"],
+                "auto_stop_interval": execution["runner_auto_stop_minutes"],
+                "labels": {"purpose": RUNNER_PURPOSE},
+                "env_vars": {
                     "CLAUDE_CONFIG_DIR": f"{AUTH_ROOT}/claude",
                     "CODEX_HOME": f"{AUTH_ROOT}/codex",
                 },
-            ),
+            },
+            domains=CREDENTIAL_DOMAINS,
             timeout=120,
+            bad_request_type=DaytonaBadRequestError,
         )
     validate_runner(sandbox, execution)
     start_runner(sandbox)
@@ -565,6 +625,54 @@ def create_auth_runner(request: dict[str, Any]) -> dict[str, Any]:
             "project-trust state for the dedicated empty fixture; stop/start preserves OAuth."
         ),
     }
+
+
+def inspect_auth_runner(request: dict[str, Any]) -> dict[str, Any]:
+    """Verify runner policy and both OAuth sessions without exposing account data."""
+    require_committed_controller(request, SCRIPT_DIR.parent.parent)
+    require_daytona_key()
+    try:
+        from daytona import Daytona
+        from daytona.common.errors import DaytonaNotFoundError
+    except ImportError as error:
+        raise RuntimeError(
+            "Daytona SDK is missing; install scripts/canary/requirements-daytona.txt in an isolated venv"
+        ) from error
+    execution = request["execution"]
+    daytona = Daytona()
+    try:
+        sandbox = daytona.get(execution["runner_name"])
+    except DaytonaNotFoundError:
+        return {
+            "status": "ACTION_REQUIRED",
+            "runner": "missing",
+            "operator_action": "create the persistent runner and complete both interactive logins",
+        }
+    validate_runner(sandbox, execution)
+    originally_started = sandbox_state(sandbox) == "started"
+    start_runner(sandbox)
+    try:
+        auth = {}
+        for client, command in (
+            ("claude", "claude auth status >/dev/null 2>&1"),
+            ("codex", "codex login status >/dev/null 2>&1"),
+        ):
+            response = sandbox.process.exec(command, timeout=60)
+            auth[client] = "READY" if response.exit_code == 0 else "LOGIN_REQUIRED"
+    finally:
+        if not originally_started:
+            sandbox.stop(timeout=120)
+    ready = all(value == "READY" for value in auth.values())
+    result: dict[str, Any] = {
+        "status": "READY" if ready else "ACTION_REQUIRED",
+        "runner": execution["runner_name"],
+        "runner_policy": "PASS",
+        "oauth": auth,
+        "restored_initial_power_state": True,
+    }
+    if not ready:
+        result["operator_action"] = "open the persistent runner and log in the clients marked LOGIN_REQUIRED"
+    return result
 
 
 def run_daytona(
