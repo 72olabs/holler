@@ -28,11 +28,11 @@ DEFAULT_CLIENTS = {
 MINIMUM_CLIENTS = {
     "claude": {
         "version": "2.1.247",
-        "relative_binary": "claude/node_modules/@anthropic-ai/claude-code/cli.js",
+        "relative_binary": "claude/node_modules/.bin/claude",
     },
     "codex": {
         "version": "0.149.1",
-        "relative_binary": "codex/node_modules/@openai/codex/bin/codex.js",
+        "relative_binary": "codex/node_modules/.bin/codex",
     },
 }
 

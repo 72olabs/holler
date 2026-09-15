@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import posixpath
 import pty
 import re
 import selectors
@@ -158,12 +159,23 @@ def safe_extract(archive: Path, destination: Path) -> Path:
     with tarfile.open(archive, "r:gz") as bundle:
         members = bundle.getmembers()
         roots = set()
+        member_names = {member.name.rstrip("/") for member in members}
+        symlink_names = {member.name.rstrip("/") for member in members if member.issym()}
         for member in members:
             path = Path(member.name)
             if path.is_absolute() or ".." in path.parts or not path.parts:
                 raise CanaryFailure(f"unsafe archive path: {member.name}")
-            if not (member.isdir() or member.isfile()):
+            if member.issym():
+                if posixpath.isabs(member.linkname):
+                    raise CanaryFailure(f"unsafe archive link: {member.name}")
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(member.name), member.linkname))
+                if target.startswith("../") or target not in member_names:
+                    raise CanaryFailure(f"unsafe archive link target: {member.name}")
+            elif not (member.isdir() or member.isfile()):
                 raise CanaryFailure(f"unsupported archive member: {member.name}")
+            for link in symlink_names:
+                if member.name.rstrip("/") != link and member.name.startswith(link + "/"):
+                    raise CanaryFailure(f"archive member descends through a symlink: {member.name}")
             roots.add(path.parts[0])
         if len(roots) != 1:
             raise CanaryFailure("archive must contain exactly one root directory")

@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 import tempfile
+import tarfile
 import unittest
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -32,10 +33,27 @@ from worker import (
     parse_version,
     terminal_query_responses,
     Worker,
+    safe_extract,
 )
 
 
 class WorkerTests(unittest.TestCase):
+    def test_safe_extract_accepts_internal_binary_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source" / "bundle"
+            target = source / "node_modules" / "package" / "cli.js"
+            target.parent.mkdir(parents=True)
+            target.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+            binary = source / "node_modules" / ".bin" / "client"
+            binary.parent.mkdir()
+            binary.symlink_to("../package/cli.js")
+            archive = root / "bundle.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                bundle.add(source, arcname="bundle")
+            extracted = safe_extract(archive, root / "output")
+            self.assertEqual((extracted / "node_modules" / ".bin" / "client").read_text(), "#!/usr/bin/env node\n")
+
     def test_c7_budget_cutoffs_and_teardown_are_zero_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             worker = Worker.__new__(Worker)

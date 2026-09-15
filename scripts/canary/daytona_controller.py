@@ -342,7 +342,7 @@ def build_client_bundle(request: dict[str, Any], *, output: Path) -> dict[str, A
                 f"= {shlex.quote(claude['version'])}",
                 f"test \"$(/tmp/holler-client-matrix/{codex['relative_binary']} --version | awk '{{print $NF}}')\" "
                 f"= {shlex.quote(codex['version'])}",
-                "tar --dereference -czf /tmp/holler-client-matrix.tar.gz -C /tmp holler-client-matrix",
+                "tar -czf /tmp/holler-client-matrix.tar.gz -C /tmp holler-client-matrix",
             ]
         )
         response = sandbox.process.exec(command, timeout=600)
