@@ -3,21 +3,28 @@ from __future__ import annotations
 import json
 import io
 import os
+import signal
 import sys
 from pathlib import Path
 import tempfile
 import tarfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from daytona_controller import make_runtime_bundle
+from budget import BudgetLedger
+from handler_contract import HandlerContractError, load_handler
 from worker import (
     actor_delivery_counts,
     actor_for_run,
     alias_collision_visible,
     CanaryFailure,
+    BudgetedInteractiveSession,
+    HandlerContext,
     PtyProcess,
     claude_fixture_ready,
     claude_cost,
@@ -25,13 +32,16 @@ from worker import (
     codex_config_with_trusted_fixture,
     codex_hook_trust_ready,
     delivery_event_attempts,
+    delivery_was_queued,
     delivery_was_acked,
     doctor_command,
     lifecycle_evidence_complete,
     make_failure_evidence,
     marker_instruction,
+    sent_message_id,
     minted_actors,
     parse_version,
+    run_with_timeout,
     terminal_query_responses,
     Worker,
     safe_extract,
@@ -39,6 +49,267 @@ from worker import (
 
 
 class WorkerTests(unittest.TestCase):
+    def test_c3_uses_one_controller_message_across_restart_and_terminal_state(self) -> None:
+        worker = object.__new__(Worker)
+        worker.request = {"request_hash": "sha256:" + "a" * 64}
+        worker.holler = Path("/test/holler")
+        worker.socket = Path("/test/holler.sock")
+        worker.active_check = "initialization"
+        commands: list[list[str]] = []
+        worker.json_command = lambda command: (
+            commands.append(command) or {"message": {"message_id": "msg-1"}}
+        )
+        worker.durable_events = lambda: [
+            {
+                "kind": "message.sent",
+                "message_id": "msg-1",
+                "actor_id": "c3-controller",
+                "payload": {
+                    "from_run": "c3-controller",
+                    "recipients": ["canary-claude"],
+                },
+            }
+        ]
+        queued = {
+            "kind": "delivery.queued",
+            "message_id": "msg-1",
+            "actor_id": "canary-claude",
+        }
+        lifecycle = [
+            {
+                "kind": "session.registered",
+                "actor_id": "canary-claude",
+                "payload": {"run_id": "c3-claude", "harness": "claude"},
+            },
+            {
+                "kind": "startup.hydrated",
+                "actor_id": "canary-claude",
+                "payload": {"run_id": "c3-claude", "harness": "claude"},
+            },
+        ]
+        operational = iter(
+            [
+                [queued],
+                [queued],
+                [
+                    queued,
+                    {
+                        "kind": "delivery.claimed",
+                        "message_id": "msg-1",
+                        "actor_id": "canary-claude",
+                        "payload": {"attempt": 1},
+                    },
+                    {
+                        "kind": "delivery.acked",
+                        "message_id": "msg-1",
+                        "actor_id": "canary-claude",
+                    },
+                    *lifecycle,
+                ],
+            ]
+        )
+        worker.operational_events = lambda: next(operational)
+        directories = iter(
+            [
+                {"actors": [{"actor": "canary-claude", "unclaimed_messages": 1, "active_claims": 0}]},
+                {"actors": [{"actor": "canary-claude", "unclaimed_messages": 1, "active_claims": 0}]},
+                {"actors": [{"actor": "canary-claude", "unclaimed_messages": 0, "active_claims": 0}]},
+            ]
+        )
+        worker.actor_directory = lambda: next(directories)
+        worker.stop_daemon = lambda: None
+        worker.start_daemon = lambda: None
+        worker.run_claude = lambda *args: ""
+
+        self.assertEqual(
+            worker.scenario_c3(),
+            ["daemon-restart", "client-reconnect", "no-message-loss", "no-duplicate-processing"],
+        )
+        self.assertIn("non-blocking", commands[0])
+        self.assertEqual(worker.active_check, "c3-terminal-lifecycle")
+
+    def test_graceful_exit_sweeps_hook_monitor_process_group(self) -> None:
+        process = object.__new__(PtyProcess)
+        observed: list[signal.Signals] = []
+        process._signal = observed.append
+        with patch("worker.time.sleep"):
+            process._sweep_process_group()
+        self.assertEqual(observed, [signal.SIGTERM, signal.SIGKILL])
+
+    def test_wait_for_no_live_registration_accepts_ended_session(self) -> None:
+        worker = SimpleNamespace(
+            actor_directory=lambda: {
+                "actors": [
+                    {
+                        "actor": "canary-claude",
+                        "sessions": [
+                            {
+                                "run_id": "c2-claude",
+                                "harness": "claude",
+                                "state": "ended",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        Worker.wait_for_no_live_registration(
+            worker,
+            "canary-claude",
+            "c2-claude",
+            harness="claude",
+            timeout=0.01,
+        )
+
+    def test_wait_for_no_live_registration_rejects_wrong_actor(self) -> None:
+        worker = SimpleNamespace(
+            actor_directory=lambda: {
+                "actors": [
+                    {
+                        "actor": "unexpected-actor",
+                        "sessions": [
+                            {
+                                "run_id": "c2-claude",
+                                "harness": "claude",
+                                "state": "live",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        with self.assertRaisesRegex(CanaryFailure, "unexpected actor"):
+            Worker.wait_for_no_live_registration(
+                worker,
+                "canary-claude",
+                "c2-claude",
+                harness="claude",
+                timeout=0.01,
+            )
+
+    def test_sent_message_id_correlates_body_free_durable_event(self) -> None:
+        events = [
+            {
+                "kind": "message.sent",
+                "message_id": "msg-1",
+                "actor_id": "sender",
+                "payload": {"from_run": "run-1", "recipients": ["recipient"]},
+            },
+            {
+                "kind": "message.sent",
+                "message_id": "msg-other",
+                "actor_id": "sender",
+                "payload": {"from_run": "other-run", "recipients": ["recipient"]},
+            },
+        ]
+        self.assertEqual(
+            sent_message_id(
+                events,
+                from_actor="sender",
+                from_run="run-1",
+                recipient_actor="recipient",
+            ),
+            "msg-1",
+        )
+
+    def test_sent_message_id_rejects_missing_or_duplicate_correlations(self) -> None:
+        with self.assertRaisesRegex(CanaryFailure, "exactly one sent message"):
+            sent_message_id(
+                [], from_actor="sender", from_run="run-1", recipient_actor="recipient"
+            )
+        duplicate = {
+            "kind": "message.sent",
+            "message_id": "msg-1",
+            "actor_id": "sender",
+            "payload": {"from_run": "run-1", "recipients": ["recipient"]},
+        }
+        with self.assertRaisesRegex(CanaryFailure, "exactly one sent message"):
+            sent_message_id(
+                [duplicate, {**duplicate, "message_id": "msg-2"}],
+                from_actor="sender",
+                from_run="run-1",
+                recipient_actor="recipient",
+            )
+
+    def test_delivery_was_queued_requires_same_message_and_actor(self) -> None:
+        events = [
+            {"kind": "delivery.queued", "message_id": "msg-1", "actor_id": "recipient"},
+            {"kind": "delivery.queued", "message_id": "msg-2", "actor_id": "other"},
+        ]
+        self.assertTrue(delivery_was_queued(events, message_id="msg-1", actor="recipient"))
+        self.assertFalse(delivery_was_queued(events, message_id="msg-1", actor="other"))
+
+    def test_handler_context_has_no_raw_worker_reference(self) -> None:
+        worker = SimpleNamespace(
+            fixture=Path("/tmp/fixture"),
+            request={
+                "request_hash": "sha256:" + "a" * 64,
+                "clients": {"claude": {}, "codex": {}},
+            },
+            run_claude=lambda *args: "",
+            run_codex=lambda *args: "",
+            wait_for_live_registration=lambda *args: None,
+            handler_query=lambda *args, **kwargs: {},
+            launcher=lambda *args: [],
+            env={},
+            ledger=BudgetLedger({
+                "claude_usd": 1.0,
+                "codex_reported_tokens": 100,
+                "model_turns": 2,
+                "wall_seconds": 60,
+            }),
+            active_check="initialization",
+        )
+        context = HandlerContext(worker)
+        self.assertFalse(hasattr(context, "worker"))
+        self.assertFalse(hasattr(context, "__dict__"))
+        self.assertEqual(context.marker("C9_DONE"), "C9_DONE_AAAAAAAAAAAA")
+
+    def test_interactive_turn_charges_only_after_expected_marker(self) -> None:
+        limits = {
+            "claude_usd": 1.0,
+            "codex_reported_tokens": 100,
+            "model_turns": 2,
+            "wall_seconds": 60,
+        }
+        ledger = BudgetLedger(limits)
+        session = BudgetedInteractiveSession(
+            client="codex",
+            actor="c9-codex",
+            run_id="c9-run",
+            extra_args=(),
+            config={},
+            launcher=lambda *args: [],
+            wait_for_registration=lambda *args: None,
+            fixture=Path("/tmp/fixture"),
+            env={},
+            ledger=ledger,
+            marker_suffix="AAAAAAAAAAAA",
+        )
+        session.process = SimpleNamespace(submit=lambda *args, **kwargs: None)
+        session.turn("encoded completion instruction", "C9_DONE_AAAAAAAAAAAA", timeout=1)
+        self.assertEqual(ledger.model_turns, 1)
+
+        failing = BudgetedInteractiveSession(
+            client="codex",
+            actor="c9-codex",
+            run_id="c9-fail",
+            extra_args=(),
+            config={},
+            launcher=lambda *args: [],
+            wait_for_registration=lambda *args: None,
+            fixture=Path("/tmp/fixture"),
+            env={},
+            ledger=ledger,
+            marker_suffix="AAAAAAAAAAAA",
+        )
+        failing.process = SimpleNamespace(
+            submit=lambda *args, **kwargs: (_ for _ in ()).throw(CanaryFailure("missing marker"))
+        )
+        with self.assertRaisesRegex(CanaryFailure, "missing marker"):
+            failing.turn("encoded completion instruction", "C9_FAIL_AAAAAAAAAAAA", timeout=1)
+        self.assertEqual(ledger.model_turns, 1)
+
     def test_safe_extract_accepts_internal_binary_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -96,6 +367,119 @@ class WorkerTests(unittest.TestCase):
                     "clean-teardown",
                 ],
             )
+
+    def test_committed_custom_handler_runs_and_reports_declared_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            handlers = root / "handlers"
+            handlers.mkdir()
+            (handlers / "C9.py").write_text(
+                'def run(context):\n    return ["contributor-check"]\n',
+                encoding="utf-8",
+            )
+            worker = Worker.__new__(Worker)
+            worker.request = {
+                "request_hash": "sha256:request",
+                "source": {"commit": "abc"},
+                "tier": "core",
+                "scenarios": [
+                    {
+                        "id": "C9",
+                        "name": "Contributor scenario",
+                        "estimated_model_turns": 0,
+                        "timeout_seconds": 180,
+                        "checks": ["contributor-check"],
+                    }
+                ],
+                "budget": {
+                    "claude_usd": 0.5,
+                    "codex_reported_tokens": 250_000,
+                    "model_turns": 8,
+                    "wall_seconds": 1800,
+                },
+            }
+            worker.results = []
+            worker.fixture = root
+            worker.ledger = SimpleNamespace(model_turns=0, as_dict=lambda: {"model_turns": 0})
+            worker.prepare = lambda: None
+            with patch("worker.SCRIPT_DIR", root):
+                evidence = worker.run()
+            self.assertEqual(evidence["results"][0]["assertions"], [
+                {"name": "contributor-check", "status": "PASS"}
+            ])
+            self.assertEqual(evidence["results"][0]["estimated_model_turns"], 0)
+            self.assertEqual(evidence["results"][0]["observed_model_turns"], 0)
+
+    def test_custom_handler_assertions_must_match_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            handlers = root / "handlers"
+            handlers.mkdir()
+            (handlers / "C9.py").write_text(
+                'def run(context):\n    return ["undeclared-check"]\n',
+                encoding="utf-8",
+            )
+            worker = Worker.__new__(Worker)
+            worker.request = {
+                "request_hash": "sha256:request",
+                "source": {"commit": "abc"},
+                "tier": "core",
+                "scenarios": [{
+                    "id": "C9",
+                    "name": "Contributor scenario",
+                    "estimated_model_turns": 0,
+                    "timeout_seconds": 180,
+                    "checks": ["declared-check"],
+                }],
+                "budget": {
+                    "claude_usd": 0.5,
+                    "codex_reported_tokens": 250_000,
+                    "model_turns": 8,
+                    "wall_seconds": 1800,
+                },
+            }
+            worker.results = []
+            worker.fixture = root
+            worker.ledger = SimpleNamespace(model_turns=0, as_dict=lambda: {"model_turns": 0})
+            worker.prepare = lambda: None
+            with patch("worker.SCRIPT_DIR", root), self.assertRaisesRegex(
+                CanaryFailure,
+                "assertions do not match",
+            ):
+                worker.run()
+
+    def test_custom_handler_requires_callable_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "C9.py"
+            path.write_text("VALUE = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(HandlerContractError, "must define callable run"):
+                load_handler(path)
+
+    def test_custom_handler_import_failure_reports_only_error_type(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "C9.py"
+            path.write_text('raise RuntimeError("private detail")\n', encoding="utf-8")
+            with self.assertRaises(HandlerContractError) as raised:
+                load_handler(path)
+            self.assertIn("RuntimeError", str(raised.exception))
+            self.assertNotIn("private detail", str(raised.exception))
+
+    def test_custom_handler_static_tripwire_rejects_process_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "C9.py"
+            path.write_text("import subprocess\ndef run(context): return []\n", encoding="utf-8")
+            with self.assertRaisesRegex(HandlerContractError, "static tripwire"):
+                load_handler(path)
+
+    def test_scenario_timeout_is_enforced(self) -> None:
+        def expire() -> list[str]:
+            try:
+                signal.pause()
+            except Exception:
+                return []
+
+        with self.assertRaisesRegex(CanaryFailure, "C9 exceeded its 1-second timeout"):
+            run_with_timeout(expire, 1, "C9")
 
     def test_usage_parsers(self) -> None:
         events = "\n".join(
@@ -366,6 +750,7 @@ class WorkerTests(unittest.TestCase):
             with tarfile.open(path, "r:gz") as bundle:
                 names = set(bundle.getnames())
         self.assertIn("holler-canary/worker.py", names)
+        self.assertIn("holler-canary/handler_contract.py", names)
         self.assertIn("holler-canary/scenarios/C0.json", names)
         self.assertFalse(any("tests" in name for name in names))
 

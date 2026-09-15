@@ -1,3 +1,38 @@
+# Holler 0.7.4
+
+Holler 0.7.4 strengthens Claude identity continuity and makes release testing
+repeatable for both maintainers and coding agents.
+
+## Changes
+
+- Preserve allocated Claude identities across lifecycle hooks, MCP processes,
+  resumed print sessions, and SDK-style launches without permitting silent
+  inbox takeover.
+- Add one deterministic CI entrypoint with package allowlist, build-identity,
+  setup/removal, daemon lifecycle, and extracted-product black-box checks.
+- Add token-budgeted C0-C8 real-client canaries with isolated Daytona build and
+  credential runners, checksum-bound requests and evidence, low-cost model
+  defaults, an exact-hash approval gate, and body-free durable-state assertions
+  that do not depend on agents echoing completion markers.
+- Add an agent-facing `doctor`/`check`/`checkpoint` workflow that hides provider
+  mechanics, preserves OAuth state in one persistent runner, and can test any
+  committed branch checkpoint before a pull request.
+- Allow contributors to add reviewable custom canaries through paired scenario
+  definitions and handlers. Selected handlers are validated before building,
+  receive a narrow budget-aware context, and must report exactly their declared
+  assertions and model-turn estimate.
+
+## Compatibility and validation
+
+- Wire protocol 1, database schema 15, and the frozen MCP tool surface are
+  unchanged from 0.7.3.
+- The deterministic Go, race, canary-control, packaging, archive, and packaged
+  black-box suites pass on the release candidate.
+- Real-client release evidence is produced separately so subscription
+  credentials and peer message bodies never enter the repository or artifacts.
+
+---
+
 # Holler 0.7.3
 
 Holler 0.7.3 is a release-hygiene update. It removes internal Claude Channel

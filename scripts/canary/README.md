@@ -5,18 +5,57 @@ private Claude Code and Codex canaries. It lets a coding agent prepare a test
 for any committed Git SHA without opening a pull request. The credentialed run
 is a separate, explicitly approved operation.
 
-The normal flow is:
+## Agent quickstart
+
+Coding agents use one front door and do not need the Daytona CLI or provider
+API details:
+
+```sh
+python3 scripts/canary/harness.py doctor
+python3 scripts/canary/harness.py doctor --execute
+python3 scripts/canary/harness.py check --tier core
+python3 scripts/canary/harness.py checkpoint --tier core --execute
+```
+
+The first doctor command is local and non-mutating and reports `LOCAL_READY`
+because it does not claim to know remote credential state. With `--execute`, it starts
+the existing persistent runner only when needed, verifies its policy and both
+OAuth sessions without printing account data, and restores its initial power
+state. The checkpoint command installs the pinned Daytona Python SDK into the
+gitignored `.runs/canary/venv` when necessary, builds the exact committed
+Linux artifact in an uncredentialed sandbox, and then stops with
+`APPROVAL_REQUIRED`. Inspect the generated request and plan, then paste the
+exact command it prints. That second invocation reuses the checksum-verified
+artifact and runs the credentialed canary. It will not accept `yes` or another
+generic approval in place of the exact request hash.
+
+Progress events are emitted as body-free JSON lines on stderr so an agent can
+report whether it is preparing the contract, installing the managed runtime,
+building or reusing an artifact, waiting for approval, or running the
+credentialed canary. The final machine-readable result is written to stdout.
+
+An operator must expose `DAYTONA_API_KEY` to the agent process and perform the
+one-time runner bootstrap and Claude/Codex interactive logins described below.
+Agents never need the key value in a prompt, and the harness never prints it.
+The common `core` workflow needs no other provider knowledge. The `release`
+and `extended` tiers additionally require the checksum-verified v0.7.1 Linux
+archive through `--upgrade-from`; `extended` builds and caches its pinned
+minimum-client bundle automatically.
+
+The underlying flow is:
 
 1. Commit the candidate changes on a topic branch.
 2. Prepare an immutable request for that commit.
 3. Run the fake driver and inspect the Daytona plan without spending tokens.
-4. Approve the printed `request_hash`.
-5. Run the approved request in Daytona using dedicated test subscriptions.
+4. Build the artifact and approve the printed `request_hash`.
+5. Rerun the printed command to execute the approved request using dedicated
+   test subscriptions.
 6. Fix on the branch, create another checkpoint commit, and repeat.
 7. Open the PR only after the release-tier canary passes; squash-merge after
    review.
 
-The zero-cost preparation steps are:
+The lower-level zero-cost preparation steps remain available for harness
+development and debugging:
 
 ```sh
 python3 scripts/canary/prepare.py \
@@ -41,13 +80,55 @@ scenario, model, and budget hashes, but never credentials or message bodies.
 | Tier | Scenarios | Model turns | Intended use |
 |---|---|---:|---|
 | `preflight` | C0 | 0 | Packaging and environment only |
-| `core` | C0-C3 | 8 | Checkpoint commits and pre-PR canaries |
-| `release` | C0-C4, C6 | 12 | Release candidate gate |
-| `extended` | C0-C8 | 24 | Scheduled compatibility and failure testing |
+| `core` | C0-C3 | 7 | Checkpoint commits and pre-PR canaries |
+| `release` | C0-C4, C6 | 11 | Release candidate gate |
+| `extended` | C0-C8 | 23 | Scheduled compatibility and failure testing |
 
 The scenario files are data rather than executable prompts. This keeps the
 test contract reviewable and gives the local fake driver and the remote worker
 the same IDs, timeouts, assertions, and estimated model-turn count.
+
+Spend model turns only on the behavior a scenario is meant to prove. Use the
+controller's versioned Holler API for deterministic setup and teardown unless
+the scenario explicitly tests a real client's ability to perform that action.
+
+### Adding and selecting a scenario
+
+Contributors can add a test without changing a tier:
+
+1. Choose the next unused numeric ID and add
+   `scripts/canary/scenarios/C9.json`.
+2. Add `scripts/canary/handlers/C9.py` with a `run(context)` function. Return
+   the JSON file's assertion names in exactly the declared order; a mismatch
+   fails the canary rather than publishing incomplete evidence.
+3. Add deterministic tests for helper or parsing logic under
+   `scripts/canary/tests/` and run `./scripts/ci/run.sh`.
+4. Commit the scenario, handler, and tests. The credentialed runner refuses an
+   uncommitted canary controller.
+5. Select the scenario through the normal front door:
+
+```sh
+python3 scripts/canary/harness.py check --tier core --scenario C9
+python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
+```
+
+Repeat `--scenario` to compose an ad hoc run. Explicit selection replaces the
+tier's default scenario list, while `--tier` remains the hard spend and wall
+clock envelope. C0 is always prepended, unknown and duplicate IDs are rejected,
+and each selection gets its own directory under `.runs/canary/checkpoints/`.
+The request hash binds the exact commit, scenario definitions, clients,
+artifact, and budget before any model call.
+
+Custom code runs beside subscription credentials, so handlers must be public,
+committed, reviewed code. `HandlerContext` prevents accidental unbudgeted use;
+it is not a security sandbox. Commit review plus exact-tree approval remains
+the credential boundary. The harness deliberately does not accept arbitrary
+script paths or load code from gitignored directories. It imports each selected
+handler in a short-lived credential-free process before building, enforces the
+declared per-scenario timeout and exact model-turn estimate, and applies a static
+tripwire against direct process, PTY, socket, signal, or Worker access. See
+[`handlers/README.md`](handlers/README.md) for the handler contract and worker
+helpers.
 
 ## Cost controls
 
@@ -88,6 +169,13 @@ downloads body-free evidence, removes that directory, and stops the runner.
 Evidence contains IDs, hashes, versions, assertions, timings, and usage
 totals—not peer message bodies or auth files.
 
+The controller requests explicit sandbox domain allowlists on Daytona Tier 3
+and Tier 4. Daytona Tier 1 and Tier 2 reject sandbox overrides because their
+organization-level restriction is mandatory; on that exact response, the
+controller retries creation without an override and records
+`organization-tier` in the sandbox labels and build result. Other network
+policy errors fail closed. See [Daytona's network-limit semantics](https://www.daytona.io/docs/en/network-limits/#tier-based-network-restrictions).
+
 Use the provider probe only when you explicitly want to create a billable
 sandbox:
 
@@ -113,8 +201,9 @@ DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
   --execute
 ```
 
-The `run` command accepts the `core` tier today. It uploads only the approved
-archive, request, and small worker bundle; runs C0-C3; downloads body-free
+The `run` command accepts any validated built-in tier or explicit scenario
+selection. It uploads only the approved archive, request, and small worker bundle;
+downloads body-free
 evidence; removes the per-run files; and stops the persistent runner in a
 `finally` block. `--keep-on-failure` is available only for deliberate
 debugging.

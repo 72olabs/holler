@@ -79,6 +79,24 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ManifestError, "requirement does not match"):
             validate_request(request)
 
+    def test_explicit_scenarios_use_tier_as_budget_envelope(self) -> None:
+        request = create_request(
+            REPO,
+            ref="HEAD",
+            tier="core",
+            scenario_ids=["C4"],
+            clients=client_policy(),
+        )
+        self.assertEqual([item["id"] for item in request["scenarios"]], ["C0", "C4"])
+        self.assertEqual(request["budget"]["model_turns"], 8)
+
+    def test_request_without_c0_is_rejected_even_when_rehashed(self) -> None:
+        request = create_request(REPO, ref="HEAD", tier="core", clients=client_policy())
+        request["scenarios"] = request["scenarios"][1:]
+        request["request_hash"] = request_hash(request)
+        with self.assertRaisesRegex(ManifestError, "C0 must be the first"):
+            validate_request(request)
+
 
 if __name__ == "__main__":
     unittest.main()

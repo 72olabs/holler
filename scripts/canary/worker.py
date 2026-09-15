@@ -21,6 +21,7 @@ import sys
 import tarfile
 import tempfile
 import termios
+import threading
 import time
 import tomllib
 from typing import Any
@@ -37,10 +38,10 @@ from clients import (  # noqa: E402
     codex_exec_command,
     codex_live_command,
 )
+from handler_contract import HandlerContractError, handler_path, load_handler  # noqa: E402
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
 
 
-SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"}
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 TERMINAL_QUERY_RESPONSES = {
     b"\x1b[6n": b"\x1b[1;1R",
@@ -73,6 +74,33 @@ class CanaryFailure(RuntimeError):
     pass
 
 
+class ScenarioTimeout(BaseException):
+    """Internal timeout signal that ordinary handler exception blocks cannot swallow."""
+
+
+def run_with_timeout(handler: Any, seconds: int, scenario_id: str) -> list[str]:
+    """Enforce a scenario's committed wall-clock limit inside the worker process."""
+    if threading.current_thread() is not threading.main_thread():
+        raise CanaryFailure("scenario timeouts require the worker main thread")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def timeout_handler(_signum: int, _frame: Any) -> None:
+        raise ScenarioTimeout
+
+    signal.signal(signal.SIGALRM, timeout_handler)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, float(seconds))
+    try:
+        try:
+            return handler()
+        except ScenarioTimeout as error:
+            raise CanaryFailure(
+                f"scenario {scenario_id} exceeded its {seconds}-second timeout"
+            ) from error
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 class PtyChild:
     """Small wait/poll adapter for a child created by forkpty."""
 
@@ -336,6 +364,52 @@ def delivery_event_attempts(events: object, *, message_id: str, actor: str) -> l
     return attempts
 
 
+def sent_message_id(
+    events: object,
+    *,
+    from_actor: str,
+    from_run: str,
+    recipient_actor: str,
+) -> str:
+    """Resolve one sent message through the body-free durable event stream."""
+    if not isinstance(events, list):
+        raise CanaryFailure("durable events are not a list")
+    matches: list[str] = []
+    for event in events:
+        if (
+            not isinstance(event, dict)
+            or event.get("kind") != "message.sent"
+            or event.get("actor_id") != from_actor
+        ):
+            continue
+        payload = event.get("payload")
+        recipients = payload.get("recipients") if isinstance(payload, dict) else None
+        message_id = event.get("message_id")
+        if (
+            isinstance(payload, dict)
+            and payload.get("from_run") == from_run
+            and isinstance(recipients, list)
+            and recipient_actor in recipients
+            and isinstance(message_id, str)
+        ):
+            matches.append(message_id)
+    if len(matches) != 1:
+        raise CanaryFailure("canary correlation did not resolve exactly one sent message")
+    return matches[0]
+
+
+def delivery_was_queued(events: object, *, message_id: str, actor: str) -> bool:
+    if not isinstance(events, list):
+        raise CanaryFailure("operational lifecycle events are not a list")
+    return any(
+        isinstance(event, dict)
+        and event.get("kind") == "delivery.queued"
+        and event.get("message_id") == message_id
+        and event.get("actor_id") == actor
+        for event in events
+    )
+
+
 def delivery_was_acked(events: object, *, message_id: str, actor: str) -> bool:
     if not isinstance(events, list):
         raise CanaryFailure("operational lifecycle events are not a list")
@@ -564,8 +638,15 @@ class PtyProcess:
                 self.process.wait(timeout=timeout)
             except subprocess.TimeoutExpired as error:
                 raise CanaryFailure("Claude did not complete its graceful session exit") from error
+        self._sweep_process_group()
         self.selector.close()
         os.close(self.master)
+
+    def _sweep_process_group(self) -> None:
+        """Stop hook/monitor descendants that can outlive an exited TUI leader."""
+        self._signal(signal.SIGTERM)
+        time.sleep(0.25)
+        self._signal(signal.SIGKILL)
 
     def _signal(self, requested: signal.Signals) -> None:
         try:
@@ -576,6 +657,178 @@ class PtyProcess:
                     os.kill(self.process.pid, requested)
                 except ProcessLookupError:
                     pass
+
+
+class BudgetedInteractiveSession:
+    """Interactive client session whose turns are accounted by the shared ledger."""
+
+    def __init__(
+        self,
+        *,
+        client: str,
+        actor: str,
+        run_id: str,
+        extra_args: tuple[str, ...],
+        config: dict[str, Any],
+        launcher: Any,
+        wait_for_registration: Any,
+        fixture: Path,
+        env: dict[str, str],
+        ledger: BudgetLedger,
+        marker_suffix: str,
+    ):
+        if client not in {"claude", "codex"}:
+            raise CanaryFailure(f"unsupported interactive client {client!r}")
+        self.client = client
+        self.actor = actor
+        self.run_id = run_id
+        self.extra_args = extra_args
+        self.config = config
+        self.launcher = launcher
+        self.wait_for_registration = wait_for_registration
+        self.fixture = fixture
+        self.env = env
+        self.ledger = ledger
+        self.marker_suffix = marker_suffix
+        self.process: PtyProcess | None = None
+
+    def __enter__(self) -> "BudgetedInteractiveSession":
+        command = (
+            claude_live_command(self.config)[1:]
+            if self.client == "claude"
+            else codex_live_command(self.config)[1:]
+        )
+        self.process = PtyProcess(
+            self.launcher(self.client, self.actor, self.run_id, [*command, *self.extra_args]),
+            cwd=self.fixture,
+            env=self.env,
+        )
+        try:
+            if self.client == "claude":
+                self.process.wait_until_ready("$", 60, suffix=True)
+            else:
+                self.process.wait_until_ready("Ask Codex to do anything", 60)
+                self.process.wait_until_quiet(30, quiet_seconds=2)
+                if "Hooks need review" in self.process.normalized_output()[-5000:]:
+                    raise CanaryFailure("Codex hook trust was not ready before interactive handler")
+            self.wait_for_registration(self.actor, self.run_id)
+            return self
+        except BaseException:
+            self.process.close()
+            self.process = None
+            raise
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> bool:
+        if self.process is not None:
+            self.process.close()
+            self.process = None
+        return False
+
+    def turn(self, prompt: str, expect_marker: str, timeout: float = 180) -> None:
+        if self.process is None:
+            raise CanaryFailure("interactive turn requires an open context manager")
+        if not expect_marker.endswith(f"_{self.marker_suffix}") or expect_marker in prompt:
+            raise CanaryFailure("interactive expected marker is invalid or appears in its prompt")
+        self.ledger.ensure_capacity(client=self.client, turns=1)
+        started = time.monotonic()
+        self.process.submit(prompt, marker=expect_marker, timeout=timeout)
+        self.ledger.charge(
+            client=self.client,
+            turns=1,
+            wall_seconds=time.monotonic() - started,
+        )
+
+
+class HandlerContext:
+    """Narrow, budget-aware API for committed contributor handlers."""
+
+    __slots__ = (
+        "_fixture",
+        "_marker_suffix",
+        "_run_claude",
+        "_run_codex",
+        "_interactive",
+        "_wait_for_registration",
+        "_query",
+        "_set_check",
+    )
+
+    def __init__(self, worker: "Worker"):
+        self._fixture = worker.fixture
+        self._marker_suffix = worker.request["request_hash"][-12:].upper()
+        self._run_claude = worker.run_claude
+        self._run_codex = worker.run_codex
+        self._wait_for_registration = worker.wait_for_live_registration
+        self._set_check = lambda name: setattr(worker, "active_check", name)
+        self._query = worker.handler_query
+        self._interactive = lambda client, actor, run_id, extra_args: BudgetedInteractiveSession(
+            client=client,
+            actor=actor,
+            run_id=run_id,
+            extra_args=extra_args,
+            config=worker.request["clients"][client],
+            launcher=worker.launcher,
+            wait_for_registration=worker.wait_for_live_registration,
+            fixture=worker.fixture,
+            env=worker.env,
+            ledger=worker.ledger,
+            marker_suffix=self._marker_suffix,
+        )
+
+    @property
+    def fixture(self) -> Path:
+        return self._fixture
+
+    def marker(self, name: str) -> str:
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", name):
+            raise CanaryFailure("handler marker names must be uppercase identifiers")
+        return f"{name}_{self._marker_suffix}"
+
+    def marker_instruction(self, expected: str) -> str:
+        return marker_instruction(expected)
+
+    def run_claude(self, actor: str, run_id: str, prompt: str, expect: str) -> str:
+        self._guard_prompt(prompt, expect)
+        output = self._run_claude(actor, run_id, prompt)
+        if expect not in output:
+            raise CanaryFailure("Claude did not report the expected handler marker")
+        return output
+
+    def run_codex(self, actor: str, run_id: str, prompt: str, expect: str) -> str:
+        self._guard_prompt(prompt, expect)
+        output = self._run_codex(actor, run_id, prompt)
+        if expect not in output:
+            raise CanaryFailure("Codex did not report the expected handler marker")
+        return output
+
+    def interactive(
+        self,
+        client: str,
+        actor: str,
+        run_id: str,
+        extra_args: tuple[str, ...] = (),
+    ) -> BudgetedInteractiveSession:
+        if not all(isinstance(item, str) for item in extra_args):
+            raise CanaryFailure("interactive extra arguments must be strings")
+        return self._interactive(client, actor, run_id, extra_args)
+
+    def wait_for_live_registration(self, actor: str, run_id: str, timeout: float = 60) -> None:
+        self._wait_for_registration(actor, run_id, timeout)
+
+    def query(self, kind: str, *, partition: str = "canary") -> Any:
+        return self._query(kind, partition=partition)
+
+    def check(self, name: str) -> None:
+        if not name or len(name) > 128:
+            raise CanaryFailure("handler check names must contain 1-128 characters")
+        self._set_check(name)
+
+    def fail(self, reason: str) -> None:
+        raise CanaryFailure(reason)
+
+    def _guard_prompt(self, prompt: str, expect: str) -> None:
+        if not expect.endswith(f"_{self._marker_suffix}") or expect in prompt:
+            raise CanaryFailure("handler expected marker is invalid or appears in its prompt")
 
 
 class Worker:
@@ -805,6 +1058,26 @@ class Worker:
             time.sleep(0.25)
         raise CanaryFailure(f"{actor} did not create a live registration")
 
+    def wait_for_no_live_registration(
+        self,
+        actor: str,
+        run_id: str,
+        *,
+        harness: str,
+        timeout: float = 30,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            live_actor = actor_for_run(
+                self.actor_directory(), run_id=run_id, harness=harness
+            )
+            if live_actor is None:
+                return
+            if live_actor != actor:
+                raise CanaryFailure(f"{run_id} remained live under an unexpected actor")
+            time.sleep(0.25)
+        raise CanaryFailure(f"{actor} retained a live registration for {run_id}")
+
     def has_lifecycle_evidence(self, actor: str, run_id: str) -> bool:
         events = self.operational_events()
         return lifecycle_evidence_complete(events, actor=actor, run_id=run_id)
@@ -815,6 +1088,27 @@ class Worker:
             return json.loads(result.stdout)
         except json.JSONDecodeError as error:
             raise CanaryFailure(f"cannot decode {Path(command[0]).name} JSON output") from error
+
+    def handler_query(self, kind: str, *, partition: str = "canary") -> Any:
+        if kind == "directory":
+            return self.actor_directory()
+        if kind == "operational-events":
+            return self.operational_events(partition)
+        if kind == "durable-events":
+            return self.durable_events(partition)
+        if kind == "conditions":
+            return self.json_command(
+                [
+                    str(self.holler),
+                    "conditions",
+                    "list",
+                    "--socket",
+                    str(self.socket),
+                    "--limit",
+                    "100",
+                ]
+            )
+        raise CanaryFailure(f"unsupported handler query {kind!r}")
 
     def operational_events(self, partition: str = "canary") -> list[dict[str, Any]]:
         return self.events(partition=partition, stream="operational")
@@ -1016,26 +1310,50 @@ class Worker:
             )
         self.run_claude_lifecycle_preflight()
         return [
-            "archive-checksum", "clean-build-identity", "client-version-pins", "connector-doctor",
-            "interactive-onboarding", "codex-hook-trust", "claude-lifecycle-hook",
+            "archive-checksum", "archive-allowlist", "clean-build-identity", "client-version-pins",
+            "connector-doctor", "interactive-onboarding", "codex-hook-trust", "claude-lifecycle-hook",
         ]
 
     def scenario_c1(self) -> list[str]:
         token = "C1-" + self.request["request_hash"][-12:]
-        sent = self.run_codex(
+        self.active_check = "c1-codex-send"
+        self.run_codex(
             "canary-codex", "c1-codex",
             f"Use Holler bus_send to send exactly one durable message to actor canary-claude. "
-            f"The body must contain token {token}. Use idempotency key {token}. Finish with marker C1_SENT.",
+            f"The body must contain token {token}. Use idempotency key {token}. Stop after the tool succeeds.",
         )
-        if "C1_SENT" not in sent:
-            raise CanaryFailure("Codex did not report the C1 send marker")
-        received = self.run_claude(
+        self.active_check = "c1-offline-delivery-state"
+        message_id = sent_message_id(
+            self.durable_events(),
+            from_actor="canary-codex",
+            from_run="c1-codex",
+            recipient_actor="canary-claude",
+        )
+        events = self.operational_events()
+        if (
+            not delivery_was_queued(events, message_id=message_id, actor="canary-claude")
+            or delivery_event_attempts(events, message_id=message_id, actor="canary-claude")
+            or delivery_was_acked(events, message_id=message_id, actor="canary-claude")
+            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0)
+        ):
+            raise CanaryFailure("C1 durable message was not queued exactly once")
+        self.active_check = "c1-claude-claim-ack"
+        self.run_claude(
             "canary-claude", "c1-claude",
             f"Use bus_inbox to claim the offline Holler message containing {token}, then bus_ack its lease. "
-            "Do not echo its full body. Finish with marker C1_ACKED.",
+            "Do not echo its full body. Stop after the acknowledgement succeeds.",
         )
-        if "C1_ACKED" not in received:
-            raise CanaryFailure("Claude did not report the C1 acknowledgement marker")
+        self.active_check = "c1-terminal-delivery-state"
+        events = self.operational_events()
+        if (
+            delivery_event_attempts(events, message_id=message_id, actor="canary-claude") != [1]
+            or not delivery_was_acked(events, message_id=message_id, actor="canary-claude")
+            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (0, 0)
+            or not lifecycle_evidence_complete(
+                events, actor="canary-claude", run_id="c1-claude"
+            )
+        ):
+            raise CanaryFailure("C1 delivery was not acknowledged exactly once")
         return ["durable-send", "offline-hydration", "mcp-claim", "mcp-ack"]
 
     def scenario_c2(self) -> list[str]:
@@ -1051,6 +1369,7 @@ class Worker:
             self.launcher("claude", "canary-claude", "c2-claude", claude_args), cwd=self.fixture, env=self.env
         )
         codex: PtyProcess | None = None
+        claude_closed = False
         try:
             self.wait_for_live_registration("canary-claude", "c2-claude")
             claude.wait_until_ready("$", 60, suffix=True)
@@ -1092,11 +1411,19 @@ class Worker:
             self.ledger.ensure_capacity(client="codex", turns=1)
             codex.wait_for(codex_acked, 180, after=codex_wake_after)
             self.ledger.charge(client="codex", turns=1)
+            self.active_check = "c2-claude-graceful-exit"
+            claude.graceful_claude_exit()
+            claude_closed = True
         finally:
             if codex is not None:
                 codex.close()
-            claude.close()
+            if not claude_closed:
+                claude.close()
             self.ledger.charge(client="controller", turns=0, wall_seconds=time.monotonic() - started)
+        self.active_check = "c2-claude-session-ended"
+        self.wait_for_no_live_registration(
+            "canary-claude", "c2-claude", harness="claude"
+        )
         self.certify("claude", "canary-claude", "c2-claude", "hook-long-poll")
         self.certify("codex", "canary-codex", "c2-codex", "native-queue")
         return [
@@ -1106,22 +1433,98 @@ class Worker:
 
     def scenario_c3(self) -> list[str]:
         token = "C3-" + self.request["request_hash"][-12:]
-        sent = self.run_codex(
-            "canary-codex", "c3-codex",
-            f"Use Holler bus_send to actor canary-claude with body token {token} and idempotency key {token}. "
-            "Finish with marker C3_SENT.",
+        self.active_check = "c3-controller-send"
+        sent = self.json_command(
+            [
+                str(self.holler), "send", "--socket", str(self.socket),
+                "--actor", "c3-controller", "--run", "c3-controller",
+                "--project", "canary", "--channel", "direct",
+                "--delivery", "non-blocking", "--to-actor", "canary-claude",
+                "--idempotency-key", token,
+                "--body", json.dumps({"text": f"daemon restart token {token}"}),
+            ]
         )
-        if "C3_SENT" not in sent:
-            raise CanaryFailure("Codex did not report the C3 send marker")
+        message = sent.get("message") if isinstance(sent, dict) else None
+        sent_message = message.get("message_id") if isinstance(message, dict) else None
+        if not isinstance(sent_message, str) or not sent_message:
+            raise CanaryFailure("C3 deterministic send returned no message ID")
+        self.active_check = "c3-sent-message-correlation"
+        message_id = sent_message_id(
+            self.durable_events(),
+            from_actor="c3-controller",
+            from_run="c3-controller",
+            recipient_actor="canary-claude",
+        )
+        if message_id != sent_message:
+            raise CanaryFailure("C3 durable event did not match the deterministic send")
+        events = self.operational_events()
+        self.active_check = "c3-pre-restart-queued-event"
+        if not delivery_was_queued(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 durable message has no queued event before restart")
+        self.active_check = "c3-pre-restart-unclaimed"
+        if delivery_event_attempts(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 durable message was claimed before restart")
+        if delivery_was_acked(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 durable message was acknowledged before restart")
+        self.active_check = "c3-pre-restart-inbox-count"
+        if actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0):
+            raise CanaryFailure("C3 durable message was not the sole queued inbox delivery")
+        self.active_check = "c3-daemon-restart"
         self.stop_daemon()
         self.start_daemon()
-        received = self.run_claude(
+        self.active_check = "c3-post-restart-correlation"
+        restarted_message_id = sent_message_id(
+            self.durable_events(),
+            from_actor="c3-controller",
+            from_run="c3-controller",
+            recipient_actor="canary-claude",
+        )
+        events = self.operational_events()
+        if restarted_message_id != message_id:
+            raise CanaryFailure("C3 message identity changed across daemon restart")
+        self.active_check = "c3-post-restart-queued-event"
+        if not delivery_was_queued(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 queued event did not survive daemon restart")
+        self.active_check = "c3-post-restart-unclaimed"
+        if delivery_event_attempts(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 delivery was claimed during daemon restart")
+        if delivery_was_acked(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 delivery was acknowledged during daemon restart")
+        self.active_check = "c3-post-restart-inbox-count"
+        if actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0):
+            raise CanaryFailure("C3 queued inbox state changed across daemon restart")
+        self.active_check = "c3-claude-claim-ack"
+        self.run_claude(
             "canary-claude", "c3-claude",
             f"Use bus_inbox to claim the Holler message containing {token}, then bus_ack its lease. "
-            "Finish with marker C3_ACKED.",
+            "Stop after the acknowledgement succeeds.",
         )
-        if "C3_ACKED" not in received:
-            raise CanaryFailure("Claude did not report the C3 acknowledgement marker")
+        self.active_check = "c3-terminal-correlation"
+        terminal_message_id = sent_message_id(
+            self.durable_events(),
+            from_actor="c3-controller",
+            from_run="c3-controller",
+            recipient_actor="canary-claude",
+        )
+        if terminal_message_id != message_id:
+            raise CanaryFailure("C3 message identity changed after client reconnect")
+        events = self.operational_events()
+        self.active_check = "c3-terminal-claim-attempts"
+        if delivery_event_attempts(
+            events, message_id=message_id, actor="canary-claude"
+        ) != [1]:
+            raise CanaryFailure("C3 delivery was not claimed exactly once after restart")
+        self.active_check = "c3-terminal-ack-event"
+        if not delivery_was_acked(events, message_id=message_id, actor="canary-claude"):
+            raise CanaryFailure("C3 delivery was not acknowledged after restart")
+        self.active_check = "c3-terminal-inbox-count"
+        if actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (0, 0):
+            raise CanaryFailure("C3 delivery remained in the inbox after acknowledgement")
+        self.active_check = "c3-terminal-lifecycle"
+        if not lifecycle_evidence_complete(
+            events, actor="canary-claude", run_id="c3-claude"
+        ):
+            raise CanaryFailure("C3 Claude reconnect lifecycle evidence was incomplete")
         return ["daemon-restart", "client-reconnect", "no-message-loss", "no-duplicate-processing"]
 
     def scenario_c4(self) -> list[str]:
@@ -1579,38 +1982,54 @@ class Worker:
         ]
 
     def run(self) -> dict[str, Any]:
-        requested = {scenario["id"] for scenario in self.request["scenarios"]}
-        unsupported = requested - SUPPORTED_REAL_SCENARIOS
-        if unsupported:
-            raise CanaryFailure(
-                f"real worker currently supports the core tier only; unsupported scenarios: {sorted(unsupported)}"
-            )
-        self.prepare()
-        handlers = {
-            "C0": self.scenario_c0,
-            "C1": self.scenario_c1,
-            "C2": self.scenario_c2,
-            "C3": self.scenario_c3,
-            "C4": self.scenario_c4,
-            "C5": self.scenario_c5,
-            "C6": self.scenario_c6,
-            "C7": self.scenario_c7,
-            "C8": self.scenario_c8,
-        }
+        handlers: list[tuple[dict[str, Any], Any, bool]] = []
         for scenario in self.request["scenarios"]:
+            handler_name = f"scenario_{scenario['id'].lower()}"
+            handler = getattr(self, handler_name, None)
+            custom = not callable(handler)
+            if not callable(handler):
+                try:
+                    custom_path = handler_path(SCRIPT_DIR / "handlers", scenario["id"])
+                    handler = load_handler(custom_path)
+                except HandlerContractError as error:
+                    raise CanaryFailure(
+                        f"cannot load committed handler {scenario['id']}: {type(error).__name__}"
+                    ) from error
+            if not callable(handler):
+                raise CanaryFailure(f"scenario {scenario['id']} has no callable handler")
+            handlers.append((scenario, handler, custom))
+        self.prepare()
+        context = HandlerContext(self)
+        for scenario, handler, custom in handlers:
             self.active_scenario = scenario["id"]
             self.active_check = "scenario-start"
             started = time.monotonic()
-            checks = handlers[scenario["id"]]()
-            self.results.append(
-                {
-                    "id": scenario["id"],
-                    "name": scenario["name"],
-                    "status": "PASS",
-                    "duration_seconds": round(time.monotonic() - started, 3),
-                    "assertions": [{"name": check, "status": "PASS"} for check in checks],
-                }
-            )
+            turns_before = self.ledger.model_turns
+            operation = (lambda handler=handler: handler(context)) if custom else handler
+            checks = run_with_timeout(operation, scenario["timeout_seconds"], scenario["id"])
+            observed_turns = self.ledger.model_turns - turns_before
+            estimated_turns = scenario["estimated_model_turns"]
+            if checks != scenario["checks"]:
+                raise CanaryFailure(
+                    f"scenario {scenario['id']} worker assertions do not match its committed definition"
+                )
+            result = {
+                "id": scenario["id"],
+                "name": scenario["name"],
+                "status": "PASS",
+                "duration_seconds": round(time.monotonic() - started, 3),
+                "estimated_model_turns": estimated_turns,
+                "observed_model_turns": observed_turns,
+                "assertions": [{"name": check, "status": "PASS"} for check in checks],
+            }
+            if observed_turns != estimated_turns:
+                result["status"] = "FAIL"
+                self.results.append(result)
+                raise CanaryFailure(
+                    f"scenario {scenario['id']} used {observed_turns} model turns; "
+                    f"its committed estimate is {estimated_turns}"
+                )
+            self.results.append(result)
         evidence: dict[str, Any] = {
             "schema_version": 1,
             "kind": "holler-canary-evidence",
