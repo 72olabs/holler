@@ -113,6 +113,26 @@ def claude_cost(output: str) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
+def doctor_command(
+    holler: Path,
+    *,
+    harness: str,
+    actor: str,
+    attention: str,
+    project: Path,
+    socket: Path,
+    env: dict[str, str],
+) -> list[str]:
+    command = [
+        str(holler), "connector", "doctor", "--harness", harness,
+        "--profile", "live-review", "--project", str(project),
+        "--attention", attention, "--actor", actor, "--socket", str(socket),
+    ]
+    if harness == "codex":
+        command.extend(["--policy", str(Path(env["CODEX_HOME"]) / "holler.config.toml")])
+    return command
+
+
 class PtyProcess:
     def __init__(self, command: list[str], *, cwd: Path, env: dict[str, str]):
         master, slave = pty.openpty()
@@ -361,11 +381,15 @@ class Worker:
             ("codex", "canary-codex", "native-queue"),
         ):
             run_command(
-                [
-                    str(self.holler), "connector", "doctor", "--harness", name,
-                    "--profile", "live-review", "--project", str(self.fixture),
-                    "--attention", attention, "--actor", actor, "--socket", str(self.socket),
-                ],
+                doctor_command(
+                    self.holler,
+                    harness=name,
+                    actor=actor,
+                    attention=attention,
+                    project=self.fixture,
+                    socket=self.socket,
+                    env=self.env,
+                ),
                 cwd=self.fixture,
                 env=self.env,
                 timeout=60,

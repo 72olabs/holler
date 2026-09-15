@@ -10,7 +10,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from daytona_controller import make_runtime_bundle
-from worker import claude_cost, codex_reported_tokens, parse_version
+from worker import claude_cost, codex_reported_tokens, doctor_command, parse_version
 
 
 class WorkerTests(unittest.TestCase):
@@ -39,6 +39,19 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("holler-canary/worker.py", names)
         self.assertIn("holler-canary/scenarios/C0.json", names)
         self.assertFalse(any("tests" in name for name in names))
+
+    def test_codex_doctor_uses_generated_least_privilege_policy(self) -> None:
+        common = {
+            "actor": "canary",
+            "attention": "native-queue",
+            "project": Path("/tmp/fixture"),
+            "socket": Path("/tmp/holler.sock"),
+            "env": {"CODEX_HOME": "/auth/codex"},
+        }
+        codex = doctor_command(Path("/bin/holler"), harness="codex", **common)
+        claude = doctor_command(Path("/bin/holler"), harness="claude", **common)
+        self.assertIn("/auth/codex/holler.config.toml", codex)
+        self.assertNotIn("--policy", claude)
 
 
 if __name__ == "__main__":
