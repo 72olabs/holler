@@ -65,8 +65,20 @@ class WorkerTests(unittest.TestCase):
                 env={},
             )
             try:
-                process.wait_until_ready(2)
+                process.wait_until_ready("? for shortcuts", 2)
                 self.assertIn(b"? for shortcuts", process.buffer)
+            finally:
+                process.close()
+
+    def test_pty_ready_accepts_stable_screen_reader_prompt_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            process = PtyProcess(
+                ["/bin/sh", "-c", "printf 'Claude ready\\r\\n$'; sleep 2"],
+                cwd=Path(directory),
+                env={},
+            )
+            try:
+                process.wait_until_ready("$", 2, suffix=True)
             finally:
                 process.close()
 

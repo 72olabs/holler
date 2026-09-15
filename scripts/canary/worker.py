@@ -28,6 +28,7 @@ from manifest import ManifestError, canonical_json, load_request, sha256_bytes, 
 
 
 SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3"}
+ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 
 
 class CanaryFailure(RuntimeError):
@@ -243,10 +244,24 @@ class PtyProcess:
                 return
         raise CanaryFailure("interactive client did not reach a stable input-ready state")
 
-    def wait_until_ready(self, timeout: float) -> None:
-        """Wait for the input footer shared by the pinned Claude and Codex TUIs."""
-        self.wait_for("? for shortcuts", timeout)
-        self.wait_until_quiet(min(timeout, 10))
+    def wait_until_ready(self, marker: str, timeout: float, *, suffix: bool = False) -> None:
+        """Wait for a stable input marker in normalized terminal output."""
+        deadline = time.monotonic() + timeout
+        last_size = len(self.buffer)
+        ready_since: float | None = None
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise CanaryFailure("interactive client exited before its input prompt was ready")
+            self._read_available(min(0.1, deadline - time.monotonic()))
+            size = len(self.buffer)
+            text = ANSI_ESCAPE.sub("", self.buffer.decode("utf-8", errors="replace"))
+            ready = text.rstrip().endswith(marker) if suffix else marker in text
+            if not ready or size != last_size:
+                ready_since = time.monotonic() if ready else None
+                last_size = size
+            elif ready_since is not None and time.monotonic() - ready_since >= 0.5:
+                return
+        raise CanaryFailure("interactive client input prompt did not become ready")
 
     def submit(self, prompt: str, *, marker: str, timeout: float) -> None:
         if marker in prompt:
@@ -603,7 +618,7 @@ class Worker:
         codex: PtyProcess | None = None
         try:
             self.wait_for_live_registration("canary-claude", "c2-claude")
-            claude.wait_until_ready(60)
+            claude.wait_until_ready("$", 60, suffix=True)
             self.ledger.ensure_capacity(client="claude", turns=1)
             claude.submit(
                 "Initialize Holler and wait for Holler attention. If Holler wakes you later, claim and "
@@ -618,7 +633,7 @@ class Worker:
             codex = PtyProcess(
                 self.launcher("codex", "canary-codex", "c2-codex", codex_args), cwd=self.fixture, env=self.env
             )
-            codex.wait_until_ready(60)
+            codex.wait_until_ready("? for shortcuts", 60)
             self.ledger.ensure_capacity(client="codex", turns=1)
             codex.submit(
                 f"Use Holler bus_send to actor canary-claude with idempotency key {token}. "

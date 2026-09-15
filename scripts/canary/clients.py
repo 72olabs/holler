@@ -72,7 +72,7 @@ def claude_print_command(config: dict[str, Any], max_budget_usd: float) -> list[
 
 def claude_live_command(config: dict[str, Any]) -> list[str]:
     """Build the interactive command used for live-attention scenarios."""
-    return [str(config["binary"]), "--model", str(config["model"])]
+    return [str(config["binary"]), "--model", str(config["model"]), "--ax-screen-reader"]
 
 
 def codex_exec_command(config: dict[str, Any]) -> list[str]:
