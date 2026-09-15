@@ -515,6 +515,19 @@ class PtyProcess:
         self.selector.close()
         os.close(self.master)
 
+    def graceful_claude_exit(self, timeout: float = 20) -> None:
+        """Exit an input-ready Claude TUI through its lifecycle-aware command."""
+        if self.process.poll() is None:
+            self.send("/exit")
+            time.sleep(0.1)
+            self.send("\r")
+            try:
+                self.process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as error:
+                raise CanaryFailure("Claude did not complete its graceful session exit") from error
+        self.selector.close()
+        os.close(self.master)
+
     def _signal(self, requested: signal.Signals) -> None:
         try:
             os.killpg(self.process.pid, requested)
@@ -1157,8 +1170,8 @@ class Worker:
                 raise CanaryFailure("C5 did not allocate two distinct opaque actors")
 
             self.active_check = "c5-close-concurrent-sessions"
-            session_a.close()
-            session_b.close()
+            session_a.graceful_claude_exit()
+            session_b.graceful_claude_exit()
 
             actor_a = candidate_a
             actor_b = candidate_b
