@@ -160,7 +160,7 @@ def safe_extract(archive: Path, destination: Path) -> Path:
         members = bundle.getmembers()
         roots = set()
         member_names = {member.name.rstrip("/") for member in members}
-        symlink_names = {member.name.rstrip("/") for member in members if member.issym()}
+        link_names = {member.name.rstrip("/") for member in members if member.issym() or member.islnk()}
         for member in members:
             path = Path(member.name)
             if path.is_absolute() or ".." in path.parts or not path.parts:
@@ -171,9 +171,13 @@ def safe_extract(archive: Path, destination: Path) -> Path:
                 target = posixpath.normpath(posixpath.join(posixpath.dirname(member.name), member.linkname))
                 if target.startswith("../") or target not in member_names:
                     raise CanaryFailure(f"unsafe archive link target: {member.name}")
+            elif member.islnk():
+                target = posixpath.normpath(member.linkname)
+                if posixpath.isabs(target) or target.startswith("../") or target not in member_names:
+                    raise CanaryFailure(f"unsafe archive hardlink target: {member.name}")
             elif not (member.isdir() or member.isfile()):
                 raise CanaryFailure(f"unsupported archive member: {member.name}")
-            for link in symlink_names:
+            for link in link_names:
                 if member.name.rstrip("/") != link and member.name.startswith(link + "/"):
                     raise CanaryFailure(f"archive member descends through a symlink: {member.name}")
             roots.add(path.parts[0])
@@ -191,12 +195,16 @@ def parse_version(output: str) -> str:
 
 
 def sqlite_scalar(database: Path, query: str, *parameters: object) -> Any:
+    connection: sqlite3.Connection | None = None
     try:
         uri = f"file:{database}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=5) as connection:
-            row = connection.execute(query, parameters).fetchone()
+        connection = sqlite3.connect(uri, uri=True, timeout=5)
+        row = connection.execute(query, parameters).fetchone()
     except sqlite3.Error as error:
         raise CanaryFailure(f"cannot inspect canary database: {error}") from error
+    finally:
+        if connection is not None:
+            connection.close()
     if row is None:
         raise CanaryFailure("canary database query returned no row")
     return row[0]
@@ -628,8 +636,8 @@ class Worker:
         self.start_daemon()
 
     def start_daemon(self) -> None:
-        self.runtime.mkdir(parents=True, exist_ok=True)
-        log = (self.runtime / "hollerd.log").open("a", encoding="utf-8")
+        self.socket.parent.mkdir(parents=True, exist_ok=True)
+        log = (self.socket.parent / "hollerd.log").open("a", encoding="utf-8")
         self.daemon = subprocess.Popen(
             [str(self.hollerd), "--db", str(self.database), "--socket", str(self.socket)],
             cwd=self.fixture,
@@ -1394,7 +1402,6 @@ class Worker:
             self.env["HOLLER_HOME"] = str(c6_runtime)
             self.env["HOLLER_SOCKET"] = str(c6_socket)
             self.start_daemon()
-            self.setup_connectors()
             sent = self.json_command(
                 [
                     str(self.holler), "send", "--socket", str(self.socket),
@@ -1414,17 +1421,22 @@ class Worker:
             if sqlite_scalar(c6_database, "SELECT COUNT(*) FROM messages WHERE message_id = ?", before_id) != 1:
                 raise CanaryFailure("C6 pre-upgrade message was not durable")
 
-            self.active_check = "c6-database-migration"
+            self.active_check = "c6-current-startup-migration"
             self.package, self.holler, self.hollerd = original[:3]
             self.start_daemon()
+            self.active_check = "c6-current-shutdown-after-migration"
             self.stop_daemon()
+            self.active_check = "c6-migration-backup-count"
             backups = list(c6_runtime.glob("holler.sqlite3.pre-v15.*.bak"))
             if len(backups) != 1:
                 raise CanaryFailure("C6 migration did not create exactly one schema-14 backup")
+            self.active_check = "c6-migration-backup-schema"
             if sqlite_scalar(backups[0], "SELECT MAX(version) FROM schema_migrations") != 14:
                 raise CanaryFailure("C6 migration backup does not preserve schema 14")
+            self.active_check = "c6-migrated-schema"
             if sqlite_scalar(c6_database, "SELECT MAX(version) FROM schema_migrations") != 15:
                 raise CanaryFailure("C6 current database is not schema 15")
+            self.active_check = "c6-migrated-message"
             if sqlite_scalar(c6_database, "SELECT COUNT(*) FROM messages WHERE message_id = ?", before_id) != 1:
                 raise CanaryFailure("C6 migration lost the pre-upgrade message")
 

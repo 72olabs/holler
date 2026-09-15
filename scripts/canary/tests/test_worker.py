@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import sys
 from pathlib import Path
@@ -53,6 +54,31 @@ class WorkerTests(unittest.TestCase):
                 bundle.add(source, arcname="bundle")
             extracted = safe_extract(archive, root / "output")
             self.assertEqual((extracted / "node_modules" / ".bin" / "client").read_text(), "#!/usr/bin/env node\n")
+
+    def test_safe_extract_accepts_internal_hardlink_and_rejects_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "bundle.tar.gz"
+            payload = b"binary"
+            with tarfile.open(archive, "w:gz") as bundle:
+                target = tarfile.TarInfo("bundle/package/binary")
+                target.size = len(payload)
+                bundle.addfile(target, io.BytesIO(payload))
+                link = tarfile.TarInfo("bundle/platform/binary")
+                link.type = tarfile.LNKTYPE
+                link.linkname = "bundle/package/binary"
+                bundle.addfile(link)
+            extracted = safe_extract(archive, root / "output")
+            self.assertEqual((extracted / "platform" / "binary").read_bytes(), payload)
+
+            unsafe = root / "unsafe.tar.gz"
+            with tarfile.open(unsafe, "w:gz") as bundle:
+                link = tarfile.TarInfo("bundle/binary")
+                link.type = tarfile.LNKTYPE
+                link.linkname = "../outside"
+                bundle.addfile(link)
+            with self.assertRaisesRegex(CanaryFailure, "unsafe archive hardlink"):
+                safe_extract(unsafe, root / "unsafe-output")
 
     def test_c7_budget_cutoffs_and_teardown_are_zero_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
