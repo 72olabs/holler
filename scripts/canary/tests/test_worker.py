@@ -87,6 +87,15 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(CanaryFailure, "contains its expected output marker"):
             process.submit("echo BAD_MARKER", marker="BAD_MARKER", timeout=0)
 
+    def test_pty_submit_sends_enter_as_a_separate_terminal_event(self) -> None:
+        process = PtyProcess.__new__(PtyProcess)
+        sent = []
+        process.checkpoint = lambda: 0
+        process.send = sent.append
+        process.wait_for = lambda marker, timeout, after=0: None
+        process.submit("do the work", marker="DONE_MARKER", timeout=1)
+        self.assertEqual(sent, ["do the work", "\r"])
+
     def test_lifecycle_evidence_requires_correlated_registration_and_hydration(self) -> None:
         events = [
             {

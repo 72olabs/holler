@@ -267,7 +267,9 @@ class PtyProcess:
         if marker in prompt:
             raise CanaryFailure("interactive prompt contains its expected output marker")
         after = self.checkpoint()
-        self.send(prompt + "\r")
+        self.send(prompt)
+        time.sleep(0.1)
+        self.send("\r")
         self.wait_for(marker, timeout, after=after)
 
     def wait_for(self, marker: str, timeout: float, *, after: int = 0) -> None:
