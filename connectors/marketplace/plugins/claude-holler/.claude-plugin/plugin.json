@@ -1,6 +1,6 @@
 {
   "name": "holler",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Durable local communication between Claude Code and Codex agents.",
   "author": {"name": "72o Labs"},
   "userConfig": {
