@@ -41,6 +41,30 @@ permission prompt, hook, or wake implementation. Live harness validation is
 deliberately separate because it consumes time and tokens and can be affected
 by client version or TUI changes.
 
+### Checkpoint canaries
+
+A coding agent can prepare a private Daytona canary for any committed branch
+checkpoint without opening a pull request. The request binds the exact commit
+and tree, test scenarios, client versions, low-cost models, and spend limits to
+one reviewable hash:
+
+```sh
+python3 scripts/canary/prepare.py \
+  --ref HEAD \
+  --tier core \
+  --output .runs/canary/request.json
+python3 scripts/canary/run.py \
+  .runs/canary/request.json \
+  --driver fake \
+  --output .runs/canary/fake-evidence.json
+python3 scripts/canary/daytona_controller.py plan .runs/canary/request.json
+```
+
+The committed defaults use Claude Haiku and `gpt-5.6-luna` at low reasoning
+effort. Model overrides require an explicit opt-in and become part of the
+request hash. See [scripts/canary/README.md](scripts/canary/README.md) for the
+test tiers, credential boundary, and approval flow.
+
 ## Design constraints
 
 - `hollerd` is the only SQLite owner. CLI, MCP, hooks, and SDKs use the versioned

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "C6",
+  "name": "in-place-upgrade",
+  "description": "Upgrade a live installation while durable state exists and prove schema, actor, message, and build continuity.",
+  "required_clients": ["claude", "codex"],
+  "estimated_model_turns": 2,
+  "timeout_seconds": 600,
+  "checks": [
+    "pre-upgrade-message",
+    "database-migration",
+    "connector-refresh",
+    "post-upgrade-delivery",
+    "new-build-identity"
+  ]
+}

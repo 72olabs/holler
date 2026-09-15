@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "C4",
+  "name": "claim-crash-redelivery",
+  "description": "Terminate a recipient after claim and prove lease expiry makes the same message available without creating a duplicate.",
+  "required_clients": ["claude", "codex"],
+  "estimated_model_turns": 2,
+  "timeout_seconds": 420,
+  "checks": [
+    "claim-before-crash",
+    "lease-expiry",
+    "redelivery-same-message-id",
+    "terminal-ack"
+  ]
+}

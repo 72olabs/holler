@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "C7",
+  "name": "budget-cutoff",
+  "description": "Force a configured model or wall-clock budget boundary and prove the controller stops cleanly with an explicit budget result.",
+  "required_clients": ["claude", "codex"],
+  "estimated_model_turns": 0,
+  "timeout_seconds": 240,
+  "checks": [
+    "turn-limit",
+    "claude-dollar-limit",
+    "codex-reported-token-limit",
+    "wall-clock-limit",
+    "clean-teardown"
+  ]
+}

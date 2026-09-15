@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "C3",
+  "name": "daemon-restart-delivery",
+  "description": "Restart hollerd with a committed message outstanding and prove reconnect, redelivery, and terminal acknowledgement.",
+  "required_clients": ["claude", "codex"],
+  "estimated_model_turns": 2,
+  "timeout_seconds": 360,
+  "checks": [
+    "daemon-restart",
+    "client-reconnect",
+    "no-message-loss",
+    "no-duplicate-processing"
+  ]
+}

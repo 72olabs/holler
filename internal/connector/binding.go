@@ -2,7 +2,9 @@ package connector
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +15,13 @@ import (
 
 	"github.com/72olabs/holler/internal/bus"
 )
+
+const claudePrintRunBindingPrefix = "holler-claude-print-v1."
+
+type claudePrintRunBinding struct {
+	RunID     string `json:"run_id"`
+	LaunchTag string `json:"launch_tag"`
+}
 
 // RuntimeBinding is the identity and routing state shared by a harness's MCP
 // server and lifecycle hooks. Explicit launcher values win; a normally started
@@ -34,6 +43,19 @@ func ResolveRuntimeBinding(harness string, binding RuntimeBinding) (RuntimeBindi
 	harness = strings.ToLower(strings.TrimSpace(harness))
 	if harness == "" {
 		return binding, nil
+	}
+	if harness == "claude" {
+		runID, launchTag, encoded, err := decodeClaudePrintRunBinding(binding.RunID)
+		if err != nil {
+			return RuntimeBinding{}, err
+		}
+		if encoded {
+			if binding.LaunchTag != "" && strings.TrimSpace(binding.LaunchTag) != launchTag {
+				return RuntimeBinding{}, fmt.Errorf("Claude print identity binding conflicts with HOLLER_LAUNCH_TAG")
+			}
+			binding.RunID = runID
+			binding.LaunchTag = launchTag
+		}
 	}
 	var configured RuntimeBinding
 	var err error
@@ -95,6 +117,32 @@ func ResolveRuntimeBinding(harness string, binding RuntimeBinding) (RuntimeBindi
 		return RuntimeBinding{}, err
 	}
 	return binding, nil
+}
+
+func encodeClaudePrintRunBinding(runID, launchTag string) string {
+	payload, err := json.Marshal(claudePrintRunBinding{RunID: runID, LaunchTag: launchTag})
+	if err != nil {
+		panic("encode fixed Claude print binding: " + err.Error())
+	}
+	return claudePrintRunBindingPrefix + base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func decodeClaudePrintRunBinding(value string) (runID, launchTag string, encoded bool, err error) {
+	if !strings.HasPrefix(value, claudePrintRunBindingPrefix) {
+		return "", "", false, nil
+	}
+	payload, decodeErr := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, claudePrintRunBindingPrefix))
+	if decodeErr != nil {
+		return "", "", true, fmt.Errorf("decode Claude print identity binding: %w", decodeErr)
+	}
+	var binding claudePrintRunBinding
+	if decodeErr := json.Unmarshal(payload, &binding); decodeErr != nil {
+		return "", "", true, fmt.Errorf("decode Claude print identity binding: %w", decodeErr)
+	}
+	if strings.TrimSpace(binding.RunID) == "" || strings.TrimSpace(binding.LaunchTag) == "" {
+		return "", "", true, fmt.Errorf("decode Claude print identity binding: run and launch tag are required")
+	}
+	return binding.RunID, binding.LaunchTag, true, nil
 }
 
 func ValidateNameMode(mode string) error {

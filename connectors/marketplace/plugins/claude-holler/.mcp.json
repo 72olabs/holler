@@ -2,7 +2,20 @@
   "mcpServers": {
     "holler": {
       "command": "${CLAUDE_PLUGIN_ROOT}/scripts/holler",
-      "args": ["mcp", "--harness", "claude"]
+      "args": ["mcp", "--harness", "claude"],
+      "env": {
+        "HOLLER_BIN": "${HOLLER_BIN:-}",
+        "HOLLER_SOCKET": "${HOLLER_SOCKET:-}",
+        "HOLLER_ACTOR": "${HOLLER_ACTOR:-}",
+        "HOLLER_RUN": "${HOLLER_RUN:-}",
+        "HOLLER_ROLE": "${HOLLER_ROLE:-}",
+        "HOLLER_PEER": "${HOLLER_PEER:-}",
+        "HOLLER_PROJECT": "${HOLLER_PROJECT:-}",
+        "HOLLER_CHANNEL": "${HOLLER_CHANNEL:-}",
+        "HOLLER_NAME_MODE": "${HOLLER_NAME_MODE:-}",
+        "HOLLER_LAUNCH_TAG": "${HOLLER_LAUNCH_TAG:-}",
+        "HOLLER_TAKEOVER": "${HOLLER_TAKEOVER:-}"
+      }
     }
   }
 }

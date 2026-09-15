@@ -102,7 +102,22 @@ func BuildClaudeLaunch(config ClaudeLaunchConfig) (LaunchSpec, error) {
 		environment["HOLLER_CONNECTOR_CONFIG"] = config.ConnectorPath
 	}
 	addLaunchNamingEnvironment(environment, connectorConfig.NameMode, config.LaunchTag, config.Takeover)
+	if config.LaunchTag != "" && claudePrintMode(args) {
+		// Claude's print/SDK entrypoint can omit HOLLER_LAUNCH_TAG from hook
+		// subprocesses while preserving HOLLER_RUN. Carry both values through
+		// that surviving field, then decode them before runtime validation.
+		environment["HOLLER_RUN"] = encodeClaudePrintRunBinding(config.RunID, config.LaunchTag)
+	}
 	return LaunchSpec{Command: config.ClaudeBinary, Args: args, Env: environment, RunID: config.RunID}, nil
+}
+
+func claudePrintMode(args []string) bool {
+	for _, arg := range args {
+		if arg == "-p" || controlledLongOption(arg, "--print") {
+			return true
+		}
+	}
+	return false
 }
 
 func BuildCodexLaunch(config CodexLaunchConfig) (LaunchSpec, error) {

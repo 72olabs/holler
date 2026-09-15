@@ -1,0 +1,186 @@
+# Real-client canaries
+
+This directory is the committed, credential-free control plane for Holler's
+private Claude Code and Codex canaries. It lets a coding agent prepare a test
+for any committed Git SHA without opening a pull request. The credentialed run
+is a separate, explicitly approved operation.
+
+The normal flow is:
+
+1. Commit the candidate changes on a topic branch.
+2. Prepare an immutable request for that commit.
+3. Run the fake driver and inspect the Daytona plan without spending tokens.
+4. Approve the printed `request_hash`.
+5. Run the approved request in Daytona using dedicated test subscriptions.
+6. Fix on the branch, create another checkpoint commit, and repeat.
+7. Open the PR only after the release-tier canary passes; squash-merge after
+   review.
+
+The zero-cost preparation steps are:
+
+```sh
+python3 scripts/canary/prepare.py \
+  --ref HEAD \
+  --tier core \
+  --output .runs/canary/request.json
+
+python3 scripts/canary/run.py \
+  .runs/canary/request.json \
+  --driver fake \
+  --output .runs/canary/fake-evidence.json
+
+python3 scripts/canary/daytona_controller.py plan .runs/canary/request.json
+```
+
+All generated requests, evidence, transcripts, databases, and provider state
+belong under `.runs/`, which is gitignored. Requests contain commit, tree,
+scenario, model, and budget hashes, but never credentials or message bodies.
+
+## Test tiers
+
+| Tier | Scenarios | Model turns | Intended use |
+|---|---|---:|---|
+| `preflight` | C0 | 0 | Packaging and environment only |
+| `core` | C0-C3 | 8 | Checkpoint commits and pre-PR canaries |
+| `release` | C0-C4, C6 | 12 | Release candidate gate |
+| `extended` | C0-C8 | 24 | Scheduled compatibility and failure testing |
+
+The scenario files are data rather than executable prompts. This keeps the
+test contract reviewable and gives the local fake driver and the remote worker
+the same IDs, timeouts, assertions, and estimated model-turn count.
+
+## Cost controls
+
+The committed defaults are deliberately the cheapest suitable subscription
+models:
+
+- Claude Code: `haiku` (Claude Haiku 4.5 family). One-shot invocations use
+  `--max-budget-usd`; interactive live-attention scenarios rely on the
+  controller's total-turn and wall-clock kill switches because Claude's dollar
+  flag is print-mode only.
+- Codex: `gpt-5.6-luna`, low reasoning effort, with fast mode left disabled.
+  Codex reports token usage; the controller stops before starting another turn
+  once the request's reported-token, total-turn, or wall-clock limit is
+  exhausted. Daytona rejects the client's Responses WebSocket, so canaries use
+  the same ChatGPT subscription login through a pinned HTTP/SSE custom-provider
+  configuration.
+
+Changing either model requires both an explicit command-line override and
+`--allow-model-override`. The selected model is included in the approved
+request hash, so a worker cannot silently upgrade to a more expensive model.
+
+## Daytona boundary
+
+The Daytona plan intentionally separates two sandboxes:
+
+- The builder receives the committed source tree and no model credentials. It
+  runs deterministic CI and produces the verified release archive.
+- The persistent canary runner receives only that archive, the canary runtime,
+  and a tiny fixture Git repository. Its private filesystem holds only the
+  dedicated test accounts' OAuth state; it never receives the Holler source
+  checkout.
+
+Both real clients run in the same credentialed sandbox and OS user because
+Holler uses a local Unix socket. The named runner auto-stops after 15 idle
+minutes, and Daytona preserves its filesystem across stop/start and archive.
+Each run begins with a stop/start boundary, uses a private per-run directory,
+downloads body-free evidence, removes that directory, and stops the runner.
+Evidence contains IDs, hashes, versions, assertions, timings, and usage
+totals—not peer message bodies or auth files.
+
+Use the provider probe only when you explicitly want to create a billable
+sandbox:
+
+```sh
+python3 -m venv .runs/canary/venv
+.runs/canary/venv/bin/pip install -r scripts/canary/requirements-daytona.txt
+DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
+  scripts/canary/daytona_controller.py probe --execute
+```
+
+Without `--execute`, the provider tool does not create anything. By default a
+successful probe is deleted in a `finally` block; `--keep` is an explicit
+debugging escape hatch.
+
+Once a verified artifact and authenticated runner exist, the credentialed core
+canary is launched explicitly:
+
+```sh
+DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
+  scripts/canary/daytona_controller.py run .runs/canary/request.json \
+  --artifact dist/holler-VERSION-linux-amd64.tar.gz \
+  --output .runs/canary/real-evidence.json \
+  --execute
+```
+
+The `run` command accepts the `core` tier today. It uploads only the approved
+archive, request, and small worker bundle; runs C0-C3; downloads body-free
+evidence; removes the per-run files; and stops the persistent runner in a
+`finally` block. `--keep-on-failure` is available only for deliberate
+debugging.
+
+## Credential bootstrap
+
+Do not put OAuth state in this repository, a request manifest, a snapshot, a
+FUSE volume, or an environment variable. Create one named persistent Daytona
+runner and log each dedicated test account in from its terminal. Claude Code
+and Codex use separate mode-`0700` directories on the runner's normal
+filesystem. The accounts should have no source-hosting, production,
+billing-administration, or unrelated-data access. Treat the Daytona
+organization, its API keys, and this dedicated runner as the credential trust
+boundary.
+
+The controller creates a credential-free client snapshot first. It installs
+the Go version required by `go.mod` from a hash-pinned official archive, then
+installs the pinned Claude and Codex clients. Its name is derived from all
+three versions, so a toolchain or client upgrade creates a new immutable
+environment rather than mutating the previous one:
+
+```sh
+DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
+  scripts/canary/daytona_controller.py bootstrap .runs/canary/request.json --execute
+
+DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
+  scripts/canary/daytona_controller.py runner .runs/canary/request.json --execute
+```
+
+The second command creates or verifies `holler-canary-runner` and returns its
+ID. Open that runner's terminal in Daytona and run the two printed login
+commands yourself. Keep the runner: stopping or archiving it preserves the
+OAuth state without capturing credentials in a reusable snapshot.
+
+Build the committed source in an uncredentialed sandbox. `git archive` means a
+local checkpoint commit can be tested without a push or PR:
+
+```sh
+DAYTONA_API_KEY=... .runs/canary/venv/bin/python \
+  scripts/canary/daytona_controller.py build .runs/canary/request.json \
+  --output .runs/canary/holler-linux-amd64.tar.gz \
+  --execute
+```
+
+The builder stops the persistent runner first, preserving its filesystem while
+keeping the workflow within Daytona's entry-tier concurrent-memory limit.
+
+Then regenerate the request with `--artifact` so the downloaded archive hash
+becomes part of the operator-approved request before running the real canary.
+
+The real worker becomes usable only after the named runner exists, the pinned
+clients are present in its base snapshot, both authentication preflights
+succeed, and Claude's interactive onboarding state is complete. The controller
+idempotently seeds only a dark theme, the pinned completed-onboarding version,
+and trust for `/home/daytona/.holler-canary-workspace`; it preserves all other
+Claude configuration and never prints or exports credentials. C0 verifies that
+non-secret state, then runs `claude --init-only` to require Holler's actual
+`SessionStart` registration and hydration without a model call. C0 also opens
+Codex's real first-launch review, selects “Trust all” only when exactly Holler's
+two lifecycle hooks are pending, and verifies that Codex persisted SHA-256 trust
+records for both hooks before any model call.
+
+Interactive scenarios wait for the live Holler registration before submitting
+input, send the terminal Enter key rather than a newline, and use expected
+markers that never appear literally in prompts or peer message bodies. Usage
+is recorded only after the corresponding response marker is observed. Until
+these gates pass, the fake driver still tests manifest integrity, tier
+accounting, budget enforcement, provider planning, and body-free evidence
+generation without model calls.

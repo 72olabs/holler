@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "C0",
+  "name": "packaged-preflight",
+  "description": "Verify the release archive, build identity, client versions, connector manifests, interactive readiness, Codex hook trust, and Claude lifecycle hooks before any model call.",
+  "required_clients": [],
+  "estimated_model_turns": 0,
+  "timeout_seconds": 600,
+  "checks": [
+    "archive-checksum",
+    "archive-allowlist",
+    "clean-build-identity",
+    "client-version-pins",
+    "connector-doctor",
+    "interactive-onboarding",
+    "codex-hook-trust",
+    "claude-lifecycle-hook"
+  ]
+}

@@ -73,6 +73,32 @@ func TestBuildLaunchExportsExplicitNamingLifecycle(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeLaunchPreservesAllocatedIdentityInPrintMode(t *testing.T) {
+	spec, err := connector.BuildClaudeLaunch(connector.ClaudeLaunchConfig{
+		ConnectorConfig: connector.ClaudeConnectorConfig{
+			AttentionMode: connector.AttentionHookLongPoll, Actor: "reviewer", NameMode: "allocate",
+		},
+		HollerBinary: "/bin/holler", RunID: "run-1", LaunchTag: "tab-7",
+		ExtraArgs: []string{"--print", "--model", "haiku"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Env["HOLLER_RUN"] == "run-1" {
+		t.Fatalf("print launch did not transport its continuity binding: %+v", spec.Env)
+	}
+	t.Setenv("HOME", t.TempDir())
+	resolved, err := connector.ResolveRuntimeBinding("claude", connector.RuntimeBinding{
+		Actor: "reviewer", RunID: spec.Env["HOLLER_RUN"], NameMode: "allocate",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.RunID != "run-1" || resolved.LaunchTag != "tab-7" {
+		t.Fatalf("resolved print binding = %+v", resolved)
+	}
+}
+
 func TestBuildCodexLaunchBindsProfileProjectAndAttention(t *testing.T) {
 	spec, err := connector.BuildCodexLaunch(connector.CodexLaunchConfig{
 		ConnectorConfig: connector.CodexConnectorConfig{
