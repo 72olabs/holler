@@ -638,8 +638,15 @@ class PtyProcess:
                 self.process.wait(timeout=timeout)
             except subprocess.TimeoutExpired as error:
                 raise CanaryFailure("Claude did not complete its graceful session exit") from error
+        self._sweep_process_group()
         self.selector.close()
         os.close(self.master)
+
+    def _sweep_process_group(self) -> None:
+        """Stop hook/monitor descendants that can outlive an exited TUI leader."""
+        self._signal(signal.SIGTERM)
+        time.sleep(0.25)
+        self._signal(signal.SIGKILL)
 
     def _signal(self, requested: signal.Signals) -> None:
         try:

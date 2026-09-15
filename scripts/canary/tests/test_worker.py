@@ -49,6 +49,14 @@ from worker import (
 
 
 class WorkerTests(unittest.TestCase):
+    def test_graceful_exit_sweeps_hook_monitor_process_group(self) -> None:
+        process = object.__new__(PtyProcess)
+        observed: list[signal.Signals] = []
+        process._signal = observed.append
+        with patch("worker.time.sleep"):
+            process._sweep_process_group()
+        self.assertEqual(observed, [signal.SIGTERM, signal.SIGKILL])
+
     def test_wait_for_no_live_registration_accepts_ended_session(self) -> None:
         worker = SimpleNamespace(
             actor_directory=lambda: {
