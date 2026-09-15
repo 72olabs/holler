@@ -238,46 +238,6 @@ def sqlite_scalar(database: Path, query: str, *parameters: object) -> Any:
     return row[0]
 
 
-def message_delivery_state(
-    database: Path,
-    *,
-    from_actor: str,
-    idempotency_key: str,
-    recipient_actor: str,
-) -> tuple[str, str, int]:
-    """Return one correlation-safe delivery row without exposing its message body."""
-    connection: sqlite3.Connection | None = None
-    try:
-        uri = f"file:{database}?mode=ro"
-        connection = sqlite3.connect(uri, uri=True, timeout=5)
-        rows = connection.execute(
-            """
-            SELECT messages.message_id, deliveries.state, deliveries.attempt
-            FROM messages
-            JOIN deliveries USING (message_id)
-            WHERE messages.from_actor = ?
-              AND messages.idempotency_key = ?
-              AND deliveries.recipient_actor = ?
-            """,
-            (from_actor, idempotency_key, recipient_actor),
-        ).fetchall()
-    except sqlite3.Error as error:
-        raise CanaryFailure(f"cannot inspect canary delivery state: {error}") from error
-    finally:
-        if connection is not None:
-            connection.close()
-    if len(rows) != 1:
-        raise CanaryFailure("canary correlation did not resolve exactly one delivery")
-    message_id, state, attempt = rows[0]
-    if (
-        not isinstance(message_id, str)
-        or not isinstance(state, str)
-        or not isinstance(attempt, int)
-    ):
-        raise CanaryFailure("canary delivery row has an invalid shape")
-    return message_id, state, attempt
-
-
 def codex_reported_tokens(output: str) -> int:
     last_usage: dict[str, Any] | None = None
     for line in output.splitlines():
@@ -402,6 +362,52 @@ def delivery_event_attempts(events: object, *, message_id: str, actor: str) -> l
         if isinstance(attempt, int):
             attempts.append(attempt)
     return attempts
+
+
+def sent_message_id(
+    events: object,
+    *,
+    from_actor: str,
+    from_run: str,
+    recipient_actor: str,
+) -> str:
+    """Resolve one sent message through the body-free durable event stream."""
+    if not isinstance(events, list):
+        raise CanaryFailure("durable events are not a list")
+    matches: list[str] = []
+    for event in events:
+        if (
+            not isinstance(event, dict)
+            or event.get("kind") != "message.sent"
+            or event.get("actor_id") != from_actor
+        ):
+            continue
+        payload = event.get("payload")
+        recipients = payload.get("recipients") if isinstance(payload, dict) else None
+        message_id = event.get("message_id")
+        if (
+            isinstance(payload, dict)
+            and payload.get("from_run") == from_run
+            and isinstance(recipients, list)
+            and recipient_actor in recipients
+            and isinstance(message_id, str)
+        ):
+            matches.append(message_id)
+    if len(matches) != 1:
+        raise CanaryFailure("canary correlation did not resolve exactly one sent message")
+    return matches[0]
+
+
+def delivery_was_queued(events: object, *, message_id: str, actor: str) -> bool:
+    if not isinstance(events, list):
+        raise CanaryFailure("operational lifecycle events are not a list")
+    return any(
+        isinstance(event, dict)
+        and event.get("kind") == "delivery.queued"
+        and event.get("message_id") == message_id
+        and event.get("actor_id") == actor
+        for event in events
+    )
 
 
 def delivery_was_acked(events: object, *, message_id: str, actor: str) -> bool:
@@ -1290,15 +1296,19 @@ class Worker:
             f"The body must contain token {token}. Use idempotency key {token}. Stop after the tool succeeds.",
         )
         self.active_check = "c1-offline-delivery-state"
-        _, state, attempt = message_delivery_state(
-            self.database,
+        message_id = sent_message_id(
+            self.durable_events(),
             from_actor="canary-codex",
-            idempotency_key=token,
+            from_run="c1-codex",
             recipient_actor="canary-claude",
         )
-        if (state, attempt) != ("queued", 0) or actor_delivery_counts(
-            self.actor_directory(), actor="canary-claude"
-        ) != (1, 0):
+        events = self.operational_events()
+        if (
+            not delivery_was_queued(events, message_id=message_id, actor="canary-claude")
+            or delivery_event_attempts(events, message_id=message_id, actor="canary-claude")
+            or delivery_was_acked(events, message_id=message_id, actor="canary-claude")
+            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0)
+        ):
             raise CanaryFailure("C1 durable message was not queued exactly once")
         self.active_check = "c1-claude-claim-ack"
         self.run_claude(
@@ -1307,15 +1317,15 @@ class Worker:
             "Do not echo its full body. Stop after the acknowledgement succeeds.",
         )
         self.active_check = "c1-terminal-delivery-state"
-        _, state, attempt = message_delivery_state(
-            self.database,
-            from_actor="canary-codex",
-            idempotency_key=token,
-            recipient_actor="canary-claude",
-        )
-        if (state, attempt) != ("acked", 1) or actor_delivery_counts(
-            self.actor_directory(), actor="canary-claude"
-        ) != (0, 0):
+        events = self.operational_events()
+        if (
+            delivery_event_attempts(events, message_id=message_id, actor="canary-claude") != [1]
+            or not delivery_was_acked(events, message_id=message_id, actor="canary-claude")
+            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (0, 0)
+            or not lifecycle_evidence_complete(
+                events, actor="canary-claude", run_id="c1-claude"
+            )
+        ):
             raise CanaryFailure("C1 delivery was not acknowledged exactly once")
         return ["durable-send", "offline-hydration", "mcp-claim", "mcp-ack"]
 
@@ -1394,32 +1404,37 @@ class Worker:
             "Stop after the tool succeeds.",
         )
         self.active_check = "c3-pre-restart-delivery-state"
-        message_id, state, attempt = message_delivery_state(
-            self.database,
+        message_id = sent_message_id(
+            self.durable_events(),
             from_actor="canary-codex",
-            idempotency_key=token,
+            from_run="c3-codex",
             recipient_actor="canary-claude",
         )
-        if (state, attempt) != ("queued", 0) or actor_delivery_counts(
-            self.actor_directory(), actor="canary-claude"
-        ) != (1, 0):
+        events = self.operational_events()
+        if (
+            not delivery_was_queued(events, message_id=message_id, actor="canary-claude")
+            or delivery_event_attempts(events, message_id=message_id, actor="canary-claude")
+            or delivery_was_acked(events, message_id=message_id, actor="canary-claude")
+            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0)
+        ):
             raise CanaryFailure("C3 durable message was not queued exactly once before restart")
         self.active_check = "c3-daemon-restart"
         self.stop_daemon()
         self.start_daemon()
         self.active_check = "c3-post-restart-delivery-state"
-        restarted_message_id, state, attempt = message_delivery_state(
-            self.database,
+        restarted_message_id = sent_message_id(
+            self.durable_events(),
             from_actor="canary-codex",
-            idempotency_key=token,
+            from_run="c3-codex",
             recipient_actor="canary-claude",
         )
+        events = self.operational_events()
         if (
             restarted_message_id != message_id
-            or (state, attempt) != ("queued", 0)
-            or actor_delivery_counts(
-                self.actor_directory(), actor="canary-claude"
-            ) != (1, 0)
+            or not delivery_was_queued(events, message_id=message_id, actor="canary-claude")
+            or delivery_event_attempts(events, message_id=message_id, actor="canary-claude")
+            or delivery_was_acked(events, message_id=message_id, actor="canary-claude")
+            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (1, 0)
         ):
             raise CanaryFailure("C3 queued delivery did not survive daemon restart unchanged")
         self.active_check = "c3-claude-claim-ack"
@@ -1429,18 +1444,21 @@ class Worker:
             "Stop after the acknowledgement succeeds.",
         )
         self.active_check = "c3-terminal-delivery-state"
-        terminal_message_id, state, attempt = message_delivery_state(
-            self.database,
+        terminal_message_id = sent_message_id(
+            self.durable_events(),
             from_actor="canary-codex",
-            idempotency_key=token,
+            from_run="c3-codex",
             recipient_actor="canary-claude",
         )
+        events = self.operational_events()
         if (
             terminal_message_id != message_id
-            or (state, attempt) != ("acked", 1)
-            or actor_delivery_counts(
-                self.actor_directory(), actor="canary-claude"
-            ) != (0, 0)
+            or delivery_event_attempts(events, message_id=message_id, actor="canary-claude") != [1]
+            or not delivery_was_acked(events, message_id=message_id, actor="canary-claude")
+            or actor_delivery_counts(self.actor_directory(), actor="canary-claude") != (0, 0)
+            or not lifecycle_evidence_complete(
+                events, actor="canary-claude", run_id="c3-claude"
+            )
         ):
             raise CanaryFailure("C3 delivery was not acknowledged exactly once after restart")
         return ["daemon-restart", "client-reconnect", "no-message-loss", "no-duplicate-processing"]
