@@ -1160,37 +1160,8 @@ class Worker:
             session_a.close()
             session_b.close()
 
-            self.active_check = "c5-finalize-first-identity"
-            self.run_allocated_claude(
-                "c5-claude",
-                "c5-a-bind",
-                "slot-a",
-                project,
-                "Use bus_status once to finalize this Holler identity. Finish with marker C5_A_BOUND.",
-            )
-            self.active_check = "c5-finalize-second-identity"
-            self.run_allocated_claude(
-                "c5-claude",
-                "c5-b-bind",
-                "slot-b",
-                project,
-                "Use bus_status once to finalize this Holler identity. Finish with marker C5_B_BOUND.",
-            )
-            directory = self.actor_directory()
-            actor_a = actor_for_run(
-                directory, run_id="c5-a-bind", harness="claude", live_only=False
-            )
-            actor_b = actor_for_run(
-                directory, run_id="c5-b-bind", harness="claude", live_only=False
-            )
-            if (
-                actor_a is None
-                or actor_b is None
-                or actor_a == actor_b
-                or not actor_a.startswith("c5-claude-")
-                or not actor_b.startswith("c5-claude-")
-            ):
-                raise CanaryFailure("C5 did not finalize two distinct allocated identities")
+            actor_a = candidate_a
+            actor_b = candidate_b
 
             self.active_check = "c5-alias-collision"
             alias_ready = False
@@ -1254,6 +1225,12 @@ class Worker:
                 f"Use bus_claim to claim exact message ID {message_ids['a']}, then bus_ack its lease. "
                 "Do not echo the body. Finish with marker C5_A_ACKED.",
             )
+            resumed_a = actor_for_run(
+                self.actor_directory(), run_id="c5-a-resume", harness="claude", live_only=False
+            )
+            if resumed_a != actor_a:
+                self.active_check = "c5-first-resume-identity-mismatch"
+                raise CanaryFailure("C5 first launch tag did not resume its allocated identity")
             self.active_check = "c5-second-resume"
             self.run_allocated_claude(
                 "c5-claude",
@@ -1263,6 +1240,12 @@ class Worker:
                 f"Use bus_claim to claim exact message ID {message_ids['b']}, then bus_ack its lease. "
                 "Do not echo the body. Finish with marker C5_B_ACKED.",
             )
+            resumed_b = actor_for_run(
+                self.actor_directory(), run_id="c5-b-resume", harness="claude", live_only=False
+            )
+            if resumed_b != actor_b:
+                self.active_check = "c5-second-resume-identity-mismatch"
+                raise CanaryFailure("C5 second launch tag did not resume its allocated identity")
 
             self.active_check = "c5-inbox-isolation"
             events = self.operational_events(project)

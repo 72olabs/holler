@@ -4,7 +4,7 @@
   "name": "identity-collision-resume",
   "description": "Launch concurrent allocated identities, exercise alias collision and resume continuity, and prove inbox isolation.",
   "required_clients": ["claude", "codex"],
-  "estimated_model_turns": 4,
+  "estimated_model_turns": 2,
   "timeout_seconds": 480,
   "checks": [
     "allocated-identities",
