@@ -25,6 +25,17 @@ DEFAULT_CLIENTS = {
     },
 }
 
+MINIMUM_CLIENTS = {
+    "claude": {
+        "version": "2.1.247",
+        "relative_binary": "claude/node_modules/@anthropic-ai/claude-code/cli.js",
+    },
+    "codex": {
+        "version": "0.149.1",
+        "relative_binary": "codex/node_modules/@openai/codex/bin/codex.js",
+    },
+}
+
 # Daytona's credentialed runner proxy rejects the Codex Responses WebSocket.
 # Keep the pinned subscription login but use the supported custom-provider
 # settings to select the HTTP/SSE transport for canary traffic.

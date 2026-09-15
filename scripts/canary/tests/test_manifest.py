@@ -27,6 +27,8 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("go-1-26-0", request["execution"]["snapshot"])
         self.assertEqual(request["execution"]["runner_name"], "holler-canary-runner")
         self.assertTrue(request["execution"]["runner_persistent"])
+        self.assertFalse(request["fixtures"]["upgrade_from"]["required"])
+        self.assertFalse(request["fixtures"]["client_bundle"]["required"])
         self.assertEqual(
             request["execution"]["runner_fixture"],
             "/home/daytona/.holler-canary-workspace",
@@ -66,6 +68,15 @@ class ManifestTests(unittest.TestCase):
         request["api_key"] = "must-not-appear"
         request["request_hash"] = request_hash(request)
         with self.assertRaisesRegex(ManifestError, "secret-like"):
+            validate_request(request)
+
+    def test_extended_request_requires_upgrade_and_client_fixtures(self) -> None:
+        request = create_request(REPO, ref="HEAD", tier="extended", clients=client_policy())
+        self.assertTrue(request["fixtures"]["upgrade_from"]["required"])
+        self.assertTrue(request["fixtures"]["client_bundle"]["required"])
+        request["fixtures"]["upgrade_from"]["required"] = False
+        request["request_hash"] = request_hash(request)
+        with self.assertRaisesRegex(ManifestError, "requirement does not match"):
             validate_request(request)
 
 

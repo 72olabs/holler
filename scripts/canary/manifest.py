@@ -12,10 +12,10 @@ from typing import Any
 
 from budget import budget_for_tier, validate_estimate
 from catalog import load_catalog, scenarios_for_tier
-from clients import assert_low_cost_defaults, client_policy
+from clients import MINIMUM_CLIENTS, assert_low_cost_defaults, client_policy
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 HASH_PREFIX = "sha256:"
 GO_TOOLCHAINS = {
     "1.26": {
@@ -101,6 +101,8 @@ def create_request(
     tier: str,
     clients: dict[str, dict[str, Any]] | None = None,
     artifact: Path | None = None,
+    upgrade_from: Path | None = None,
+    client_bundle: Path | None = None,
     snapshot: str | None = None,
     runner_name: str = "holler-canary-runner",
 ) -> dict[str, Any]:
@@ -119,14 +121,19 @@ def create_request(
         claude_pin = re.sub(r"[^a-zA-Z0-9]+", "-", str(selected_clients["claude"]["version"])).strip("-")
         codex_pin = re.sub(r"[^a-zA-Z0-9]+", "-", str(selected_clients["codex"]["version"])).strip("-")
         snapshot = f"holler-canary-go-{go_pin}-claude-{claude_pin}-codex-{codex_pin}"
-    artifact_record: dict[str, Any] = {"required": tier != "preflight"}
-    if artifact is not None:
-        artifact = artifact.resolve()
-        if not artifact.is_file():
-            raise ManifestError(f"artifact does not exist: {artifact}")
-        artifact_record.update(
-            {"filename": artifact.name, "bytes": artifact.stat().st_size, "sha256": sha256_file(artifact)}
-        )
+    artifact_record = file_record(artifact, required=tier != "preflight")
+    scenario_ids = {scenario["id"] for scenario in scenarios}
+    fixtures = {
+        "upgrade_from": {
+            **file_record(upgrade_from, required="C6" in scenario_ids),
+            "connector_version": "0.7.1",
+            "schema_version": 14,
+        },
+        "client_bundle": {
+            **file_record(client_bundle, required="C8" in scenario_ids),
+            "clients": MINIMUM_CLIENTS,
+        },
+    }
     scenario_records = []
     for scenario in scenarios:
         record = dict(scenario)
@@ -146,6 +153,7 @@ def create_request(
         "clients": selected_clients,
         "budget": limits,
         "artifact": artifact_record,
+        "fixtures": fixtures,
         "execution": {
             "provider": "daytona",
             "snapshot": snapshot,
@@ -176,7 +184,7 @@ def validate_request(request: object, *, allow_model_override: bool = False) -> 
     supplied_hash = request.get("request_hash")
     if not isinstance(supplied_hash, str) or supplied_hash != request_hash(request):
         raise ManifestError("request hash does not match the request contents")
-    for required in ("source", "tier", "scenarios", "clients", "budget", "artifact", "execution"):
+    for required in ("source", "tier", "scenarios", "clients", "budget", "artifact", "fixtures", "execution"):
         if required not in request:
             raise ManifestError(f"request is missing {required}")
     _reject_embedded_secrets(request)
@@ -209,7 +217,28 @@ def validate_request(request: object, *, allow_model_override: bool = False) -> 
         raise ManifestError("credentialed canaries must not receive a source checkout")
     if execution.get("evidence_contains_message_bodies") is not False:
         raise ManifestError("canary evidence must remain body-free")
+    fixtures = request["fixtures"]
+    if not isinstance(fixtures, dict):
+        raise ManifestError("request fixtures must be an object")
+    scenario_ids = {scenario["id"] for scenario in scenarios}
+    for name, scenario_id in (("upgrade_from", "C6"), ("client_bundle", "C8")):
+        fixture = fixtures.get(name)
+        if not isinstance(fixture, dict):
+            raise ManifestError(f"request fixture {name} must be an object")
+        if fixture.get("required") is not (scenario_id in scenario_ids):
+            raise ManifestError(f"request fixture {name} requirement does not match scenarios")
     return request
+
+
+def file_record(path: Path | None, *, required: bool) -> dict[str, Any]:
+    record: dict[str, Any] = {"required": required}
+    if path is None:
+        return record
+    path = path.resolve()
+    if not path.is_file():
+        raise ManifestError(f"fixture does not exist: {path}")
+    record.update({"filename": path.name, "bytes": path.stat().st_size, "sha256": sha256_file(path)})
+    return record
 
 
 def _reject_embedded_secrets(value: object, path: str = "request") -> None:

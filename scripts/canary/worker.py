@@ -13,6 +13,7 @@ import pty
 import re
 import selectors
 import signal
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -28,11 +29,17 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from budget import BudgetExceeded, BudgetLedger  # noqa: E402
-from clients import claude_live_command, claude_print_command, codex_exec_command, codex_live_command  # noqa: E402
+from clients import (  # noqa: E402
+    MINIMUM_CLIENTS,
+    claude_live_command,
+    claude_print_command,
+    codex_exec_command,
+    codex_live_command,
+)
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
 
 
-SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3", "C4", "C5"}
+SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"}
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 TERMINAL_QUERY_RESPONSES = {
     b"\x1b[6n": b"\x1b[1;1R",
@@ -169,6 +176,18 @@ def parse_version(output: str) -> str:
     if not match:
         raise CanaryFailure(f"cannot parse client version from {output.strip()!r}")
     return match.group(1)
+
+
+def sqlite_scalar(database: Path, query: str, *parameters: object) -> Any:
+    try:
+        uri = f"file:{database}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+            row = connection.execute(query, parameters).fetchone()
+    except sqlite3.Error as error:
+        raise CanaryFailure(f"cannot inspect canary database: {error}") from error
+    if row is None:
+        raise CanaryFailure("canary database query returned no row")
+    return row[0]
 
 
 def codex_reported_tokens(output: str) -> int:
@@ -540,7 +559,15 @@ class PtyProcess:
 
 
 class Worker:
-    def __init__(self, request: dict[str, Any], archive: Path, root: Path):
+    def __init__(
+        self,
+        request: dict[str, Any],
+        archive: Path,
+        root: Path,
+        *,
+        upgrade_from: Path | None = None,
+        client_bundle: Path | None = None,
+    ):
         self.request = request
         self.archive = archive
         self.root = root
@@ -550,6 +577,8 @@ class Worker:
         self.socket = self.runtime / "holler.sock"
         self.database = self.runtime / "holler.sqlite3"
         self.package = safe_extract(archive, root / "package")
+        self.upgrade_package = safe_extract(upgrade_from, root / "upgrade") if upgrade_from else None
+        self.client_bundle = safe_extract(client_bundle, root / "clients") if client_bundle else None
         self.holler = self.package / "bin" / "holler"
         self.hollerd = self.package / "bin" / "hollerd"
         self.env = os.environ.copy()
@@ -624,14 +653,21 @@ class Worker:
             os.killpg(self.daemon.pid, signal.SIGKILL)
             self.daemon.wait(timeout=5)
 
-    def setup_connectors(self) -> None:
+    def setup_connectors(
+        self,
+        clients: dict[str, dict[str, Any]] | None = None,
+        *,
+        claude_actor: str = "canary-claude",
+        codex_actor: str = "canary-codex",
+    ) -> None:
+        clients = clients or self.request["clients"]
         marketplace = self.package / "share" / "holler" / "marketplace"
         common = ["--project", "canary", "--channel", "direct", "--socket", str(self.socket), "--name-mode", "exact"]
         run_command(
             [
                 str(self.holler), "connector", "setup", "--harness", "claude", "--apply",
-                "--attention", "hook-long-poll", "--actor", "canary-claude", "--peer", "canary-codex",
-                "--marketplace", str(marketplace), "--client-binary", str(self.request["clients"]["claude"]["binary"]),
+                "--attention", "hook-long-poll", "--actor", claude_actor, "--peer", codex_actor,
+                "--marketplace", str(marketplace), "--client-binary", str(clients["claude"]["binary"]),
                 *common,
             ],
             cwd=self.fixture,
@@ -641,8 +677,8 @@ class Worker:
         run_command(
             [
                 str(self.holler), "connector", "setup", "--harness", "codex", "--apply",
-                "--attention", "native-queue", "--actor", "canary-codex", "--peer", "canary-claude",
-                "--marketplace", str(marketplace), "--client-binary", str(self.request["clients"]["codex"]["binary"]),
+                "--attention", "native-queue", "--actor", codex_actor, "--peer", claude_actor,
+                "--marketplace", str(marketplace), "--client-binary", str(clients["codex"]["binary"]),
                 "--project-root", str(self.fixture), *common,
             ],
             cwd=self.fixture,
@@ -812,16 +848,22 @@ class Worker:
             "--socket", str(self.socket), "--", *client_args,
         ]
 
-    def run_claude_lifecycle_preflight(self) -> None:
-        run_id = "c0-claude-init"
-        command = claude_live_command(self.request["clients"]["claude"])[1:] + ["--init-only"]
+    def run_claude_lifecycle_preflight(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        actor: str = "canary-claude",
+        run_id: str = "c0-claude-init",
+    ) -> None:
+        config = config or self.request["clients"]["claude"]
+        command = claude_live_command(config)[1:] + ["--init-only"]
         run_command(
-            self.launcher("claude", "canary-claude", run_id, command),
+            self.launcher("claude", actor, run_id, command),
             cwd=self.fixture,
             env=self.env,
             timeout=60,
         )
-        if not self.has_lifecycle_evidence("canary-claude", run_id):
+        if not self.has_lifecycle_evidence(actor, run_id):
             raise CanaryFailure("Claude init-only did not produce registration and hydration evidence")
 
     def validate_claude_fixture(self) -> None:
@@ -837,9 +879,17 @@ class Worker:
         ):
             raise CanaryFailure("Claude cleanroom fixture state is incomplete")
 
-    def run_claude(self, actor: str, run_id: str, prompt: str, max_usd: float = 0.10) -> str:
+    def run_claude(
+        self,
+        actor: str,
+        run_id: str,
+        prompt: str,
+        max_usd: float = 0.10,
+        config: dict[str, Any] | None = None,
+    ) -> str:
+        config = config or self.request["clients"]["claude"]
         self.ledger.ensure_capacity(client="claude", turns=1)
-        command = claude_print_command(self.request["clients"]["claude"], max_usd)[1:]
+        command = claude_print_command(config, max_usd)[1:]
         started = time.monotonic()
         result = run_command(
             self.launcher("claude", actor, run_id, command),
@@ -854,9 +904,16 @@ class Worker:
         )
         return result.stdout
 
-    def run_codex(self, actor: str, run_id: str, prompt: str) -> str:
+    def run_codex(
+        self,
+        actor: str,
+        run_id: str,
+        prompt: str,
+        config: dict[str, Any] | None = None,
+    ) -> str:
+        config = config or self.request["clients"]["codex"]
         self.ledger.ensure_capacity(client="codex", turns=1)
-        command = codex_exec_command(self.request["clients"]["codex"])[1:]
+        command = codex_exec_command(config)[1:]
         started = time.monotonic()
         result = run_command(
             self.launcher("codex", actor, run_id, command),
@@ -1298,6 +1355,200 @@ class Worker:
                 session_a.close()
         return ["allocated-identities", "alias-collision-visible", "resume-continuity", "inbox-isolation"]
 
+    def scenario_c6(self) -> list[str]:
+        fixture = self.request["fixtures"]["upgrade_from"]
+        if self.upgrade_package is None:
+            raise CanaryFailure("C6 requires the approved upgrade fixture")
+        old_holler = self.upgrade_package / "bin" / "holler"
+        old_hollerd = self.upgrade_package / "bin" / "hollerd"
+        old_identity = json.loads(
+            run_command([str(old_holler), "version"], cwd=self.fixture, env=self.env, timeout=30).stdout
+        )
+        if old_identity.get("version") != fixture["connector_version"]:
+            raise CanaryFailure("C6 upgrade fixture has the wrong connector version")
+
+        original = (self.package, self.holler, self.hollerd, self.socket, self.database)
+        c6_runtime = self.root / "c6-runtime"
+        c6_socket = c6_runtime / "holler.sock"
+        c6_database = c6_runtime / "holler.sqlite3"
+        token_before = "C6-BEFORE-" + self.request["request_hash"][-10:]
+        token_after = "C6-AFTER-" + self.request["request_hash"][-10:]
+        before_id = ""
+        try:
+            self.active_check = "c6-old-daemon"
+            self.stop_daemon()
+            self.package, self.holler, self.hollerd = self.upgrade_package, old_holler, old_hollerd
+            self.socket, self.database = c6_socket, c6_database
+            self.env["HOLLER_HOME"] = str(c6_runtime)
+            self.env["HOLLER_SOCKET"] = str(c6_socket)
+            self.start_daemon()
+            self.setup_connectors()
+            sent = self.json_command(
+                [
+                    str(self.holler), "send", "--socket", str(self.socket),
+                    "--actor", "c6-controller", "--run", "c6-before", "--project", "canary",
+                    "--channel", "direct", "--to-actor", "c6-claude",
+                    "--idempotency-key", token_before,
+                    "--body", json.dumps({"text": f"upgrade continuity {token_before}"}),
+                ]
+            )
+            message = sent.get("message") if isinstance(sent, dict) else None
+            before_id = message.get("message_id", "") if isinstance(message, dict) else ""
+            if not before_id:
+                raise CanaryFailure("C6 pre-upgrade send returned no message ID")
+            self.stop_daemon()
+            if sqlite_scalar(c6_database, "SELECT MAX(version) FROM schema_migrations") != 14:
+                raise CanaryFailure("C6 old database is not schema 14")
+            if sqlite_scalar(c6_database, "SELECT COUNT(*) FROM messages WHERE message_id = ?", before_id) != 1:
+                raise CanaryFailure("C6 pre-upgrade message was not durable")
+
+            self.active_check = "c6-database-migration"
+            self.package, self.holler, self.hollerd = original[:3]
+            self.start_daemon()
+            self.stop_daemon()
+            backups = list(c6_runtime.glob("holler.sqlite3.pre-v15.*.bak"))
+            if len(backups) != 1:
+                raise CanaryFailure("C6 migration did not create exactly one schema-14 backup")
+            if sqlite_scalar(backups[0], "SELECT MAX(version) FROM schema_migrations") != 14:
+                raise CanaryFailure("C6 migration backup does not preserve schema 14")
+            if sqlite_scalar(c6_database, "SELECT MAX(version) FROM schema_migrations") != 15:
+                raise CanaryFailure("C6 current database is not schema 15")
+            if sqlite_scalar(c6_database, "SELECT COUNT(*) FROM messages WHERE message_id = ?", before_id) != 1:
+                raise CanaryFailure("C6 migration lost the pre-upgrade message")
+
+            self.active_check = "c6-connector-refresh"
+            self.start_daemon()
+            self.setup_connectors(claude_actor="c6-claude", codex_actor="c6-codex")
+            sent_output = self.run_codex(
+                "c6-codex", "c6-post-upgrade-send",
+                f"Use Holler bus_send to actor c6-claude with idempotency key {token_after} and body "
+                f"token {token_after}. Finish with marker C6_SENT.",
+            )
+            if "C6_SENT" not in sent_output:
+                raise CanaryFailure("C6 Codex did not report the post-upgrade send marker")
+            acked = self.run_claude(
+                "c6-claude", "c6-post-upgrade-ack",
+                f"Use bus_inbox to claim every unread Holler message. Confirm one has message ID {before_id} "
+                f"and one contains token {token_after}; bus_ack every claimed lease. Do not echo bodies. "
+                "Finish with marker C6_ACKED.",
+            )
+            if "C6_ACKED" not in acked:
+                raise CanaryFailure("C6 Claude did not report both upgrade acknowledgements")
+            if actor_delivery_counts(self.actor_directory(), actor="c6-claude") != (0, 0):
+                raise CanaryFailure("C6 upgraded inbox was not empty after acknowledgement")
+            identity = json.loads(
+                run_command([str(self.holler), "version"], cwd=self.fixture, env=self.env, timeout=30).stdout
+            )
+            if identity.get("commit") != self.request["source"]["commit"] or identity.get("dirty") is not False:
+                raise CanaryFailure("C6 post-upgrade executable identity does not match the approved build")
+        finally:
+            self.stop_daemon()
+            self.package, self.holler, self.hollerd, self.socket, self.database = original
+            self.env["HOLLER_HOME"] = str(self.runtime)
+            self.env["HOLLER_SOCKET"] = str(self.socket)
+            self.start_daemon()
+            self.setup_connectors()
+        return [
+            "pre-upgrade-message", "database-migration", "connector-refresh",
+            "post-upgrade-delivery", "new-build-identity",
+        ]
+
+    def scenario_c7(self) -> list[str]:
+        limits = {
+            "claude_usd": 1.0,
+            "codex_reported_tokens": 10,
+            "model_turns": 1,
+            "wall_seconds": 1.0,
+        }
+        checks = (
+            ("turn-limit", {"client": "controller", "turns": 1}, {"client": "controller", "turns": 1}),
+            ("claude-dollar-limit", {"client": "claude", "cost_usd": 1.0, "turns": 0}, {"client": "claude", "cost_usd": 0.000001, "turns": 0}),
+            ("codex-reported-token-limit", {"client": "codex", "reported_tokens": 10, "turns": 0}, {"client": "codex", "reported_tokens": 1, "turns": 0}),
+            ("wall-clock-limit", {"client": "controller", "wall_seconds": 1.0, "turns": 0}, {"client": "controller", "wall_seconds": 0.001, "turns": 0}),
+        )
+        for name, fill, overflow in checks:
+            self.active_check = f"c7-{name}"
+            ledger = BudgetLedger(limits)
+            ledger.charge(**fill)
+            before = ledger.as_dict()
+            try:
+                ledger.ensure_capacity(**overflow)
+            except BudgetExceeded:
+                pass
+            else:
+                raise CanaryFailure(f"C7 {name} did not reject the over-budget operation")
+            if ledger.as_dict() != before:
+                raise CanaryFailure(f"C7 {name} mutated accounting after refusal")
+
+        self.active_check = "c7-clean-teardown"
+        sleeper = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            cwd=self.fixture,
+            env=self.env,
+            start_new_session=True,
+        )
+        os.killpg(sleeper.pid, signal.SIGTERM)
+        try:
+            sleeper.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            os.killpg(sleeper.pid, signal.SIGKILL)
+            sleeper.wait(timeout=5)
+            raise CanaryFailure("C7 process group ignored clean teardown") from error
+        if sleeper.poll() is None:
+            raise CanaryFailure("C7 child remained alive after teardown")
+        return [name for name, _, _ in checks] + ["clean-teardown"]
+
+    def scenario_c8(self) -> list[str]:
+        if self.client_bundle is None:
+            raise CanaryFailure("C8 requires the approved minimum-client bundle")
+        minimum: dict[str, dict[str, Any]] = {}
+        for name, details in MINIMUM_CLIENTS.items():
+            config = dict(self.request["clients"][name])
+            binary = self.client_bundle / details["relative_binary"]
+            if not binary.is_file():
+                raise CanaryFailure(f"C8 minimum {name} binary is missing")
+            config.update({"binary": str(binary), "version": details["version"]})
+            minimum[name] = config
+
+        pairs = (("tested", self.request["clients"]), ("minimum", minimum))
+        for label, clients in pairs:
+            self.active_check = f"c8-{label}-versions"
+            for name in ("claude", "codex"):
+                output = run_command(
+                    [str(clients[name]["binary"]), "--version"], cwd=self.fixture, env=self.env, timeout=30
+                ).stdout
+                if parse_version(output) != clients[name]["version"]:
+                    raise CanaryFailure(f"C8 {label} {name} version does not match its pin")
+            claude_actor = f"c8-{label}-claude"
+            codex_actor = f"c8-{label}-codex"
+            self.setup_connectors(clients, claude_actor=claude_actor, codex_actor=codex_actor)
+            self.run_claude_lifecycle_preflight(
+                clients["claude"], actor=claude_actor, run_id=f"c8-{label}-claude-init"
+            )
+            token = f"C8-{label.upper()}-" + self.request["request_hash"][-8:]
+            sent = self.run_codex(
+                codex_actor,
+                f"c8-{label}-codex-send",
+                f"Use Holler bus_send to actor {claude_actor} with idempotency key {token} and body token "
+                f"{token}. Finish with marker C8_SENT.",
+                config=clients["codex"],
+            )
+            if "C8_SENT" not in sent:
+                raise CanaryFailure(f"C8 {label} Codex did not report its send marker")
+            acked = self.run_claude(
+                claude_actor,
+                f"c8-{label}-claude-ack",
+                f"Use bus_inbox to claim the Holler message containing {token}, then bus_ack its lease. "
+                "Finish with marker C8_ACKED.",
+                config=clients["claude"],
+            )
+            if "C8_ACKED" not in acked:
+                raise CanaryFailure(f"C8 {label} Claude did not report its ack marker")
+            if actor_delivery_counts(self.actor_directory(), actor=claude_actor) != (0, 0):
+                raise CanaryFailure(f"C8 {label} inbox was not empty")
+        self.setup_connectors()
+        return ["minimum-client-versions", "tested-client-versions", "cold-path-parity", "live-path-parity"]
+
     def run(self) -> dict[str, Any]:
         requested = {scenario["id"] for scenario in self.request["scenarios"]}
         unsupported = requested - SUPPORTED_REAL_SCENARIOS
@@ -1313,6 +1564,9 @@ class Worker:
             "C3": self.scenario_c3,
             "C4": self.scenario_c4,
             "C5": self.scenario_c5,
+            "C6": self.scenario_c6,
+            "C7": self.scenario_c7,
+            "C8": self.scenario_c8,
         }
         for scenario in self.request["scenarios"]:
             self.active_scenario = scenario["id"]
@@ -1350,12 +1604,26 @@ def main() -> None:
     parser.add_argument("request", type=Path)
     parser.add_argument("archive", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--upgrade-from", type=Path)
+    parser.add_argument("--client-bundle", type=Path)
     args = parser.parse_args()
     request = load_request(args.request)
     with tempfile.TemporaryDirectory(prefix="holler-canary-") as directory:
         package_dir = Path(directory) / "package"
         package_dir.mkdir()
-        worker = Worker(request, args.archive.resolve(), Path(directory))
+        for name, path in (("upgrade_from", args.upgrade_from), ("client_bundle", args.client_bundle)):
+            approved = request["fixtures"][name]
+            if approved.get("required") and path is None:
+                raise CanaryFailure(f"missing required {name} fixture")
+            if path is not None and sha256_file(path) != approved.get("sha256"):
+                raise CanaryFailure(f"{name} fixture checksum does not match the request")
+        worker = Worker(
+            request,
+            args.archive.resolve(),
+            Path(directory),
+            upgrade_from=args.upgrade_from,
+            client_bundle=args.client_bundle,
+        )
         try:
             evidence = worker.run()
         except (BudgetExceeded, CanaryFailure, ManifestError) as error:

@@ -18,6 +18,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from clients import MINIMUM_CLIENTS  # noqa: E402
 from manifest import ManifestError, git, load_request, sha256_file  # noqa: E402
 
 
@@ -42,6 +43,7 @@ BUILDER_DOMAINS = [
     "proxy.golang.org",
     "sum.golang.org",
     "storage.googleapis.com",
+    "registry.npmjs.org",
 ]
 AUTH_ROOT = "/home/daytona/.holler-canary-auth"
 RUNNER_PURPOSE = "holler-canary-persistent-runner"
@@ -287,6 +289,86 @@ def build_daytona(request: dict[str, Any], *, repo: Path, output: Path) -> dict[
     return {"status": "PASS", "artifact": str(output), "sha256": sha256_file(output)}
 
 
+def build_client_bundle(request: dict[str, Any], *, output: Path) -> dict[str, Any]:
+    """Build the minimum-version client fixture without exposing OAuth state."""
+    require_committed_controller(request, SCRIPT_DIR.parent.parent)
+    require_daytona_key()
+    try:
+        from daytona import CreateSandboxFromSnapshotParams, Daytona
+        from daytona.common.errors import DaytonaNotFoundError
+    except ImportError as error:
+        raise RuntimeError(
+            "Daytona SDK is missing; install scripts/canary/requirements-daytona.txt in an isolated venv"
+        ) from error
+    execution = request["execution"]
+    daytona = Daytona()
+    try:
+        runner = daytona.get(execution["runner_name"])
+    except DaytonaNotFoundError:
+        runner = None
+    if runner is not None:
+        validate_runner(runner, execution)
+        if sandbox_state(runner) == "started":
+            runner.stop(timeout=120)
+    sandbox = daytona.create(
+        CreateSandboxFromSnapshotParams(
+            language="python",
+            snapshot=execution["snapshot"],
+            ephemeral=True,
+            ttl_minutes=30,
+            labels={"purpose": "holler-canary-client-bundle"},
+            domain_allow_list=",".join(BUILDER_DOMAINS),
+        ),
+        timeout=120,
+    )
+    try:
+        claude = MINIMUM_CLIENTS["claude"]
+        codex = MINIMUM_CLIENTS["codex"]
+        command = " && ".join(
+            [
+                "umask 022",
+                "mkdir -p /tmp/holler-client-matrix/claude /tmp/holler-client-matrix/codex",
+                f"npm install --prefix /tmp/holler-client-matrix/claude "
+                f"@anthropic-ai/claude-code@{shlex.quote(claude['version'])}",
+                f"npm install --prefix /tmp/holler-client-matrix/codex "
+                f"@openai/codex@{shlex.quote(codex['version'])}",
+                f"test \"$(/tmp/holler-client-matrix/{claude['relative_binary']} --version | awk '{{print $1}}')\" "
+                f"= {shlex.quote(claude['version'])}",
+                f"test \"$(/tmp/holler-client-matrix/{codex['relative_binary']} --version | awk '{{print $NF}}')\" "
+                f"= {shlex.quote(codex['version'])}",
+                "tar --dereference -czf /tmp/holler-client-matrix.tar.gz -C /tmp holler-client-matrix",
+            ]
+        )
+        response = sandbox.process.exec(command, timeout=600)
+        if response.exit_code != 0:
+            detail = (response.result or "").strip()[-4000:]
+            raise RuntimeError(
+                f"minimum-client bundle builder exited {response.exit_code}"
+                + (f":\n{detail}" if detail else "")
+            )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        sandbox.fs.download_file("/tmp/holler-client-matrix.tar.gz", str(output))
+    finally:
+        sandbox.delete()
+    return {"status": "PASS", "artifact": str(output), "sha256": sha256_file(output)}
+
+
+def validate_fixture(request: dict[str, Any], name: str, path: Path | None) -> Path | None:
+    approved = request["fixtures"][name]
+    if approved.get("required") and path is None:
+        raise RuntimeError(f"the approved request requires --{name.replace('_', '-')}")
+    if path is None:
+        return None
+    path = path.resolve()
+    if not approved.get("sha256"):
+        raise RuntimeError(f"the approved request must include a {name} checksum")
+    if path.name != approved.get("filename") or path.stat().st_size != approved.get("bytes"):
+        raise RuntimeError(f"local {name} metadata does not match the approved request")
+    if sha256_file(path) != approved["sha256"]:
+        raise RuntimeError(f"local {name} checksum does not match the approved request")
+    return path
+
+
 def bootstrap_daytona(request: dict[str, Any]) -> dict[str, Any]:
     require_committed_controller(request, SCRIPT_DIR.parent.parent)
     require_daytona_key()
@@ -485,15 +567,17 @@ def run_daytona(
     archive: Path,
     output: Path,
     keep_on_failure: bool,
+    upgrade_from: Path | None = None,
+    client_bundle: Path | None = None,
 ) -> dict[str, Any]:
     require_committed_controller(request, SCRIPT_DIR.parent.parent)
-    if request["tier"] not in {"preflight", "core"}:
-        raise RuntimeError("the credentialed worker currently accepts only the preflight and core tiers")
     approved_artifact = request["artifact"]
     if not approved_artifact.get("sha256"):
         raise RuntimeError("the approved request must include an artifact checksum")
     if sha256_file(archive) != approved_artifact["sha256"]:
         raise RuntimeError("local archive checksum does not match the approved request")
+    upgrade_from = validate_fixture(request, "upgrade_from", upgrade_from)
+    client_bundle = validate_fixture(request, "client_bundle", client_bundle)
     if not os.environ.get("DAYTONA_API_KEY"):
         raise RuntimeError("DAYTONA_API_KEY is not set")
     try:
@@ -538,6 +622,15 @@ def run_daytona(
                 raise RuntimeError("could not create an isolated per-run directory")
             remote_archive = f"{run_root}/{archive.name}"
             sandbox.fs.upload_file(str(archive), remote_archive)
+            worker_args = ""
+            if upgrade_from is not None:
+                remote_upgrade = f"{run_root}/{upgrade_from.name}"
+                sandbox.fs.upload_file(str(upgrade_from), remote_upgrade)
+                worker_args += f" --upgrade-from {shlex.quote(remote_upgrade)}"
+            if client_bundle is not None:
+                remote_clients = f"{run_root}/{client_bundle.name}"
+                sandbox.fs.upload_file(str(client_bundle), remote_clients)
+                worker_args += f" --client-bundle {shlex.quote(remote_clients)}"
             sandbox.fs.upload_file(str(request_path), f"{run_root}/request.json")
             sandbox.fs.upload_file(str(runtime_path), f"{run_root}/runtime.tar.gz")
             command = " && ".join(
@@ -549,7 +642,7 @@ def run_daytona(
                     f"CODEX_HOME={shlex.quote(AUTH_ROOT + '/codex')} "
                     f"python3 {shlex.quote(run_root + '/runtime/holler-canary/worker.py')} "
                     f"{shlex.quote(run_root + '/request.json')} {shlex.quote(remote_archive)} "
-                    f"--output {shlex.quote(run_root + '/evidence.json')}",
+                    f"--output {shlex.quote(run_root + '/evidence.json')}{worker_args}",
                 ]
             )
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -608,12 +701,21 @@ def main() -> None:
     run_parser.add_argument("--output", type=Path, required=True)
     run_parser.add_argument("--execute", action="store_true", help="required because this spends sandbox and model quota")
     run_parser.add_argument("--keep-on-failure", action="store_true")
+    run_parser.add_argument("--upgrade-from", type=Path)
+    run_parser.add_argument("--client-bundle", type=Path)
 
     build_parser = subparsers.add_parser("build", help="build the committed tree in an uncredentialed sandbox")
     build_parser.add_argument("request", type=Path)
     build_parser.add_argument("--repo", type=Path, default=SCRIPT_DIR.parent.parent)
     build_parser.add_argument("--output", type=Path, required=True)
     build_parser.add_argument("--execute", action="store_true")
+
+    bundle_parser = subparsers.add_parser(
+        "client-bundle", help="build the minimum-version client fixture in an uncredentialed sandbox"
+    )
+    bundle_parser.add_argument("request", type=Path)
+    bundle_parser.add_argument("--output", type=Path, required=True)
+    bundle_parser.add_argument("--execute", action="store_true")
 
     bootstrap_parser = subparsers.add_parser("bootstrap", help="create the pinned credential-free client snapshot")
     bootstrap_parser.add_argument("request", type=Path)
@@ -639,11 +741,19 @@ def main() -> None:
                     archive=args.artifact.resolve(),
                     output=args.output,
                     keep_on_failure=args.keep_on_failure,
+                    upgrade_from=args.upgrade_from,
+                    client_bundle=args.client_bundle,
                 ),
                 indent=2,
                 sort_keys=True,
             )
         )
+        return
+    if args.command == "client-bundle":
+        if not args.execute:
+            raise SystemExit("client-bundle is non-mutating unless --execute is supplied")
+        request = load_request(args.request)
+        print(json.dumps(build_client_bundle(request, output=args.output), indent=2, sort_keys=True))
         return
     if args.command == "build":
         if not args.execute:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 import tempfile
@@ -30,10 +31,28 @@ from worker import (
     minted_actors,
     parse_version,
     terminal_query_responses,
+    Worker,
 )
 
 
 class WorkerTests(unittest.TestCase):
+    def test_c7_budget_cutoffs_and_teardown_are_zero_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worker = Worker.__new__(Worker)
+            worker.fixture = Path(directory)
+            worker.env = os.environ.copy()
+            worker.active_check = "initialization"
+            self.assertEqual(
+                worker.scenario_c7(),
+                [
+                    "turn-limit",
+                    "claude-dollar-limit",
+                    "codex-reported-token-limit",
+                    "wall-clock-limit",
+                    "clean-teardown",
+                ],
+            )
+
     def test_usage_parsers(self) -> None:
         events = "\n".join(
             [

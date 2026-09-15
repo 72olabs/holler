@@ -23,6 +23,8 @@ def main() -> None:
     parser.add_argument("--ref", default="HEAD", help="committed Git ref to test; no PR is required")
     parser.add_argument("--tier", choices=TIER_SCENARIOS, default="core")
     parser.add_argument("--artifact", type=Path, help="optional already-built release archive")
+    parser.add_argument("--upgrade-from", type=Path, help="checksum-bind the v0.7.1 upgrade fixture")
+    parser.add_argument("--client-bundle", type=Path, help="checksum-bind the minimum-client bundle")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--claude-version")
     parser.add_argument("--codex-version")
@@ -46,6 +48,8 @@ def main() -> None:
         tier=args.tier,
         clients=policy,
         artifact=args.artifact,
+        upgrade_from=args.upgrade_from,
+        client_bundle=args.client_bundle,
         snapshot=args.snapshot,
         runner_name=args.runner_name,
     )
