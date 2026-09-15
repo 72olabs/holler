@@ -164,7 +164,20 @@ Then regenerate the request with `--artifact` so the downloaded archive hash
 becomes part of the operator-approved request before running the real canary.
 
 The real worker becomes usable only after the named runner exists, the pinned
-clients are present in its base snapshot, and both authentication preflights
-succeed. Until then, the fake driver tests manifest integrity, tier accounting,
-budget enforcement, provider planning, and body-free evidence generation
-without model calls.
+clients are present in its base snapshot, both authentication preflights
+succeed, and Claude's one-time interactive onboarding is complete. After the
+two login commands, launch `claude` once from
+`/home/daytona/.holler-canary-workspace`, choose a non-secret terminal theme,
+trust that dedicated empty Git fixture, and exit. The controller runs
+`claude --init-only` there before every credentialed canary and fails before a
+model call if onboarding or trust is incomplete. C0 then verifies Holler's
+actual Claude `SessionStart` registration and hydration through the same
+zero-model lifecycle path.
+
+Interactive scenarios wait for the live Holler registration before submitting
+input, send the terminal Enter key rather than a newline, and use expected
+markers that never appear literally in prompts or peer message bodies. Usage
+is recorded only after the corresponding response marker is observed. Until
+these gates pass, the fake driver still tests manifest integrity, tier
+accounting, budget enforcement, provider planning, and body-free evidence
+generation without model calls.

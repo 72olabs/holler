@@ -27,6 +27,10 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("go-1-26-0", request["execution"]["snapshot"])
         self.assertEqual(request["execution"]["runner_name"], "holler-canary-runner")
         self.assertTrue(request["execution"]["runner_persistent"])
+        self.assertEqual(
+            request["execution"]["runner_fixture"],
+            "/home/daytona/.holler-canary-workspace",
+        )
         validate_request(request)
 
     def test_tampering_is_rejected(self) -> None:
@@ -48,6 +52,13 @@ class ManifestTests(unittest.TestCase):
         request["execution"]["runner_persistent"] = False
         request["request_hash"] = request_hash(request)
         with self.assertRaisesRegex(ManifestError, "must be persistent"):
+            validate_request(request)
+
+    def test_runner_fixture_tampering_is_rejected(self) -> None:
+        request = create_request(REPO, ref="HEAD", tier="preflight", clients=client_policy())
+        request["execution"]["runner_fixture"] = "/tmp/untrusted-fixture"
+        request["request_hash"] = request_hash(request)
+        with self.assertRaisesRegex(ManifestError, "dedicated stable fixture"):
             validate_request(request)
 
     def test_secret_like_fields_are_rejected(self) -> None:

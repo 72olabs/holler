@@ -56,6 +56,7 @@ def execution_plan(request: dict[str, Any]) -> dict[str, Any]:
                 "artifact_sha256": request["artifact"].get("sha256", "produced-by-builder"),
                 "runner": execution["runner_name"],
                 "snapshot": execution["snapshot"],
+                "fixture": execution["runner_fixture"],
                 "persistent": True,
                 "auto_stop_minutes": execution["runner_auto_stop_minutes"],
             },
@@ -389,10 +390,17 @@ def create_auth_runner(request: dict[str, Any]) -> dict[str, Any]:
         )
     validate_runner(sandbox, execution)
     start_runner(sandbox)
+    fixture = shlex.quote(execution["runner_fixture"])
     response = sandbox.process.exec(
         f"umask 077 && mkdir -p {AUTH_ROOT}/claude {AUTH_ROOT}/codex && "
         f"chmod 700 {AUTH_ROOT} {AUTH_ROOT}/claude {AUTH_ROOT}/codex && "
-        f"test -w {AUTH_ROOT}/claude && test -w {AUTH_ROOT}/codex",
+        f"test -w {AUTH_ROOT}/claude && test -w {AUTH_ROOT}/codex && "
+        f"mkdir -p {fixture} && chmod 700 {fixture} && "
+        f"if ! test -d {fixture}/.git; then "
+        f"git -C {fixture} init -q && "
+        f"git -C {fixture} -c user.name='Holler Canary' -c user.email=canary@invalid "
+        f"commit --allow-empty -qm fixture; fi && "
+        f"test -d {fixture}/.git",
         timeout=30,
     )
     if response.exit_code != 0:
@@ -408,8 +416,15 @@ def create_auth_runner(request: dict[str, Any]) -> dict[str, Any]:
         "persistent_filesystem": True,
         "reused": reused,
         "auto_stop_minutes": execution["runner_auto_stop_minutes"],
-        "commands": ["claude auth login", "codex login"],
-        "note": "Log in once, then keep this runner; stop/start preserves OAuth state.",
+        "commands": [
+            "claude auth login",
+            "codex login",
+            f"cd {execution['runner_fixture']} && claude",
+        ],
+        "note": (
+            "Log in once, then launch Claude once in the stable fixture to complete its "
+            "non-secret theme and project-trust onboarding. Stop/start preserves this state."
+        ),
     }
 
 
@@ -457,6 +472,18 @@ def run_daytona(
             preflight = sandbox.process.exec(command, timeout=60)
             if preflight.exit_code != 0:
                 raise RuntimeError(f"{client} is not authenticated in the persistent runner")
+        fixture = shlex.quote(execution["runner_fixture"])
+        interactive = sandbox.process.exec(
+            f"cd {fixture} && timeout --signal=TERM --kill-after=5s 45s "
+            "claude --init-only >/dev/null 2>&1",
+            timeout=60,
+        )
+        if interactive.exit_code != 0:
+            raise RuntimeError(
+                "Claude interactive onboarding or stable-fixture trust is incomplete; "
+                f"open the runner, run `cd {execution['runner_fixture']} && claude`, "
+                "complete the non-secret prompts, then exit and retry"
+            )
         with tempfile.TemporaryDirectory(prefix="holler-canary-controller-") as directory:
             temporary = Path(directory)
             request_path = temporary / "request.json"

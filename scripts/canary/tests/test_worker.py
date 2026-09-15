@@ -10,7 +10,17 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from daytona_controller import make_runtime_bundle
-from worker import claude_cost, codex_reported_tokens, doctor_command, make_failure_evidence, parse_version
+from worker import (
+    CanaryFailure,
+    PtyProcess,
+    claude_cost,
+    codex_reported_tokens,
+    doctor_command,
+    lifecycle_evidence_complete,
+    make_failure_evidence,
+    marker_instruction,
+    parse_version,
+)
 
 
 class WorkerTests(unittest.TestCase):
@@ -27,6 +37,56 @@ class WorkerTests(unittest.TestCase):
     def test_version_parser(self) -> None:
         self.assertEqual(parse_version("codex-cli 0.151.0\n"), "0.151.0")
         self.assertEqual(parse_version("2.1.259 (Claude Code)\n"), "2.1.259")
+
+    def test_marker_instruction_never_contains_expected_literal(self) -> None:
+        marker = "C2_CLAUDE_ARMED"
+        instruction = marker_instruction(marker)
+        self.assertNotIn(marker, instruction)
+        self.assertIn("'C2', 'CLAUDE', 'ARMED'", instruction)
+
+    def test_pty_submit_requires_post_submission_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            process = PtyProcess(
+                ["/bin/sh", "-c", "IFS= read -r value; printf 'REAL_RESULT_MARKER\\n'"],
+                cwd=Path(directory),
+                env={},
+            )
+            try:
+                process.submit("input without the expected value", marker="REAL_RESULT_MARKER", timeout=2)
+            finally:
+                process.close()
+
+    def test_pty_submit_rejects_marker_in_prompt(self) -> None:
+        process = PtyProcess.__new__(PtyProcess)
+        with self.assertRaisesRegex(CanaryFailure, "contains its expected output marker"):
+            process.submit("echo BAD_MARKER", marker="BAD_MARKER", timeout=0)
+
+    def test_lifecycle_evidence_requires_correlated_registration_and_hydration(self) -> None:
+        events = [
+            {
+                "kind": "session.registered",
+                "actor_id": "canary-claude",
+                "payload": {"run_id": "run-1", "harness": "claude"},
+            },
+            {
+                "kind": "startup.hydrated",
+                "actor_id": "canary-claude",
+                "payload": {"run_id": "run-1", "harness": "claude"},
+            },
+        ]
+        self.assertTrue(
+            lifecycle_evidence_complete(events, actor="canary-claude", run_id="run-1")
+        )
+        self.assertFalse(
+            lifecycle_evidence_complete(events[:1], actor="canary-claude", run_id="run-1")
+        )
+        self.assertFalse(
+            lifecycle_evidence_complete(events, actor="canary-claude", run_id="another-run")
+        )
+
+    def test_lifecycle_evidence_rejects_invalid_shape(self) -> None:
+        with self.assertRaisesRegex(CanaryFailure, "not a list"):
+            lifecycle_evidence_complete({}, actor="canary-claude", run_id="run-1")
 
     def test_runtime_bundle_contains_worker_without_tests(self) -> None:
         import tarfile

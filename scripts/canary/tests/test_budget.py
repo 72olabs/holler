@@ -27,6 +27,13 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(ledger.model_turns, 0)
         self.assertEqual(ledger.codex_reported_tokens, 0)
 
+    def test_capacity_check_does_not_record_unconfirmed_turn(self) -> None:
+        ledger = BudgetLedger(budget_for_tier("core"))
+        ledger.ensure_capacity(client="claude", turns=1)
+        self.assertEqual(ledger.model_turns, 0)
+        ledger.charge(client="claude", turns=1, cost_usd=0.01)
+        self.assertEqual(ledger.model_turns, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -47,6 +47,24 @@ class BudgetLedger:
     model_turns: int = 0
     wall_seconds: float = 0.0
 
+    def ensure_capacity(
+        self,
+        *,
+        client: str,
+        reported_tokens: int = 0,
+        cost_usd: float = 0.0,
+        turns: int = 1,
+        wall_seconds: float = 0.0,
+    ) -> None:
+        """Check a prospective charge without recording unconfirmed usage."""
+        self._next_values(
+            client=client,
+            reported_tokens=reported_tokens,
+            cost_usd=cost_usd,
+            turns=turns,
+            wall_seconds=wall_seconds,
+        )
+
     def charge(
         self,
         *,
@@ -56,6 +74,27 @@ class BudgetLedger:
         turns: int = 1,
         wall_seconds: float = 0.0,
     ) -> None:
+        next_claude, next_codex, next_turns, next_wall = self._next_values(
+            client=client,
+            reported_tokens=reported_tokens,
+            cost_usd=cost_usd,
+            turns=turns,
+            wall_seconds=wall_seconds,
+        )
+        self.claude_usd = next_claude
+        self.codex_reported_tokens = next_codex
+        self.model_turns = next_turns
+        self.wall_seconds = next_wall
+
+    def _next_values(
+        self,
+        *,
+        client: str,
+        reported_tokens: int,
+        cost_usd: float,
+        turns: int,
+        wall_seconds: float,
+    ) -> tuple[float, int, int, float]:
         if client not in {"claude", "codex", "controller"}:
             raise ValueError(f"unsupported client {client!r}")
         if min(reported_tokens, cost_usd, turns, wall_seconds) < 0:
@@ -64,19 +103,15 @@ class BudgetLedger:
         next_codex = self.codex_reported_tokens + (reported_tokens if client == "codex" else 0)
         next_turns = self.model_turns + turns
         next_wall = self.wall_seconds + wall_seconds
-        checks = (
+        for name, value in (
             ("claude_usd", next_claude),
             ("codex_reported_tokens", next_codex),
             ("model_turns", next_turns),
             ("wall_seconds", next_wall),
-        )
-        for name, value in checks:
+        ):
             if value > self.limits[name]:
                 raise BudgetExceeded(f"{name} would be {value}, limit is {self.limits[name]}")
-        self.claude_usd = next_claude
-        self.codex_reported_tokens = next_codex
-        self.model_turns = next_turns
-        self.wall_seconds = next_wall
+        return next_claude, next_codex, next_turns, next_wall
 
     def as_dict(self) -> dict[str, Any]:
         return {

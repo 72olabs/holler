@@ -33,6 +33,10 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(plan["resource_policy"]["canary"]["source_checkout"])
         self.assertTrue(plan["resource_policy"]["canary"]["persistent"])
         self.assertEqual(plan["resource_policy"]["canary"]["runner"], "holler-canary-runner")
+        self.assertEqual(
+            plan["resource_policy"]["canary"]["fixture"],
+            "/home/daytona/.holler-canary-workspace",
+        )
         self.assertEqual(plan["models"]["claude"], "haiku")
         self.assertEqual(plan["models"]["codex"], "gpt-5.6-luna")
         self.assertIn("go-1-26-0", plan["resource_policy"]["canary"]["snapshot"])

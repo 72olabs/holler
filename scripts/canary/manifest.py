@@ -153,6 +153,7 @@ def create_request(
             "runner_name": runner_name,
             "runner_persistent": True,
             "runner_auto_stop_minutes": 15,
+            "runner_fixture": "/home/daytona/.holler-canary-workspace",
             "source_checkout_in_credential_sandbox": False,
             "evidence_contains_message_bodies": False,
         },
@@ -202,6 +203,8 @@ def validate_request(request: object, *, allow_model_override: bool = False) -> 
         raise ManifestError("request must name a persistent Daytona runner")
     if execution.get("runner_persistent") is not True:
         raise ManifestError("credentialed Daytona runner must be persistent")
+    if execution.get("runner_fixture") != "/home/daytona/.holler-canary-workspace":
+        raise ManifestError("credentialed Daytona runner must use the dedicated stable fixture")
     if execution.get("source_checkout_in_credential_sandbox") is not False:
         raise ManifestError("credentialed canaries must not receive a source checkout")
     if execution.get("evidence_contains_message_bodies") is not False:

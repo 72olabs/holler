@@ -139,6 +139,31 @@ def claude_cost(output: str) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
+def marker_instruction(marker: str) -> str:
+    """Describe a marker without placing its literal value in model-visible input."""
+    parts = marker.split("_")
+    if len(parts) < 2 or any(not part for part in parts):
+        raise ValueError("markers must contain at least two non-empty underscore-separated tokens")
+    quoted = ", ".join(repr(part) for part in parts)
+    return f"the marker formed by joining these tokens with underscores: {quoted}"
+
+
+def lifecycle_evidence_complete(events: object, *, actor: str, run_id: str) -> bool:
+    """Require correlated Claude registration and hydration lifecycle events."""
+    if not isinstance(events, list):
+        raise CanaryFailure("operational lifecycle events are not a list")
+    seen: set[str] = set()
+    for event in events:
+        if not isinstance(event, dict) or event.get("actor_id") != actor:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("run_id") != run_id:
+            continue
+        if payload.get("harness") == "claude":
+            seen.add(str(event.get("kind")))
+    return {"session.registered", "startup.hydrated"}.issubset(seen)
+
+
 def doctor_command(
     holler: Path,
     *,
@@ -182,24 +207,53 @@ class PtyProcess:
     def send(self, text: str) -> None:
         os.write(self.master, text.encode("utf-8"))
 
-    def wait_for(self, marker: str, timeout: float) -> None:
+    def checkpoint(self) -> int:
+        self._read_available(0)
+        return len(self.buffer)
+
+    def wait_until_quiet(self, timeout: float, *, quiet_seconds: float = 0.5) -> None:
+        """Wait until an interactive client has rendered output and stopped repainting."""
+        deadline = time.monotonic() + timeout
+        last_size = len(self.buffer)
+        quiet_since = time.monotonic() if last_size else None
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise CanaryFailure("interactive client exited before becoming ready")
+            self._read_available(min(0.1, deadline - time.monotonic()))
+            size = len(self.buffer)
+            if size != last_size:
+                last_size = size
+                quiet_since = time.monotonic()
+            elif quiet_since is not None and time.monotonic() - quiet_since >= quiet_seconds:
+                return
+        raise CanaryFailure("interactive client did not reach a stable input-ready state")
+
+    def submit(self, prompt: str, *, marker: str, timeout: float) -> None:
+        if marker in prompt:
+            raise CanaryFailure("interactive prompt contains its expected output marker")
+        after = self.checkpoint()
+        self.send(prompt + "\r")
+        self.wait_for(marker, timeout, after=after)
+
+    def wait_for(self, marker: str, timeout: float, *, after: int = 0) -> None:
         deadline = time.monotonic() + timeout
         marker_bytes = marker.encode("utf-8")
         while time.monotonic() < deadline:
-            if marker_bytes in self.buffer:
+            if marker_bytes in self.buffer[after:]:
                 return
             if self.process.poll() is not None:
                 raise CanaryFailure(f"interactive client exited before {marker}")
-            for key, _ in self.selector.select(timeout=min(0.25, deadline - time.monotonic())):
-                try:
-                    chunk = os.read(key.fd, 65536)
-                except BlockingIOError:
-                    continue
-                if chunk:
-                    self.buffer.extend(chunk)
-                    if len(self.buffer) > 2_000_000:
-                        del self.buffer[:1_000_000]
+            self._read_available(min(0.25, deadline - time.monotonic()))
         raise CanaryFailure(f"timed out waiting for expected client marker {marker}")
+
+    def _read_available(self, timeout: float) -> None:
+        for key, _ in self.selector.select(timeout=timeout):
+            try:
+                chunk = os.read(key.fd, 65536)
+            except BlockingIOError:
+                continue
+            if chunk:
+                self.buffer.extend(chunk)
 
     def close(self) -> None:
         if self.process.poll() is None:
@@ -223,7 +277,7 @@ class Worker:
         self.archive = archive
         self.root = root
         self.home = root / "home"
-        self.fixture = root / "fixture"
+        self.fixture = Path(request["execution"]["runner_fixture"])
         self.runtime = root / "runtime"
         self.socket = self.runtime / "holler.sock"
         self.database = self.runtime / "holler.sqlite3"
@@ -250,17 +304,17 @@ class Worker:
         self.active_scenario = "initialization"
 
     def prepare(self) -> None:
-        for directory in (self.home, self.fixture, self.runtime, self.package.parent):
+        for directory in (self.home, self.runtime, self.package.parent):
             directory.mkdir(parents=True, exist_ok=True)
-        run_command(["git", "init", "-q"], cwd=self.fixture, env=self.env, timeout=30)
-        (self.fixture / "README.md").write_text("# Holler real-client canary fixture\n", encoding="utf-8")
-        run_command(["git", "add", "README.md"], cwd=self.fixture, env=self.env, timeout=30)
-        run_command(
-            ["git", "-c", "user.name=Holler Canary", "-c", "user.email=canary@invalid", "commit", "-qm", "fixture"],
+        if not (self.fixture / ".git").is_dir():
+            raise CanaryFailure("stable canary fixture is not initialized")
+        if run_command(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=self.fixture,
             env=self.env,
             timeout=30,
-        )
+        ).stdout.strip():
+            raise CanaryFailure("stable canary fixture is not clean")
         self.start_daemon()
 
     def start_daemon(self) -> None:
@@ -352,8 +406,60 @@ class Worker:
         if report.get("ready") is not True or report.get("state") != "READY":
             raise CanaryFailure(f"{harness} did not certify READY")
 
+    def wait_for_live_registration(self, actor: str, run_id: str, timeout: float = 60) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = run_command(
+                [str(self.holler), "who", "--socket", str(self.socket), "--all", "--limit", "100"],
+                cwd=self.fixture,
+                env=self.env,
+                timeout=15,
+            )
+            try:
+                directory = json.loads(result.stdout)
+            except json.JSONDecodeError as error:
+                raise CanaryFailure("cannot decode actor directory") from error
+            for entry in directory.get("actors", []):
+                if entry.get("actor") != actor:
+                    continue
+                if any(
+                    session.get("run_id") == run_id and session.get("state") == "live"
+                    for session in entry.get("sessions", [])
+                ):
+                    return
+            time.sleep(0.25)
+        raise CanaryFailure(f"{actor} did not create a live registration")
+
+    def has_lifecycle_evidence(self, actor: str, run_id: str) -> bool:
+        result = run_command(
+            [
+                str(self.holler), "events", "--socket", str(self.socket), "--partition", "canary",
+                "--stream", "operational", "--after", "0", "--limit", "100",
+            ],
+            cwd=self.fixture,
+            env=self.env,
+            timeout=30,
+        )
+        try:
+            events = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise CanaryFailure("cannot decode operational lifecycle events") from error
+        return lifecycle_evidence_complete(events, actor=actor, run_id=run_id)
+
+    def run_claude_lifecycle_preflight(self) -> None:
+        run_id = "c0-claude-init"
+        command = claude_live_command(self.request["clients"]["claude"])[1:] + ["--init-only"]
+        run_command(
+            self.launcher("claude", "canary-claude", run_id, command),
+            cwd=self.fixture,
+            env=self.env,
+            timeout=60,
+        )
+        if not self.has_lifecycle_evidence("canary-claude", run_id):
+            raise CanaryFailure("Claude init-only did not produce registration and hydration evidence")
+
     def run_claude(self, actor: str, run_id: str, prompt: str, max_usd: float = 0.10) -> str:
-        self.ledger.charge(client="claude", turns=1)
+        self.ledger.ensure_capacity(client="claude", turns=1)
         command = claude_print_command(self.request["clients"]["claude"], max_usd)[1:]
         started = time.monotonic()
         result = run_command(
@@ -363,11 +469,14 @@ class Worker:
             timeout=180,
             stdin=prompt,
         )
-        self.ledger.charge(client="claude", turns=0, cost_usd=claude_cost(result.stdout), wall_seconds=time.monotonic() - started)
+        self.ledger.charge(
+            client="claude", turns=1, cost_usd=claude_cost(result.stdout),
+            wall_seconds=time.monotonic() - started,
+        )
         return result.stdout
 
     def run_codex(self, actor: str, run_id: str, prompt: str) -> str:
-        self.ledger.charge(client="codex", turns=1)
+        self.ledger.ensure_capacity(client="codex", turns=1)
         command = codex_exec_command(self.request["clients"]["codex"])[1:]
         started = time.monotonic()
         result = run_command(
@@ -378,7 +487,7 @@ class Worker:
             stdin=prompt,
         )
         self.ledger.charge(
-            client="codex", turns=0, reported_tokens=codex_reported_tokens(result.stdout),
+            client="codex", turns=1, reported_tokens=codex_reported_tokens(result.stdout),
             wall_seconds=time.monotonic() - started,
         )
         return result.stdout
@@ -421,7 +530,11 @@ class Worker:
                 env=self.env,
                 timeout=60,
             )
-        return ["archive-checksum", "clean-build-identity", "client-version-pins", "connector-doctor"]
+        self.run_claude_lifecycle_preflight()
+        return [
+            "archive-checksum", "clean-build-identity", "client-version-pins", "connector-doctor",
+            "interactive-onboarding", "claude-lifecycle-hook",
+        ]
 
     def scenario_c1(self) -> list[str]:
         token = "C1-" + self.request["request_hash"][-12:]
@@ -444,6 +557,10 @@ class Worker:
     def scenario_c2(self) -> list[str]:
         token = "C2-" + self.request["request_hash"][-12:]
         started = time.monotonic()
+        claude_armed = "C2_CLAUDE_ARMED"
+        codex_sent = "C2_CODEX_SENT"
+        claude_replied = "C2_CLAUDE_REPLIED"
+        codex_acked = "C2_CODEX_ACKED"
         claude_args = claude_live_command(self.request["clients"]["claude"])[1:]
         codex_args = codex_live_command(self.request["clients"]["codex"])[1:]
         claude = PtyProcess(
@@ -451,29 +568,48 @@ class Worker:
         )
         codex: PtyProcess | None = None
         try:
+            self.wait_for_live_registration("canary-claude", "c2-claude")
+            claude.wait_until_quiet(30)
+            self.ledger.ensure_capacity(client="claude", turns=1)
+            claude.submit(
+                "Initialize Holler and wait for Holler attention. If Holler wakes you later, claim and "
+                f"acknowledge the message, reply_to its sender with the requested correlation token, and "
+                f"finish that awakened turn with {marker_instruction(claude_replied)}. For this initial "
+                f"turn, finish with {marker_instruction(claude_armed)}.",
+                marker=claude_armed,
+                timeout=180,
+            )
             self.ledger.charge(client="claude", turns=1)
-            claude.send("Initialize Holler, reply with marker C2_CLAUDE_ARMED, then wait for Holler attention.\n")
-            claude.wait_for("C2_CLAUDE_ARMED", 180)
+            claude_wake_after = claude.checkpoint()
             codex = PtyProcess(
                 self.launcher("codex", "canary-codex", "c2-codex", codex_args), cwd=self.fixture, env=self.env
             )
-            self.ledger.charge(client="codex", turns=1)
-            codex.send(
+            codex.wait_until_quiet(30)
+            self.ledger.ensure_capacity(client="codex", turns=1)
+            codex.submit(
                 f"Use Holler bus_send to actor canary-claude with idempotency key {token}. "
-                f"The message must tell Claude to acknowledge it, reply_to you with token {token}-REPLY, "
-                "finish its awakened turn with C2_CLAUDE_REPLIED, and tell you to acknowledge the reply "
-                "and finish with C2_CODEX_ACKED. Finish this turn with C2_CODEX_SENT.\n"
+                f"The exact message body must be: acknowledge this message and reply_to its sender with "
+                f"correlation token {token}-REPLY. Do not include any completion marker in the message. "
+                f"If Holler wakes you later, claim and acknowledge the reply, then finish that awakened "
+                f"turn with {marker_instruction(codex_acked)}. For this initial turn, finish with "
+                f"{marker_instruction(codex_sent)}.",
+                marker=codex_sent,
+                timeout=180,
             )
-            codex.wait_for("C2_CODEX_SENT", 180)
-            self.ledger.charge(client="claude", turns=1)
-            claude.wait_for("C2_CLAUDE_REPLIED", 180)
             self.ledger.charge(client="codex", turns=1)
-            codex.wait_for("C2_CODEX_ACKED", 180)
+            self.wait_for_live_registration("canary-codex", "c2-codex")
+            codex_wake_after = codex.checkpoint()
+            self.ledger.ensure_capacity(client="claude", turns=1)
+            claude.wait_for(claude_replied, 180, after=claude_wake_after)
+            self.ledger.charge(client="claude", turns=1)
+            self.ledger.ensure_capacity(client="codex", turns=1)
+            codex.wait_for(codex_acked, 180, after=codex_wake_after)
+            self.ledger.charge(client="codex", turns=1)
         finally:
             if codex is not None:
                 codex.close()
             claude.close()
-        self.ledger.charge(client="controller", turns=0, wall_seconds=time.monotonic() - started)
+            self.ledger.charge(client="controller", turns=0, wall_seconds=time.monotonic() - started)
         self.certify("claude", "canary-claude", "c2-claude", "hook-long-poll")
         self.certify("codex", "canary-codex", "c2-codex", "native-queue")
         return [
