@@ -1,12 +1,39 @@
 package connector_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestClaudePluginMCPForwardsLauncherIdentityEnvironment(t *testing.T) {
+	root := repositoryRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "connectors", "marketplace", "plugins", "claude-holler", ".mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		MCPServers map[string]struct {
+			Env map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	environment := config.MCPServers["holler"].Env
+	for _, name := range []string{
+		"HOLLER_BIN", "HOLLER_SOCKET", "HOLLER_ACTOR", "HOLLER_RUN", "HOLLER_ROLE",
+		"HOLLER_PEER", "HOLLER_PROJECT", "HOLLER_CHANNEL", "HOLLER_NAME_MODE",
+		"HOLLER_LAUNCH_TAG", "HOLLER_TAKEOVER",
+	} {
+		if environment[name] != "${"+name+":-}" {
+			t.Fatalf("Claude MCP %s forwarding = %q", name, environment[name])
+		}
+	}
+}
 
 func TestClaudePluginWrapperFailsOpenWithoutHollerBinary(t *testing.T) {
 	root := repositoryRoot(t)

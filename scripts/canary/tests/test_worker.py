@@ -12,6 +12,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from daytona_controller import make_runtime_bundle
 from worker import (
     actor_delivery_counts,
+    actor_for_run,
+    alias_collision_visible,
     CanaryFailure,
     PtyProcess,
     claude_fixture_ready,
@@ -25,6 +27,7 @@ from worker import (
     lifecycle_evidence_complete,
     make_failure_evidence,
     marker_instruction,
+    minted_actors,
     parse_version,
     terminal_query_responses,
 )
@@ -202,6 +205,56 @@ class WorkerTests(unittest.TestCase):
                 {"actors": [{"actor": "canary-claude", "unclaimed_messages": "one"}]},
                 actor="canary-claude",
             )
+
+    def test_c5_directory_and_condition_helpers(self) -> None:
+        directory = {
+            "actors": [
+                {
+                    "actor": "c5-claude-a1b2c3",
+                    "sessions": [
+                        {"run_id": "c5-a", "harness": "claude", "state": "live"},
+                        {"run_id": "old", "harness": "claude", "state": "ended"},
+                    ],
+                }
+            ]
+        }
+        self.assertEqual(
+            actor_for_run(directory, run_id="c5-a", harness="claude"),
+            "c5-claude-a1b2c3",
+        )
+        self.assertIsNone(actor_for_run(directory, run_id="old", harness="claude"))
+        self.assertEqual(
+            actor_for_run(directory, run_id="old", harness="claude", live_only=False),
+            "c5-claude-a1b2c3",
+        )
+        conditions = [
+            {
+                "kind": "alias_collision",
+                "subject": "c5-claude",
+                "state": "active_visible",
+            }
+        ]
+        self.assertTrue(alias_collision_visible(conditions, alias="c5-claude"))
+        self.assertFalse(alias_collision_visible(conditions, alias="another-alias"))
+
+    def test_c5_directory_helper_rejects_run_under_multiple_actors(self) -> None:
+        session = {"run_id": "c5-a", "harness": "claude", "state": "live"}
+        directory = {
+            "actors": [
+                {"actor": "actor-a", "sessions": [session]},
+                {"actor": "actor-b", "sessions": [session]},
+            ]
+        }
+        with self.assertRaisesRegex(CanaryFailure, "multiple actors"):
+            actor_for_run(directory, run_id="c5-a", harness="claude")
+
+    def test_c5_minted_actor_helper_uses_only_durable_mint_events(self) -> None:
+        events = [
+            {"kind": "actor.minted", "actor_id": "actor-a"},
+            {"kind": "delivery.claimed", "actor_id": "actor-a"},
+            {"kind": "actor.minted", "actor_id": "actor-b"},
+        ]
+        self.assertEqual(minted_actors(events), ["actor-a", "actor-b"])
 
     def test_claude_fixture_requires_onboarding_version_and_project_trust(self) -> None:
         fixture = Path("/home/daytona/.holler-canary-workspace")

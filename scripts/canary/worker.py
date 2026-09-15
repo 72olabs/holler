@@ -32,7 +32,7 @@ from clients import claude_live_command, claude_print_command, codex_exec_comman
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
 
 
-SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3", "C4"}
+SUPPORTED_REAL_SCENARIOS = {"C0", "C1", "C2", "C3", "C4", "C5"}
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 TERMINAL_QUERY_RESPONSES = {
     b"\x1b[6n": b"\x1b[1;1R",
@@ -240,6 +240,42 @@ def actor_delivery_counts(directory: object, *, actor: str) -> tuple[int, int]:
     return 0, 0
 
 
+def actor_for_run(
+    directory: object, *, run_id: str, harness: str, live_only: bool = True
+) -> str | None:
+    """Resolve a live allocated actor from operator directory metadata."""
+    if not isinstance(directory, dict) or not isinstance(directory.get("actors"), list):
+        raise CanaryFailure("actor directory has an invalid shape")
+    matches: list[str] = []
+    for entry in directory["actors"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("sessions"), list):
+            continue
+        for session in entry["sessions"]:
+            if (
+                isinstance(session, dict)
+                and session.get("run_id") == run_id
+                and session.get("harness") == harness
+                and (not live_only or session.get("state") == "live")
+                and isinstance(entry.get("actor"), str)
+            ):
+                matches.append(entry["actor"])
+    if len(set(matches)) > 1:
+        raise CanaryFailure("one run is live under multiple actors")
+    return matches[0] if matches else None
+
+
+def alias_collision_visible(conditions: object, *, alias: str) -> bool:
+    if not isinstance(conditions, list):
+        raise CanaryFailure("operator conditions are not a list")
+    return any(
+        isinstance(condition, dict)
+        and condition.get("kind") == "alias_collision"
+        and condition.get("subject") == alias
+        and str(condition.get("state", "")).startswith("active_")
+        for condition in conditions
+    )
+
+
 def delivery_event_attempts(events: object, *, message_id: str, actor: str) -> list[int]:
     """Return recorded claim attempts for a message without retaining its body."""
     if not isinstance(events, list):
@@ -271,6 +307,18 @@ def delivery_was_acked(events: object, *, message_id: str, actor: str) -> bool:
         and event.get("actor_id") == actor
         for event in events
     )
+
+
+def minted_actors(events: object) -> list[str]:
+    if not isinstance(events, list):
+        raise CanaryFailure("durable events are not a list")
+    return [
+        event["actor_id"]
+        for event in events
+        if isinstance(event, dict)
+        and event.get("kind") == "actor.minted"
+        and isinstance(event.get("actor_id"), str)
+    ]
 
 
 def claude_fixture_ready(config: object, *, fixture: Path, version: str) -> bool:
@@ -699,11 +747,17 @@ class Worker:
         except json.JSONDecodeError as error:
             raise CanaryFailure(f"cannot decode {Path(command[0]).name} JSON output") from error
 
-    def operational_events(self) -> list[dict[str, Any]]:
+    def operational_events(self, partition: str = "canary") -> list[dict[str, Any]]:
+        return self.events(partition=partition, stream="operational")
+
+    def durable_events(self, partition: str = "canary") -> list[dict[str, Any]]:
+        return self.events(partition=partition, stream="durable")
+
+    def events(self, *, partition: str, stream: str) -> list[dict[str, Any]]:
         events = self.json_command(
             [
-                str(self.holler), "events", "--socket", str(self.socket), "--partition", "canary",
-                "--stream", "operational", "--after", "0", "--limit", "1000",
+                str(self.holler), "events", "--socket", str(self.socket), "--partition", partition,
+                "--stream", stream, "--after", "0", "--limit", "1000",
             ]
         )
         if not isinstance(events, list):
@@ -719,6 +773,31 @@ class Worker:
         if not isinstance(directory, dict):
             raise CanaryFailure("actor directory is not an object")
         return directory
+
+    def wait_for_allocated_actor(self, run_id: str, *, harness: str = "claude") -> str:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            actor = actor_for_run(self.actor_directory(), run_id=run_id, harness=harness)
+            if actor is not None:
+                return actor
+            time.sleep(0.25)
+        raise CanaryFailure(f"allocated {harness} run did not create a live registration")
+
+    def allocated_launcher(
+        self,
+        harness: str,
+        base_actor: str,
+        run_id: str,
+        launch_tag: str,
+        project: str,
+        client_args: list[str],
+    ) -> list[str]:
+        return [
+            str(self.holler), "connector", "launch", "--harness", harness,
+            "--actor", base_actor, "--run", run_id, "--project", project,
+            "--name-mode", "allocate", "--launch-tag", launch_tag,
+            "--socket", str(self.socket), "--", *client_args,
+        ]
 
     def run_claude_lifecycle_preflight(self) -> None:
         run_id = "c0-claude-init"
@@ -775,6 +854,33 @@ class Worker:
         )
         self.ledger.charge(
             client="codex", turns=1, reported_tokens=codex_reported_tokens(result.stdout),
+            wall_seconds=time.monotonic() - started,
+        )
+        return result.stdout
+
+    def run_allocated_claude(
+        self,
+        base_actor: str,
+        run_id: str,
+        launch_tag: str,
+        project: str,
+        prompt: str,
+        max_usd: float = 0.10,
+    ) -> str:
+        self.ledger.ensure_capacity(client="claude", turns=1)
+        command = claude_print_command(self.request["clients"]["claude"], max_usd)[1:]
+        started = time.monotonic()
+        result = run_command(
+            self.allocated_launcher(
+                "claude", base_actor, run_id, launch_tag, project, command
+            ),
+            cwd=self.fixture,
+            env=self.env,
+            timeout=180,
+            stdin=prompt,
+        )
+        self.ledger.charge(
+            client="claude", turns=1, cost_usd=claude_cost(result.stdout),
             wall_seconds=time.monotonic() - started,
         )
         return result.stdout
@@ -1018,6 +1124,184 @@ class Worker:
             raise CanaryFailure("C4 did not record the terminal acknowledgement")
         return ["claim-before-crash", "lease-expiry", "redelivery-same-message-id", "terminal-ack"]
 
+    def scenario_c5(self) -> list[str]:
+        project = "c5"
+        alias = "c5-claude"
+        token_a = "C5-A-" + self.request["request_hash"][-10:]
+        token_b = "C5-B-" + self.request["request_hash"][-10:]
+        command = claude_live_command(self.request["clients"]["claude"])[1:]
+        session_a = PtyProcess(
+            self.allocated_launcher("claude", "c5-claude", "c5-a", "slot-a", project, command),
+            cwd=self.fixture,
+            env=self.env,
+        )
+        session_b: PtyProcess | None = None
+        try:
+            self.active_check = "c5-first-allocation"
+            candidate_a = self.wait_for_allocated_actor("c5-a")
+            session_a.wait_until_ready("$", 60, suffix=True)
+
+            self.active_check = "c5-second-allocation"
+            session_b = PtyProcess(
+                self.allocated_launcher("claude", "c5-claude", "c5-b", "slot-b", project, command),
+                cwd=self.fixture,
+                env=self.env,
+            )
+            candidate_b = self.wait_for_allocated_actor("c5-b")
+            session_b.wait_until_ready("$", 60, suffix=True)
+            if (
+                candidate_a == candidate_b
+                or not candidate_a.startswith("c5-claude-")
+                or not candidate_b.startswith("c5-claude-")
+            ):
+                raise CanaryFailure("C5 did not allocate two distinct opaque actors")
+
+            self.active_check = "c5-close-concurrent-sessions"
+            session_a.close()
+            session_b.close()
+
+            self.active_check = "c5-finalize-first-identity"
+            self.run_allocated_claude(
+                "c5-claude",
+                "c5-a-bind",
+                "slot-a",
+                project,
+                "Use bus_status once to finalize this Holler identity. Finish with marker C5_A_BOUND.",
+            )
+            self.active_check = "c5-finalize-second-identity"
+            self.run_allocated_claude(
+                "c5-claude",
+                "c5-b-bind",
+                "slot-b",
+                project,
+                "Use bus_status once to finalize this Holler identity. Finish with marker C5_B_BOUND.",
+            )
+            directory = self.actor_directory()
+            actor_a = actor_for_run(
+                directory, run_id="c5-a-bind", harness="claude", live_only=False
+            )
+            actor_b = actor_for_run(
+                directory, run_id="c5-b-bind", harness="claude", live_only=False
+            )
+            if (
+                actor_a is None
+                or actor_b is None
+                or actor_a == actor_b
+                or not actor_a.startswith("c5-claude-")
+                or not actor_b.startswith("c5-claude-")
+            ):
+                raise CanaryFailure("C5 did not finalize two distinct allocated identities")
+
+            self.active_check = "c5-alias-collision"
+            alias_ready = False
+            resolved: Any = None
+            conditions: Any = []
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    resolved = self.json_command(
+                        [str(self.holler), "alias", "resolve", "--socket", str(self.socket), alias]
+                    )
+                except CanaryFailure:
+                    resolved = None
+                conditions = self.json_command(
+                    [
+                        str(self.holler), "conditions", "list", "--socket", str(self.socket),
+                        "--limit", "100",
+                    ]
+                )
+                if (
+                    isinstance(resolved, dict)
+                    and resolved.get("actor") in {actor_a, actor_b}
+                    and alias_collision_visible(conditions, alias=alias)
+                ):
+                    alias_ready = True
+                    break
+                time.sleep(0.25)
+            if not alias_ready:
+                if not isinstance(resolved, dict):
+                    self.active_check = "c5-alias-missing"
+                elif resolved.get("actor") not in {actor_a, actor_b}:
+                    self.active_check = "c5-alias-owner-mismatch"
+                elif not alias_collision_visible(conditions, alias=alias):
+                    self.active_check = "c5-alias-condition-missing"
+                raise CanaryFailure("C5 alias ownership and collision condition did not converge")
+
+            self.active_check = "c5-send-isolated"
+            message_ids: dict[str, str] = {}
+            for label, actor, token in (("a", actor_a, token_a), ("b", actor_b, token_b)):
+                sent = self.json_command(
+                    [
+                        str(self.holler), "send", "--socket", str(self.socket),
+                        "--actor", "c5-controller", "--run", "c5-controller",
+                        "--project", project, "--channel", "direct", "--to-actor", actor,
+                        "--idempotency-key", token,
+                        "--body", json.dumps({"text": f"identity isolation probe {token}"}),
+                    ]
+                )
+                message = sent.get("message") if isinstance(sent, dict) else None
+                message_id = message.get("message_id") if isinstance(message, dict) else None
+                if not isinstance(message_id, str) or not message_id:
+                    raise CanaryFailure("C5 durable send returned no message ID")
+                message_ids[label] = message_id
+
+            self.active_check = "c5-first-resume"
+            self.run_allocated_claude(
+                "c5-claude",
+                "c5-a-resume",
+                "slot-a",
+                project,
+                f"Use bus_claim to claim exact message ID {message_ids['a']}, then bus_ack its lease. "
+                "Do not echo the body. Finish with marker C5_A_ACKED.",
+            )
+            self.active_check = "c5-second-resume"
+            self.run_allocated_claude(
+                "c5-claude",
+                "c5-b-resume",
+                "slot-b",
+                project,
+                f"Use bus_claim to claim exact message ID {message_ids['b']}, then bus_ack its lease. "
+                "Do not echo the body. Finish with marker C5_B_ACKED.",
+            )
+
+            self.active_check = "c5-inbox-isolation"
+            events = self.operational_events(project)
+            for label, expected_actor, other_actor in (
+                ("a", actor_a, actor_b),
+                ("b", actor_b, actor_a),
+            ):
+                message_id = message_ids[label]
+                if delivery_event_attempts(events, message_id=message_id, actor=expected_actor) != [1]:
+                    self.active_check = f"c5-{label}-claim-missing"
+                    raise CanaryFailure("C5 expected actor did not claim its isolated message")
+                if delivery_event_attempts(events, message_id=message_id, actor=other_actor):
+                    self.active_check = f"c5-{label}-cross-inbox-claim"
+                    raise CanaryFailure("C5 message crossed allocated inboxes")
+                if not delivery_was_acked(events, message_id=message_id, actor=expected_actor):
+                    self.active_check = f"c5-{label}-ack-missing"
+                    raise CanaryFailure("C5 expected actor did not acknowledge its isolated message")
+            self.active_check = "c5-resume-continuity"
+            mints = minted_actors(self.durable_events(project))
+            if len(mints) < 2:
+                self.active_check = "c5-mint-events-missing"
+                raise CanaryFailure("C5 initial allocations did not record both actor mints")
+            if len(mints) > 2:
+                self.active_check = "c5-resume-reminted-actors"
+                raise CanaryFailure("C5 resumes minted unexpected actor identities")
+            if set(mints) != {actor_a, actor_b}:
+                self.active_check = "c5-mint-identity-mismatch"
+                raise CanaryFailure("C5 mint events did not match the live allocated actors")
+            if actor_delivery_counts(self.actor_directory(), actor=actor_a) != (0, 0) or actor_delivery_counts(
+                self.actor_directory(), actor=actor_b
+            ) != (0, 0):
+                raise CanaryFailure("C5 allocated inboxes were not empty after isolated acknowledgements")
+        finally:
+            if session_b is not None and session_b.process.poll() is None:
+                session_b.close()
+            if session_a.process.poll() is None:
+                session_a.close()
+        return ["allocated-identities", "alias-collision-visible", "resume-continuity", "inbox-isolation"]
+
     def run(self) -> dict[str, Any]:
         requested = {scenario["id"] for scenario in self.request["scenarios"]}
         unsupported = requested - SUPPORTED_REAL_SCENARIOS
@@ -1032,6 +1316,7 @@ class Worker:
             "C2": self.scenario_c2,
             "C3": self.scenario_c3,
             "C4": self.scenario_c4,
+            "C5": self.scenario_c5,
         }
         for scenario in self.request["scenarios"]:
             self.active_scenario = scenario["id"]
