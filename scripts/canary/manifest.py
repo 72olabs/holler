@@ -204,14 +204,16 @@ def validate_request(request: object, *, allow_model_override: bool = False) -> 
     scenarios = request["scenarios"]
     if not isinstance(scenarios, list) or not scenarios:
         raise ManifestError("request has no scenarios")
-    scenario_ids = [scenario.get("id") for scenario in scenarios if isinstance(scenario, dict)]
-    if len(scenario_ids) != len(scenarios) or len(scenario_ids) != len(set(scenario_ids)):
+    if not all(isinstance(scenario, dict) for scenario in scenarios):
+        raise ManifestError("scenario records must be objects")
+    scenario_ids = [scenario.get("id") for scenario in scenarios]
+    if not all(isinstance(scenario_id, str) for scenario_id in scenario_ids):
+        raise ManifestError("request scenario ids must be strings")
+    if len(scenario_ids) != len(set(scenario_ids)):
         raise ManifestError("request scenario ids must be present and unique")
     if scenario_ids[0] != "C0":
         raise ManifestError("C0 must be the first scenario in every real-client request")
     for scenario in scenarios:
-        if not isinstance(scenario, dict):
-            raise ManifestError("scenario records must be objects")
         expected = scenario.get("definition_hash")
         unsigned = {key: value for key, value in scenario.items() if key != "definition_hash"}
         try:

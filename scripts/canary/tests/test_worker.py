@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import io
 import os
+import signal
 import sys
 from pathlib import Path
 import tempfile
@@ -34,6 +35,7 @@ from worker import (
     marker_instruction,
     minted_actors,
     parse_version,
+    run_with_timeout,
     terminal_query_responses,
     Worker,
     safe_extract,
@@ -114,7 +116,12 @@ class WorkerTests(unittest.TestCase):
                 "source": {"commit": "abc"},
                 "tier": "core",
                 "scenarios": [
-                    {"id": "C9", "name": "Contributor scenario", "checks": ["contributor-check"]}
+                    {
+                        "id": "C9",
+                        "name": "Contributor scenario",
+                        "timeout_seconds": 180,
+                        "checks": ["contributor-check"],
+                    }
                 ],
                 "budget": {
                     "claude_usd": 0.5,
@@ -131,6 +138,13 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(evidence["results"][0]["assertions"], [
                 {"name": "contributor-check", "status": "PASS"}
             ])
+
+    def test_scenario_timeout_is_enforced(self) -> None:
+        def expire() -> list[str]:
+            signal.pause()
+
+        with self.assertRaisesRegex(CanaryFailure, "C9 exceeded its 1-second timeout"):
+            run_with_timeout(expire, 1, "C9")
 
     def test_usage_parsers(self) -> None:
         events = "\n".join(

@@ -69,6 +69,24 @@ def terminal_query_responses(data: bytes, *, previous_tail_length: int = 0) -> b
     return bytes(replies)
 
 
+def run_with_timeout(handler: Any, seconds: int, scenario_id: str) -> list[str]:
+    """Enforce a scenario's committed wall-clock limit inside the worker process."""
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def timeout_handler(_signum: int, _frame: Any) -> None:
+        raise CanaryFailure(f"scenario {scenario_id} exceeded its {seconds}-second timeout")
+
+    signal.signal(signal.SIGALRM, timeout_handler)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, float(seconds))
+    try:
+        return handler()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
 class CanaryFailure(RuntimeError):
     pass
 
@@ -1616,7 +1634,7 @@ class Worker:
             self.active_scenario = scenario["id"]
             self.active_check = "scenario-start"
             started = time.monotonic()
-            checks = handler()
+            checks = run_with_timeout(handler, scenario["timeout_seconds"], scenario["id"])
             if checks != scenario["checks"]:
                 raise CanaryFailure(
                     f"scenario {scenario['id']} worker assertions do not match its committed definition"
