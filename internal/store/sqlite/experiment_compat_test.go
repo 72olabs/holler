@@ -85,14 +85,14 @@ func TestAmbientExperimentQuestionAnswerFlow(t *testing.T) {
 		t.Fatalf("implementer remaining inbox = %+v, err=%v", remaining, err)
 	}
 
-	durable, err := db.ListEvents(ctx, "ambient-experiment", "durable", 0, 10)
+	durable, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "ambient-experiment", "durable", 0, 10)
 	if err != nil {
 		t.Fatalf("list durable evidence: %v", err)
 	}
 	if len(durable) != 2 || durable[0].Kind != "message.sent" || durable[1].Kind != "message.sent" {
 		t.Fatalf("durable evidence = %+v", durable)
 	}
-	operational, err := db.ListEvents(ctx, "ambient-experiment", "operational", 0, 20)
+	operational, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "ambient-experiment", "operational", 0, 20)
 	if err != nil {
 		t.Fatalf("list operational evidence: %v", err)
 	}

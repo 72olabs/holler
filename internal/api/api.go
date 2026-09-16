@@ -453,6 +453,10 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 		return
 	}
 	hello.Actor = strings.TrimSpace(hello.Actor)
+	if bus.IsHumanActor(hello.Actor) {
+		_ = writeResponse(connection, failure(request.ID, "capability_required", "human identities require the authenticated gateway", false))
+		return
+	}
 	hello.RunID = strings.TrimSpace(hello.RunID)
 	hello.ProjectID = strings.TrimSpace(hello.ProjectID)
 	hello.Harness = strings.ToLower(strings.TrimSpace(hello.Harness))
@@ -592,6 +596,26 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 			})
 		} else if instanceState == "bound" {
 			_ = s.store.ResolveConditionIfReason(connectionCtx, "attention_unavailable", assignedActor, "harness_instance_unreconciled")
+		}
+	}
+	if _, enabled := s.capabilities["channel.create"]; enabled && containsString(hello.Capabilities, ManagedConversationsCapability) {
+		if store, ok := s.store.(interface {
+			EnableChannelAttention(context.Context, bus.ConversationPrincipal, bool) error
+		}); ok {
+			if err := store.EnableChannelAttention(connectionCtx, bus.ConversationPrincipal{Actor: assignedActor, Run: assignedRunID}, strings.HasPrefix(hello.Client, "claude-monitor/")); err != nil {
+				_ = writeResponse(connection, Response{ID: request.ID, Error: rpcError(err)})
+				return
+			}
+		}
+	}
+	if _, enabled := s.capabilities["channel.create"]; enabled && !containsString(hello.Capabilities, ManagedConversationsCapability) {
+		if store, ok := s.store.(interface {
+			ResetChannelAttention(context.Context, bus.ConversationPrincipal, bool) error
+		}); ok {
+			if err := store.ResetChannelAttention(connectionCtx, bus.ConversationPrincipal{Actor: assignedActor, Run: assignedRunID}, strings.HasPrefix(hello.Client, "claude-monitor/")); err != nil {
+				_ = writeResponse(connection, Response{ID: request.ID, Error: rpcError(err)})
+				return
+			}
 		}
 	}
 	ready, _ := json.Marshal(map[string]interface{}{
@@ -774,7 +798,11 @@ func (s *Server) hostRegistrationLive(ctx context.Context, binding bus.HostAtten
 }
 
 func (s *Server) protocolCapabilities() []string {
-	return protocolCapabilities(s.experimentalHostAttention)
+	caps := protocolCapabilities(s.experimentalHostAttention)
+	if _, enabled := s.capabilities["channel.create"]; enabled {
+		caps = append(caps, ManagedConversationsCapability)
+	}
+	return caps
 }
 
 func (s *Server) claimHostConnection(key hostAttentionKey, binding bus.HostAttentionBinding, connection net.Conn) bool {
@@ -1148,7 +1176,7 @@ func (s *Server) call(ctx context.Context, identity Identity, op string, raw jso
 		if err := decodeStrict(raw, &args); err != nil {
 			return nil, err
 		}
-		return s.store.ArchivePreflight(ctx, args.Actor, args.Limit)
+		return archivePreflightForIdentity(ctx, s.store, identity, args.Actor, args.Limit)
 	case "archive_actor":
 		if identity.Actor != "operator" {
 			return nil, &bus.ValidationError{Field: "actor", Problem: "only the operator identity may archive actors"}
@@ -1651,7 +1679,7 @@ func (c *Client) connectAttemptLocked(ctx context.Context, includeBuild, include
 		hello["project_id"] = c.helloIdentity.ProjectID
 	}
 	if featureIdentity || featureHarness {
-		hello["capabilities"] = []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, HarnessInstanceCapability, OperatorConditionsCapability, ActorLifecycleCapability}
+		hello["capabilities"] = []string{ActorAllocationCapability, ActorAliasCapability, TypedRoutesCapability, AliasClaimCapability, HarnessInstanceCapability, OperatorConditionsCapability, ActorLifecycleCapability, ManagedConversationsCapability}
 	}
 	if featureIdentity {
 		hello["name_mode"] = c.helloIdentity.NameMode
@@ -2299,9 +2327,29 @@ func failure(id uint64, code, message string, retryable bool) Response {
 	return Response{ID: id, OK: false, Error: &RPCError{Code: code, Message: message, Retryable: retryable}}
 }
 
+// ErrorDetails is the shared wire-code contract for Unix RPC and the local
+// human gateway. Transports may choose status codes, not redefine error names.
+func ErrorDetails(err error) *RPCError { return rpcError(err) }
+
 func rpcError(err error) *RPCError {
 	code := "internal"
 	switch {
+	case errors.Is(err, bus.ErrChannelDenied):
+		code = "conversation_denied"
+	case errors.Is(err, bus.ErrPreflightExpired):
+		code = "preflight_expired"
+	case errors.Is(err, bus.ErrCursorExpired):
+		code = "cursor_expired"
+	case errors.Is(err, bus.ErrAudienceChanged):
+		code = "audience_changed"
+	case errors.Is(err, bus.ErrImmutableAudience):
+		code = "immutable_audience"
+	case errors.Is(err, bus.ErrChannelCapability):
+		code = "capability_required"
+	case errors.Is(err, bus.ErrShareAuthority):
+		code = "share_authority_required"
+	case errors.Is(err, bus.ErrResponseConflict):
+		code = "response_conflict"
 	case errors.Is(err, bus.ErrInvalid):
 		code = "invalid_request"
 	case errors.Is(err, bus.ErrNotFound):
@@ -2364,6 +2412,22 @@ func errorFromRPC(rpc *RPCError) error {
 	}
 	var sentinel error
 	switch rpc.Code {
+	case "conversation_denied":
+		sentinel = bus.ErrChannelDenied
+	case "preflight_expired":
+		sentinel = bus.ErrPreflightExpired
+	case "cursor_expired":
+		sentinel = bus.ErrCursorExpired
+	case "audience_changed":
+		sentinel = bus.ErrAudienceChanged
+	case "immutable_audience":
+		sentinel = bus.ErrImmutableAudience
+	case "capability_required":
+		sentinel = bus.ErrChannelCapability
+	case "share_authority_required":
+		sentinel = bus.ErrShareAuthority
+	case "response_conflict":
+		sentinel = bus.ErrResponseConflict
 	case "invalid_request":
 		sentinel = bus.ErrInvalid
 	case "not_found":

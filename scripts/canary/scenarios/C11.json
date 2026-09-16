@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "C11",
+  "name": "managed-live-attention",
+  "description": "Real Claude hook and Codex native-queue managed wakes only for attention targets; other members retain queued, unconsumed deliveries. Generated policies unchanged.",
+  "required_clients": [
+    "claude",
+    "codex"
+  ],
+  "estimated_model_turns": 4,
+  "timeout_seconds": 720,
+  "daemon": {
+    "conversations": true,
+    "human_gateway": {
+      "human": "human:canary",
+      "scope": "observe+admin"
+    }
+  },
+  "test_environment": {
+    "human": "synthetic-http",
+    "write_policy": "generated-default",
+    "terminal_oracle": "stopped-daemon-fixed-projection-and-public-api"
+  },
+  "checks": [
+    "claude-managed-wake",
+    "codex-managed-wake",
+    "non-attended-member",
+    "terminal-no-duplicates",
+    "clients-ended"
+  ]
+}

@@ -24,8 +24,9 @@ go mod tidy -diff
 HOLLER_REQUIRE_OPENCODE_PLUGIN_TEST=1 go test ./...
 go vet ./...
 HOLLER_REQUIRE_OPENCODE_PLUGIN_TEST=1 go test -race ./...
-python3 -m unittest discover -s scripts/canary/tests -p 'test_*.py'
+node --test internal/gateway/web/app.test.cjs
 scripts/build.sh
+HOLLER_REQUIRE_MANAGED_FIXTURE_TEST=1 python3 -m unittest discover -s scripts/canary/tests -p 'test_*.py'
 
 run_key=${GITHUB_RUN_ID:-local-$(date -u +%Y%m%dT%H%M%SZ)-$$}
 evidence_root=${HOLLER_CI_EVIDENCE_ROOT:-"${repo_dir}/.runs/ci/${run_key}"}

@@ -78,7 +78,7 @@ func TestSessionStartRegistersAndHydratesWithoutConsuming(t *testing.T) {
 		t.Fatalf("refreshed registrations = %+v", registrations)
 	}
 
-	events, err := db.ListEvents(ctx, "experiment", "operational", 0, 100)
+	events, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "experiment", "operational", 0, 100)
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestSessionStartRegistersAndHydratesWithoutConsuming(t *testing.T) {
 	if err != nil || len(registrations) != 0 {
 		t.Fatalf("live registrations after SessionEnd = %+v, err=%v", registrations, err)
 	}
-	events, err = db.ListEvents(ctx, "experiment", "operational", 0, 100)
+	events, err = db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "experiment", "operational", 0, 100)
 	if err != nil || countKind(events, "session.stale") != 1 {
 		t.Fatalf("SessionEnd stale events = %+v, err=%v", events, err)
 	}

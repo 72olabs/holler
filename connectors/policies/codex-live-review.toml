@@ -23,6 +23,11 @@ enabled_tools = [
   "holler_capabilities",
   "holler_read",
   "holler_write",
+  "holler_channel_inbox",
+  "holler_channel_claim",
+  "holler_channel_ack",
+  "holler_channel_extend",
+  "holler_channel_nack",
 ]
 
 # Codex 0.149.1 did not apply the server default to leased/write calls in the
@@ -64,3 +69,16 @@ approval_mode = "approve"
 approval_mode = "approve"
 [plugins."holler@holler".mcp_servers.holler.tools.holler_write]
 approval_mode = "prompt"
+
+# Narrow consumption of the connector-bound actor's own managed deliveries.
+# This example does not authorize generic channel creation, posting or admission.
+[plugins."holler@holler".mcp_servers.holler.tools.holler_channel_inbox]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_channel_claim]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_channel_ack]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_channel_extend]
+approval_mode = "approve"
+[plugins."holler@holler".mcp_servers.holler.tools.holler_channel_nack]
+approval_mode = "approve"

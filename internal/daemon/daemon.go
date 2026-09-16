@@ -18,6 +18,7 @@ import (
 	"github.com/72olabs/holler/internal/buildinfo"
 	"github.com/72olabs/holler/internal/bus"
 	"github.com/72olabs/holler/internal/connector"
+	"github.com/72olabs/holler/internal/gateway"
 	store "github.com/72olabs/holler/internal/store/sqlite"
 )
 
@@ -32,9 +33,13 @@ type Config struct {
 	ExperimentalHostAttention bool
 	StaleUnreadAfter          time.Duration
 	ArchiveAfter              time.Duration
+	Conversations             bool
+	HumanGateway              *gateway.Config
 }
 
 func Run(ctx context.Context, config Config, ready io.Writer) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	config.DatabasePath = strings.TrimSpace(config.DatabasePath)
 	config.SocketPath = strings.TrimSpace(config.SocketPath)
 	if config.DatabasePath == "" {
@@ -81,6 +86,22 @@ func Run(ctx context.Context, config Config, ready io.Writer) error {
 	if err != nil {
 		return err
 	}
+	var humanGateway *gateway.Gateway
+	var humanListener net.Listener
+	humanURL := ""
+	if config.HumanGateway != nil {
+		humanGateway, err = gateway.New(ctx, db, *config.HumanGateway)
+		if err == nil {
+			humanListener, err = humanGateway.Listen()
+		}
+		if err != nil {
+			_ = db.Close()
+			return err
+		}
+		defer humanListener.Close()
+		humanURL = humanGateway.URL()
+		config.Conversations = true
+	}
 	codexBinary := strings.TrimSpace(config.CodexBinary)
 	if codexBinary == "" {
 		codexBinary = "codex"
@@ -89,6 +110,7 @@ func Run(ctx context.Context, config Config, ready io.Writer) error {
 		if err := json.NewEncoder(ready).Encode(map[string]interface{}{
 			"ok": true, "database": config.DatabasePath, "socket": config.SocketPath,
 			"protocol": api.ProtocolVersion, "codex_binary": codexBinary,
+			"conversations": config.Conversations, "human_gateway": humanURL,
 		}); err != nil {
 			_ = db.Close()
 			return err
@@ -111,14 +133,42 @@ func Run(ctx context.Context, config Config, ready io.Writer) error {
 		defer close(workerDone)
 		runNotificationWorker(workerCtx, db, notifier, config.StaleUnreadAfter, config.ArchiveAfter)
 	}()
+	managedDone := make(chan struct{})
+	if config.Conversations {
+		go func() {
+			defer close(managedDone)
+			runManagedNotificationWorker(workerCtx, db, notifier, config.StaleUnreadAfter)
+		}()
+	} else {
+		close(managedDone)
+	}
 	serverOptions := []api.ServerOption{api.WithAttentionBroker(attentionBroker)}
+	if config.Conversations {
+		serverOptions = append(serverOptions, api.WithConversations())
+	}
 	serverOptions = append(serverOptions, api.WithExperimentalHostAttention(config.ExperimentalHostAttention))
 	if config.HarnessInstanceResolver != nil {
 		serverOptions = append(serverOptions, api.WithHarnessInstanceResolver(config.HarnessInstanceResolver))
 	}
+	var gatewayDone chan error
+	if humanGateway != nil {
+		gatewayDone = make(chan error, 1)
+		go func() {
+			err := humanGateway.Serve(ctx, humanListener)
+			gatewayDone <- err
+			if err != nil {
+				cancel()
+			}
+		}()
+	}
 	serveErr := api.NewServer(db, serverOptions...).Serve(ctx, listener)
+	cancel()
 	cancelWorker()
 	<-workerDone
+	<-managedDone
+	if gatewayDone != nil {
+		serveErr = errors.Join(serveErr, <-gatewayDone)
+	}
 	closeErr := db.Close()
 	if serveErr != nil {
 		if closeErr != nil {

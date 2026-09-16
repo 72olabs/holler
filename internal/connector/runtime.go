@@ -253,13 +253,36 @@ func (r *Runtime) Notify(ctx context.Context, recipient string, message bus.Mess
 	if !ok {
 		return nil, errors.New("notification recording is unavailable")
 	}
+	record := func(attempt bus.NotificationAttempt) error {
+		return recorder.RecordNotification(ctx, message.ProjectID, message.ID, attempt)
+	}
+	var managed interface {
+		RecordManagedNotification(context.Context, string, bus.NotificationAttempt) error
+		ManagedNotificationAllowed(context.Context, bus.Registration, string) (bool, error)
+	}
+	if message.SchemaVersion == 2 {
+		var ok bool
+		managed, ok = r.store.(interface {
+			RecordManagedNotification(context.Context, string, bus.NotificationAttempt) error
+			ManagedNotificationAllowed(context.Context, bus.Registration, string) (bool, error)
+		})
+		if !ok {
+			return nil, bus.ErrChannelCapability
+		}
+		record = func(attempt bus.NotificationAttempt) error {
+			return managed.RecordManagedNotification(ctx, message.ID, attempt)
+		}
+		if bus.IsHumanActor(recipient) {
+			return []bus.NotificationAttempt{{Actor: recipient, Result: "unsupported", Detail: "human attention is available in the authenticated Studio view"}}, nil
+		}
+	}
 	registrations, err := r.store.LiveRegistrations(ctx, recipient)
 	if err != nil {
 		return nil, err
 	}
 	if len(registrations) == 0 {
 		attempt := bus.NotificationAttempt{Actor: recipient, Result: "retryable", Detail: "no live registration"}
-		if err := recorder.RecordNotification(ctx, message.ProjectID, message.ID, attempt); err != nil {
+		if err := record(attempt); err != nil {
 			return nil, err
 		}
 		return []bus.NotificationAttempt{attempt}, nil
@@ -278,6 +301,21 @@ func (r *Runtime) Notify(ctx context.Context, recipient string, message bus.Mess
 		attempt := bus.NotificationAttempt{
 			Actor: recipient, RunID: registration.RunID, SessionID: registration.SessionID,
 			Harness: registration.Harness,
+		}
+		if managed != nil {
+			allowed, err := managed.ManagedNotificationAllowed(ctx, registration, message.ID)
+			if err != nil {
+				return nil, err
+			}
+			if !allowed {
+				attempt.Result = "unsupported"
+				attempt.Detail = "managed attention not negotiated or delivery no longer authorized"
+				if err := record(attempt); err != nil {
+					return nil, err
+				}
+				attempts = append(attempts, attempt)
+				continue
+			}
 		}
 		switch registration.Harness {
 		case "codex":
@@ -324,7 +362,7 @@ func (r *Runtime) Notify(ctx context.Context, recipient string, message bus.Mess
 		default:
 			attempt.Result = "unsupported"
 		}
-		if err := recorder.RecordNotification(ctx, message.ProjectID, message.ID, attempt); err != nil {
+		if err := record(attempt); err != nil {
 			return nil, err
 		}
 		attempts = append(attempts, attempt)

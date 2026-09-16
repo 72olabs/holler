@@ -21,8 +21,8 @@
     "skills/holler/SKILL.md",
     "skills/holler-setup/SKILL.md"
   ],
-  "package_hash": "sha256:a39e16ef662547a1526c772e002d37e7e3bdb8f08f7ff6837c438e92cea4576a",
-  "tool_surface_hash": "sha256:b0514237f023357701db6274a7597aa227fa0f1b9890abc890dbccea9055982a",
+  "package_hash": "sha256:1cd216838b8ea4b6dfab1f66b0953ad3c4baa4579eb56b565032df81bd82ba56",
+  "tool_surface_hash": "sha256:8e0c32f1f8418d63efd0c1c9e772eb27d0c7ab1d9b929931f4d4a213418ead2f",
   "mcp_server_name": "holler",
   "tools": [
     {"name": "bus_send", "class": "idempotent-write"},
@@ -42,7 +42,12 @@
     {"name": "holler_alias_remove", "class": "idempotent-write", "requires_explicit_approval": true},
     {"name": "holler_capabilities", "class": "read-only"},
     {"name": "holler_read", "class": "read-only"},
-    {"name": "holler_write", "class": "dynamic-write", "requires_explicit_approval": true}
+    {"name": "holler_write", "class": "dynamic-write", "requires_explicit_approval": true},
+    {"name": "holler_channel_inbox", "class": "read-only"},
+    {"name": "holler_channel_claim", "class": "leased-write"},
+    {"name": "holler_channel_ack", "class": "idempotent-write"},
+    {"name": "holler_channel_extend", "class": "idempotent-write"},
+    {"name": "holler_channel_nack", "class": "leased-write"}
   ],
   "profiles": [
     {"name": "async-peer", "requires_wake": false, "description": "Durable messaging with visible polling fallback."},

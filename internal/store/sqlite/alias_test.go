@@ -243,7 +243,7 @@ func TestAliasResolvesBeforeImmutableRecipientStamp(t *testing.T) {
 	if items, err := db.CheckInbox(ctx, "skillbank", 10); err != nil || len(items) != 0 {
 		t.Fatalf("alias must not own an inbox: %+v, err = %v", items, err)
 	}
-	events, err := db.ListEvents(ctx, "default", "durable", 0, 10)
+	events, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "default", "durable", 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

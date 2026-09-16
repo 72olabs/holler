@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing, contextmanager, nullcontext
+import copy
 import errno
 import fcntl
 import json
@@ -38,8 +40,19 @@ from clients import (  # noqa: E402
     codex_exec_command,
     codex_live_command,
 )
-from handler_contract import HandlerContractError, handler_path, load_handler  # noqa: E402
+from handler_contract import HandlerContractError, handler_path, load_handler, validate_write_contract  # noqa: E402
+from managed import ManagedFixture  # noqa: E402
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
+
+
+# Pin stopped-database oracles to the product migration; checked against Go in CI.
+CURRENT_DATABASE_SCHEMA = 16
+MANAGED_TABLES = (
+    "channels", "human_actors", "channel_attention_clients", "supervision_links",
+    "channel_grants", "channel_events", "channel_threads", "managed_deliveries",
+    "channel_references", "channel_operations", "channel_message_requests",
+    "channel_views", "channel_responses",
+)
 
 
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
@@ -71,7 +84,158 @@ def terminal_query_responses(data: bytes, *, previous_tail_length: int = 0) -> b
 
 
 class CanaryFailure(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "check-failed"):
+        if code not in {"check-failed", "marker-missing", "write-policy-mismatch",
+                        "policy-invalid", "policy-restore-failed", "registration-timeout",
+                        "projection-clients-live", "projection-daemon-live",
+                        "terminal-marker-timeout", "terminal-client-exited",
+                        "session-end-timeout", "session-exit-failed"}:
+            raise ValueError("unsupported canary failure code")
+        super().__init__(message)
+        self.code = code
+        self.terminal_diagnostic: dict[str, Any] | None = None
+
+
+def terminal_wait_diagnostic(output: bytes, marker: str, *, client_running: bool) -> dict[str, Any]:
+    """Fixed booleans/counts only; signals are hints, never proof of their cause."""
+    normalized = ANSI_ESCAPE.sub("", output.decode("utf-8", errors="replace"))
+    signatures = {
+        "permission-prompt": ("Do you want to proceed?", "Do you want to allow", "Allow this tool"),
+        "auth-error": ("Invalid API key", "Please run /login", "Not logged in"),
+        "rate-limit": ("You've hit your limit", "rate_limit_error", "Rate limit"),
+        "api-error": ("API Error:", "overloaded_error"),
+        "tool-error": ("Error executing tool", "MCP error"),
+        "hook-review": ("Hooks need review",),
+        "reconnecting": ("Reconnecting", "Re-connecting"),
+    }
+    return {
+        "output_bytes": len(output), "client_running": client_running,
+        "raw_marker_seen": marker.encode("utf-8") in output,
+        "normalized_marker_seen": marker in normalized,
+        "whitespace_folded_marker_seen": marker in re.sub(r"\s+", "", normalized),
+        "screen_reader_prompt_at_end": normalized.rstrip().endswith("$"),
+        "signals": sorted(label for label, values in signatures.items()
+                          if any(value.casefold() in normalized.casefold() for value in values)),
+    }
+
+
+def terminal_marker_seen(output: bytes, marker: str) -> bool:
+    if marker.encode("utf-8") in output:
+        return True
+    normalized = ANSI_ESCAPE.sub("", output.decode("utf-8", errors="replace"))
+    return marker in re.sub(r"\s+", "", normalized)
+
+
+def approved_fixture_policy(original: bytes) -> bytes:
+    """Change exactly one generated TOML field, retaining every other byte."""
+    try:
+        text = original.decode("utf-8")
+        before = tomllib.loads(text)
+        expected = copy.deepcopy(before)
+        tool = expected["plugins"]["holler@holler"]["mcp_servers"]["holler"]["tools"]["holler_write"]
+        if tool["approval_mode"] != "prompt":
+            raise ValueError("not the generated baseline")
+        tool["approval_mode"] = "approve"
+        pattern = r'(\[plugins\."holler@holler"\.mcp_servers\.holler\.tools\.holler_write\]\n)approval_mode = "prompt"'
+        updated, count = re.subn(pattern, r'\1approval_mode = "approve"', text)
+        if count != 1 or tomllib.loads(updated) != expected:
+            raise ValueError("unexpected policy shape")
+        return updated.encode("utf-8")
+    except (ValueError, KeyError, TypeError) as error:
+        raise CanaryFailure("fixture policy is not the expected generated policy", code="policy-invalid") from error
+
+
+def atomic_policy_write(path: Path, content: bytes, mode: int) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=".canary-policy-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def assert_fixture_policy_baseline(path: Path, *, missing_ok: bool = False) -> None:
+    if path.is_symlink():
+        raise CanaryFailure("fixture baseline must not be a symlink", code="policy-invalid")
+    if missing_ok and not path.exists():
+        return  # A fresh runner has not run C0 connector setup yet.
+    try:
+        approved_fixture_policy(path.read_bytes())  # Validate only; never write.
+    except OSError as error:
+        raise CanaryFailure("fixture baseline unavailable", code="policy-invalid") from error
+
+
+@contextmanager
+def fixture_write_policy(path: Path, audits: list[dict[str, Any]]):
+    """Exclusive runner only; temporary generated policy edit, never OAuth data."""
+    if path.name != "holler.config.toml" or path.is_symlink() or not path.is_file():
+        raise CanaryFailure("fixture policy path is invalid", code="policy-invalid")
+    try:
+        original = path.read_bytes()
+        mode = path.stat().st_mode & 0o777
+    except OSError as error:
+        raise CanaryFailure("cannot read generated fixture policy", code="policy-invalid") from error
+    approved = approved_fixture_policy(original)
+    audit = {"original_sha256": sha256_bytes(original), "approved_sha256": sha256_bytes(approved),
+             "restored": False}
+    audits.append(audit)
+    try:
+        atomic_policy_write(path, approved, mode)
+    except OSError as error:
+        raise CanaryFailure("cannot apply generated fixture policy", code="policy-invalid") from error
+    try:
+        if sha256_file(path) != audit["approved_sha256"]:
+            raise CanaryFailure("fixture approval could not be verified", code="policy-invalid")
+        yield
+    finally:
+        # Never clobber an unexpected concurrent edit. The worker fails and the
+        # controller stops the exclusive runner; do not continue to any client.
+        try:
+            if path.is_symlink() or sha256_file(path) != audit["approved_sha256"]:
+                raise OSError("fixture policy changed unexpectedly")
+            atomic_policy_write(path, original, mode)
+            audit["restored_sha256"] = sha256_file(path)
+            audit["restored"] = (audit["restored_sha256"] == audit["original_sha256"]
+                                 and path.stat().st_mode & 0o777 == mode)
+            if not audit["restored"]:
+                raise OSError("fixture policy restoration mismatch")
+        except OSError as error:
+            raise CanaryFailure("fixture policy restoration failed", code="policy-restore-failed") from error
+TELEMETRY_TOOLS = frozenset({
+    "holler_capabilities", "holler_read", "holler_write", "holler_channel_inbox",
+    "holler_channel_claim", "holler_channel_ack", "holler_channel_extend", "holler_channel_nack",
+})
+
+
+def codex_tool_counts(output: str) -> list[dict[str, Any]]:
+    """Only known tool names and terminal status counts; never args/results/errors.
+
+    Missing events do not establish denial or prove a tool was not attempted.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "mcp_tool_call":
+            continue
+        tool, status = item.get("tool"), item.get("status")
+        if not isinstance(tool, str) or not isinstance(status, str):
+            continue
+        if tool not in TELEMETRY_TOOLS or status not in {"completed", "failed", "declined", "rejected"}:
+            continue
+        key = (tool, status)
+        counts[key] = counts.get(key, 0) + 1
+    return [{"tool": tool, "status": status, "count": count}
+            for (tool, status), count in sorted(counts.items())]
 
 
 class ScenarioTimeout(BaseException):
@@ -138,6 +302,9 @@ def make_failure_evidence(
     scenario: str,
     check: str,
     error: BaseException,
+    tool_counts: list[dict[str, Any]] | None = None,
+    policy_audits: list[dict[str, Any]] | None = None,
+    wake_diagnostic: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "schema_version": 1,
@@ -153,6 +320,20 @@ def make_failure_evidence(
         "limits": request["budget"],
         "message_bodies_included": False,
     }
+    if isinstance(error, CanaryFailure):
+        evidence["failure"]["code"] = error.code
+        if error.terminal_diagnostic is not None:
+            evidence["terminal_diagnostic"] = error.terminal_diagnostic
+    environment = next((s.get("test_environment") for s in request.get("scenarios", [])
+                        if s["id"] == scenario), None)
+    if environment:
+        evidence["failure"]["test_environment"] = environment
+    if tool_counts is not None:
+        evidence["tool_counts"] = tool_counts
+    if policy_audits is not None:
+        evidence["policy_audits"] = policy_audits
+    if wake_diagnostic is not None:
+        evidence["wake_diagnostic"] = wake_diagnostic
     evidence["evidence_hash"] = sha256_bytes(canonical_json(evidence))
     return evidence
 
@@ -238,6 +419,17 @@ def sqlite_scalar(database: Path, query: str, *parameters: object) -> Any:
     return row[0]
 
 
+def verify_upgraded_database(database: Path, message_id: str) -> None:
+    """Inspect only a stopped canary database; never emit message contents."""
+    if sqlite_scalar(database, "SELECT MAX(version) FROM schema_migrations") != CURRENT_DATABASE_SCHEMA:
+        raise CanaryFailure(f"C6 current database is not schema {CURRENT_DATABASE_SCHEMA}")
+    for table in MANAGED_TABLES:
+        if sqlite_scalar(database, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table) != 1:
+            raise CanaryFailure("C6 migration did not create all managed tables")
+    if sqlite_scalar(database, "SELECT COUNT(*) FROM messages WHERE message_id = ?", message_id) != 1:
+        raise CanaryFailure("C6 migration lost the pre-upgrade message")
+
+
 def codex_reported_tokens(output: str) -> int:
     last_usage: dict[str, Any] | None = None
     for line in output.splitlines():
@@ -273,7 +465,7 @@ def marker_instruction(marker: str) -> str:
     if len(parts) < 2 or any(not part for part in parts):
         raise ValueError("markers must contain at least two non-empty underscore-separated tokens")
     quoted = ", ".join(repr(part) for part in parts)
-    return f"the marker formed by joining these tokens with underscores: {quoted}"
+    return f"the marker on its own line formed by joining these tokens with underscores: {quoted}"
 
 
 def lifecycle_evidence_complete(events: object, *, actor: str, run_id: str) -> bool:
@@ -572,7 +764,7 @@ class PtyProcess:
         raise CanaryFailure("interactive client input prompt did not become ready")
 
     def submit(self, prompt: str, *, marker: str, timeout: float) -> None:
-        if marker in prompt:
+        if terminal_marker_seen(prompt.encode("utf-8"), marker):
             raise CanaryFailure("interactive prompt contains its expected output marker")
         after = self.checkpoint()
         self.send(prompt)
@@ -581,15 +773,23 @@ class PtyProcess:
         self.wait_for(marker, timeout, after=after)
 
     def wait_for(self, marker: str, timeout: float, *, after: int = 0) -> None:
-        deadline = time.monotonic() + timeout
-        marker_bytes = marker.encode("utf-8")
+        started = time.monotonic()
+        deadline = started + timeout
         while time.monotonic() < deadline:
-            if marker_bytes in self.buffer[after:]:
+            if terminal_marker_seen(bytes(self.buffer[after:]), marker):
                 return
             if self.process.poll() is not None:
-                raise CanaryFailure(f"interactive client exited before {marker}")
+                raise self._marker_failure(marker, after, exited=True, started=started)
             self._read_available(min(0.25, deadline - time.monotonic()))
-        raise CanaryFailure(f"timed out waiting for expected client marker {marker}")
+        raise self._marker_failure(marker, after, exited=self.process.poll() is not None, started=started)
+
+    def _marker_failure(self, marker: str, after: int, *, exited: bool, started: float) -> CanaryFailure:
+        error = CanaryFailure("interactive client marker not observed",
+                              code="terminal-client-exited" if exited else "terminal-marker-timeout")
+        error.terminal_diagnostic = terminal_wait_diagnostic(
+            bytes(self.buffer[after:]), marker, client_running=not exited)
+        error.terminal_diagnostic["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        return error
 
     def _read_available(self, timeout: float) -> None:
         for key, _ in self.selector.select(timeout=timeout):
@@ -614,6 +814,8 @@ class PtyProcess:
                 self.query_tail = combined[-(maximum - 1):]
 
     def close(self, *, abrupt: bool = False) -> None:
+        if self.master < 0:
+            return
         if self.process.poll() is None:
             if abrupt:
                 self._signal(signal.SIGKILL)
@@ -627,9 +829,12 @@ class PtyProcess:
                     self.process.wait(timeout=5)
         self.selector.close()
         os.close(self.master)
+        self.master = -1
 
     def graceful_claude_exit(self, timeout: float = 20) -> None:
         """Exit an input-ready Claude TUI through its lifecycle-aware command."""
+        if self.master < 0:
+            return
         if self.process.poll() is None:
             self.send("/exit")
             time.sleep(0.1)
@@ -639,8 +844,28 @@ class PtyProcess:
             except subprocess.TimeoutExpired as error:
                 raise CanaryFailure("Claude did not complete its graceful session exit") from error
         self._sweep_process_group()
-        self.selector.close()
-        os.close(self.master)
+        self.close()
+
+    def graceful_codex_exit(self, timeout: float = 20) -> None:
+        """Let the Codex TUI run SessionEnd before sweeping its descendants."""
+        if self.master < 0:
+            return
+        if self.process.poll() is None:
+            self.send("/quit")
+            time.sleep(0.1)
+            self.send("\r")
+            deadline = time.monotonic() + timeout
+            while self.process.poll() is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CanaryFailure("Codex did not complete its graceful session exit",
+                                        code="session-end-timeout")
+                # Drain terminal output and answer terminal queries during shutdown.
+                self._read_available(min(0.1, remaining))
+        if self.process.poll() != 0:
+            raise CanaryFailure("Codex exited unsuccessfully", code="session-exit-failed")
+        self._sweep_process_group()
+        self.close()
 
     def _sweep_process_group(self) -> None:
         """Stop hook/monitor descendants that can outlive an exited TUI leader."""
@@ -676,6 +901,8 @@ class BudgetedInteractiveSession:
         env: dict[str, str],
         ledger: BudgetLedger,
         marker_suffix: str,
+        phase: Any = lambda name: None,
+        record_wake: Any = lambda result: None,
     ):
         if client not in {"claude", "codex"}:
             raise CanaryFailure(f"unsupported interactive client {client!r}")
@@ -690,9 +917,13 @@ class BudgetedInteractiveSession:
         self.env = env
         self.ledger = ledger
         self.marker_suffix = marker_suffix
+        self.phase = phase
+        self.record_wake = record_wake
+        self.registered = False
         self.process: PtyProcess | None = None
 
     def __enter__(self) -> "BudgetedInteractiveSession":
+        self.phase("entry")
         command = (
             claude_live_command(self.config)[1:]
             if self.client == "claude"
@@ -704,14 +935,16 @@ class BudgetedInteractiveSession:
             env=self.env,
         )
         try:
+            self.phase("readiness")
             if self.client == "claude":
                 self.process.wait_until_ready("$", 60, suffix=True)
+                self._register()
             else:
                 self.process.wait_until_ready("Ask Codex to do anything", 60)
                 self.process.wait_until_quiet(30, quiet_seconds=2)
+                self.phase("hooks")
                 if "Hooks need review" in self.process.normalized_output()[-5000:]:
                     raise CanaryFailure("Codex hook trust was not ready before interactive handler")
-            self.wait_for_registration(self.actor, self.run_id)
             return self
         except BaseException:
             self.process.close()
@@ -720,9 +953,22 @@ class BudgetedInteractiveSession:
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> bool:
         if self.process is not None:
-            self.process.close()
-            self.process = None
+            try:
+                if _type is None:
+                    self.phase("exit")
+                    if self.client == "claude":
+                        self.process.graceful_claude_exit()
+                    else:
+                        self.process.graceful_codex_exit()
+            finally:
+                self.process.close()
+                self.process = None
         return False
+
+    def _register(self) -> None:
+        self.phase("registration")
+        self.wait_for_registration(self.actor, self.run_id)
+        self.registered = True
 
     def turn(self, prompt: str, expect_marker: str, timeout: float = 180) -> None:
         if self.process is None:
@@ -730,6 +976,7 @@ class BudgetedInteractiveSession:
         if not expect_marker.endswith(f"_{self.marker_suffix}") or expect_marker in prompt:
             raise CanaryFailure("interactive expected marker is invalid or appears in its prompt")
         self.ledger.ensure_capacity(client=self.client, turns=1)
+        self.phase("arm")
         started = time.monotonic()
         self.process.submit(prompt, marker=expect_marker, timeout=timeout)
         self.ledger.charge(
@@ -737,6 +984,25 @@ class BudgetedInteractiveSession:
             turns=1,
             wall_seconds=time.monotonic() - started,
         )
+        # Codex SessionStart is triggered by the first submitted turn, not TUI launch.
+        # Charge that completed turn even if registration subsequently times out.
+        if self.client == "codex" and not self.registered:
+            self._register()
+
+    def wake(self, trigger: Any, expect_marker: str, timeout: float = 180) -> Any:
+        """Reserve one unsolicited turn before triggering; never submit user input."""
+        if self.process is None or not expect_marker.endswith(f"_{self.marker_suffix}"):
+            raise CanaryFailure("wake requires a live session and scenario marker")
+        self.ledger.ensure_capacity(client=self.client, turns=1)
+        self.phase("wake-trigger")
+        after = self.process.checkpoint()
+        started = time.monotonic()
+        result = trigger()
+        self.record_wake(result)
+        self.phase("wake")
+        self.process.wait_for(expect_marker, timeout, after=after)
+        self.ledger.charge(client=self.client, turns=1, wall_seconds=time.monotonic() - started)
+        return result
 
 
 class HandlerContext:
@@ -751,6 +1017,8 @@ class HandlerContext:
         "_wait_for_registration",
         "_query",
         "_set_check",
+        "_managed",
+        "_wait_for_ended",
     )
 
     def __init__(self, worker: "Worker"):
@@ -761,6 +1029,8 @@ class HandlerContext:
         self._wait_for_registration = worker.wait_for_live_registration
         self._set_check = lambda name: setattr(worker, "active_check", name)
         self._query = worker.handler_query
+        self._managed = worker.managed_fixture
+        self._wait_for_ended = worker.wait_for_no_live_registration
         self._interactive = lambda client, actor, run_id, extra_args: BudgetedInteractiveSession(
             client=client,
             actor=actor,
@@ -773,6 +1043,8 @@ class HandlerContext:
             env=worker.env,
             ledger=worker.ledger,
             marker_suffix=self._marker_suffix,
+            phase=lambda name: self._set_check(f"{worker.active_scenario.lower()}-{client}-{name}"),
+            record_wake=worker.record_managed_wake,
         )
 
     @property
@@ -791,14 +1063,21 @@ class HandlerContext:
         self._guard_prompt(prompt, expect)
         output = self._run_claude(actor, run_id, prompt)
         if expect not in output:
-            raise CanaryFailure("Claude did not report the expected handler marker")
+            raise CanaryFailure("Claude did not report the expected handler marker", code="marker-missing")
         return output
 
     def run_codex(self, actor: str, run_id: str, prompt: str, expect: str) -> str:
         self._guard_prompt(prompt, expect)
         output = self._run_codex(actor, run_id, prompt)
         if expect not in output:
-            raise CanaryFailure("Codex did not report the expected handler marker")
+            raise CanaryFailure("Codex did not report the expected handler marker", code="marker-missing")
+        return output
+
+    def run_codex_write(self, actor: str, run_id: str, prompt: str, expect: str) -> str:
+        self._guard_prompt(prompt, expect)
+        output = self._run_codex(actor, run_id, prompt, fixture_write=True)
+        if expect not in output:
+            raise CanaryFailure("Codex did not report the expected handler marker", code="marker-missing")
         return output
 
     def interactive(
@@ -817,6 +1096,12 @@ class HandlerContext:
 
     def query(self, kind: str, *, partition: str = "canary") -> Any:
         return self._query(kind, partition=partition)
+
+    def managed(self) -> ManagedFixture:
+        return self._managed()
+
+    def wait_for_session_end(self, actor: str, run_id: str, client: str) -> None:
+        self._wait_for_ended(actor, run_id, harness=client)
 
     def check(self, name: str) -> None:
         if not name or len(name) > 128:
@@ -873,8 +1158,20 @@ class Worker:
         self.results: list[dict[str, Any]] = []
         self.active_scenario = "initialization"
         self.active_check = "initialization"
+        self.tool_counts: list[dict[str, Any]] = []
+        self.policy_audits: list[dict[str, Any]] = []
+        self.managed_wake_ids: list[str] = []
+        configurations = [s["daemon"] for s in request["scenarios"] if "daemon" in s]
+        self.managed_config = configurations[0] if configurations else None
+        if any(item != self.managed_config for item in configurations):
+            raise CanaryFailure("selected scenarios have conflicting daemon configurations")
+        self.human_url = ""
+        self.human_credentials = self.runtime / "human" / "credentials.json"
 
     def prepare(self) -> None:
+        if self.managed_config:
+            # Detect a prior killed worker before C0 setup could hide the stale approval.
+            assert_fixture_policy_baseline(Path(self.env["CODEX_HOME"]) / "holler.config.toml", missing_ok=True)
         for directory in (self.home, self.runtime, self.package.parent):
             directory.mkdir(parents=True, exist_ok=True)
         if not (self.fixture / ".git").is_dir():
@@ -891,8 +1188,17 @@ class Worker:
     def start_daemon(self) -> None:
         self.socket.parent.mkdir(parents=True, exist_ok=True)
         log = (self.socket.parent / "hollerd.log").open("a", encoding="utf-8")
+        log_offset = log.tell()
+        args = [str(self.hollerd), "--db", str(self.database), "--socket", str(self.socket)]
+        if getattr(self, "managed_config", None):
+            self.human_credentials.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            args.extend([
+                "--conversations", "--human-listen", "127.0.0.1:0",
+                "--human-actor", "human:canary", "--human-scope", "observe+admin",
+                "--human-credentials", str(self.human_credentials.resolve()),
+            ])
         self.daemon = subprocess.Popen(
-            [str(self.hollerd), "--db", str(self.database), "--socket", str(self.socket)],
+            args,
             cwd=self.fixture,
             env=self.env,
             stdout=log,
@@ -900,6 +1206,7 @@ class Worker:
             text=True,
             start_new_session=True,
         )
+        log.close()
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if self.daemon.poll() is not None:
@@ -911,6 +1218,19 @@ class Worker:
                     env=self.env,
                     timeout=2,
                 )
+                if getattr(self, "managed_config", None):
+                    with (self.socket.parent / "hollerd.log").open() as ready:
+                        ready.seek(log_offset)
+                        for line in ready:
+                            try:
+                                record = json.loads(line)
+                            except ValueError:
+                                continue
+                            if record.get("human_gateway", "").startswith("http://127.0.0.1:"):
+                                self.human_url = record["human_gateway"]
+                                return
+                    time.sleep(0.2)
+                    continue
                 return
             except CanaryFailure:
                 time.sleep(0.2)
@@ -925,6 +1245,76 @@ class Worker:
         except subprocess.TimeoutExpired:
             os.killpg(self.daemon.pid, signal.SIGKILL)
             self.daemon.wait(timeout=5)
+
+    def managed_fixture(self) -> ManagedFixture:
+        if not self.managed_config:
+            raise CanaryFailure("managed fixture requires hash-bound daemon configuration")
+        def fail(reason: str) -> None:
+            raise CanaryFailure(reason)
+        return ManagedFixture(
+            socket_path=self.socket, credentials=self.human_credentials,
+            endpoint=lambda: self.human_url, restart=self.managed_restart,
+            snapshot=self.managed_snapshot, fail=fail,
+        )
+
+    def managed_restart(self) -> None:
+        self.stop_daemon()
+        self.start_daemon()
+
+    def managed_snapshot(self, message_ids: list[str]) -> list[dict]:
+        if not self.managed_config or not 1 <= len(message_ids) <= 16 or any(
+            not re.fullmatch(r"msg_[a-zA-Z0-9]+", item) for item in message_ids
+        ):
+            raise CanaryFailure("invalid managed terminal projection request")
+        for entry in self.actor_directory().get("actors", []):
+            if any(session.get("state") == "live" for session in entry.get("sessions", [])):
+                raise CanaryFailure("managed terminal projection requires all client sessions ended",
+                                    code="projection-clients-live")
+        self.stop_daemon()
+        if (self.daemon is not None and self.daemon.poll() is None) or self.socket.exists():
+            raise CanaryFailure("managed terminal projection requires stopped daemon", code="projection-daemon-live")
+        try:
+            with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as connection:
+                connection.row_factory = sqlite3.Row
+                if connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] != CURRENT_DATABASE_SCHEMA:
+                    raise CanaryFailure(f"managed terminal projection requires schema {CURRENT_DATABASE_SCHEMA}")
+                result = []
+                for message_id in message_ids:
+                    for actor in ("canary-claude", "canary-codex"):
+                        row = connection.execute(
+                            "SELECT state,attempt FROM managed_deliveries WHERE message_id=? AND recipient_actor=?",
+                            (message_id, actor),
+                        ).fetchone()
+                        item = {"message_id": message_id, "recipient_actor": actor,
+                                "state": row["state"] if row else "absent", "attempt": row["attempt"] if row else 0}
+                        for label, kind in (("claims", "delivery.claimed"), ("acks", "delivery.ack"),
+                                            ("attention_attempts", "attention.attempted"), ("attention_adapters", "attention.adapter")):
+                            item[label] = connection.execute(
+                                "SELECT count(*) FROM channel_events WHERE message_id=? AND actor=? AND kind=?",
+                                (message_id, actor, kind),
+                            ).fetchone()[0]
+                        result.append(item)
+        finally:
+            self.start_daemon()
+        return result
+
+    def record_managed_wake(self, result: Any) -> None:
+        if self.active_scenario == "C11":
+            mid = result.get("message", {}).get("message_id") if isinstance(result, dict) else None
+            if not isinstance(mid, str) or not re.fullmatch(r"msg_[a-zA-Z0-9]+", mid):
+                raise CanaryFailure("invalid managed wake message correlation")
+            self.managed_wake_ids.append(mid)
+
+    def managed_wake_failure_diagnostic(self) -> dict[str, Any] | None:
+        if self.active_scenario != "C11" or not self.active_check.endswith("-wake"):
+            return None
+        try:
+            return {"status": "captured", "deliveries": self.managed_snapshot(self.managed_wake_ids)}
+        except Exception as error:
+            # Never weaken lifecycle/daemon guards or replace the primary failure.
+            reason = error.code if isinstance(error, CanaryFailure) and error.code in {
+                "projection-clients-live", "projection-daemon-live"} else "projection-unavailable"
+            return {"status": "omitted", "reason": reason}
 
     def setup_connectors(
         self,
@@ -1056,7 +1446,7 @@ class Worker:
                 ):
                     return
             time.sleep(0.25)
-        raise CanaryFailure(f"{actor} did not create a live registration")
+        raise CanaryFailure(f"{actor} did not create a live registration", code="registration-timeout")
 
     def wait_for_no_live_registration(
         self,
@@ -1076,7 +1466,7 @@ class Worker:
             if live_actor != actor:
                 raise CanaryFailure(f"{run_id} remained live under an unexpected actor")
             time.sleep(0.25)
-        raise CanaryFailure(f"{actor} retained a live registration for {run_id}")
+        raise CanaryFailure(f"{actor} retained a live registration for {run_id}", code="session-end-timeout")
 
     def has_lifecycle_evidence(self, actor: str, run_id: str) -> bool:
         events = self.operational_events()
@@ -1224,22 +1614,33 @@ class Worker:
         run_id: str,
         prompt: str,
         config: dict[str, Any] | None = None,
+        *,
+        fixture_write: bool = False,
     ) -> str:
         config = config or self.request["clients"]["codex"]
-        self.ledger.ensure_capacity(client="codex", turns=1)
         command = codex_exec_command(config)[1:]
+        if fixture_write:
+            scenario = next((s for s in self.request["scenarios"] if s["id"] == self.active_scenario), {})
+            if (not self.managed_config or actor != "canary-codex"
+                    or scenario.get("test_environment", {}).get("write_policy") != "fixture-approved-codex-write"):
+                raise CanaryFailure("fixture write requires declared Codex approval", code="write-policy-mismatch")
+        self.ledger.ensure_capacity(client="codex", turns=1)
         started = time.monotonic()
-        result = run_command(
-            self.launcher("codex", actor, run_id, command),
-            cwd=self.fixture,
-            env=self.env,
-            timeout=180,
-            stdin=prompt,
-        )
-        self.ledger.charge(
-            client="codex", turns=1, reported_tokens=codex_reported_tokens(result.stdout),
-            wall_seconds=time.monotonic() - started,
-        )
+        policy = (fixture_write_policy(Path(self.env["CODEX_HOME"]) / "holler.config.toml", self.policy_audits)
+                  if fixture_write else nullcontext())
+        with policy:
+            result = run_command(
+                self.launcher("codex", actor, run_id, command),
+                cwd=self.fixture,
+                env=self.env,
+                timeout=180,
+                stdin=prompt,
+            )
+            self.ledger.charge(
+                client="codex", turns=1, reported_tokens=codex_reported_tokens(result.stdout),
+                wall_seconds=time.monotonic() - started,
+            )
+            self.tool_counts.extend(codex_tool_counts(result.stdout))
         return result.stdout
 
     def run_allocated_claude(
@@ -1830,18 +2231,14 @@ class Worker:
             self.active_check = "c6-current-shutdown-after-migration"
             self.stop_daemon()
             self.active_check = "c6-migration-backup-count"
-            backups = list(c6_runtime.glob("holler.sqlite3.pre-v15.*.bak"))
+            backups = list(c6_runtime.glob(f"holler.sqlite3.pre-v{CURRENT_DATABASE_SCHEMA}.*.bak"))
             if len(backups) != 1:
                 raise CanaryFailure("C6 migration did not create exactly one schema-14 backup")
             self.active_check = "c6-migration-backup-schema"
             if sqlite_scalar(backups[0], "SELECT MAX(version) FROM schema_migrations") != 14:
                 raise CanaryFailure("C6 migration backup does not preserve schema 14")
-            self.active_check = "c6-migrated-schema"
-            if sqlite_scalar(c6_database, "SELECT MAX(version) FROM schema_migrations") != 15:
-                raise CanaryFailure("C6 current database is not schema 15")
-            self.active_check = "c6-migrated-message"
-            if sqlite_scalar(c6_database, "SELECT COUNT(*) FROM messages WHERE message_id = ?", before_id) != 1:
-                raise CanaryFailure("C6 migration lost the pre-upgrade message")
+            self.active_check = "c6-migrated-database"
+            verify_upgraded_database(c6_database, before_id)
 
             self.active_check = "c6-connector-refresh"
             self.start_daemon()
@@ -1990,6 +2387,7 @@ class Worker:
             if not callable(handler):
                 try:
                     custom_path = handler_path(SCRIPT_DIR / "handlers", scenario["id"])
+                    validate_write_contract(custom_path, scenario)
                     handler = load_handler(custom_path)
                 except HandlerContractError as error:
                     raise CanaryFailure(
@@ -2003,6 +2401,12 @@ class Worker:
         for scenario, handler, custom in handlers:
             self.active_scenario = scenario["id"]
             self.active_check = "scenario-start"
+            self.tool_counts = []
+            self.policy_audits = []
+            self.managed_wake_ids = []
+            if "daemon" in scenario:
+                self.active_check = "managed-policy-baseline"
+                assert_fixture_policy_baseline(Path(self.env["CODEX_HOME"]) / "holler.config.toml")
             started = time.monotonic()
             turns_before = self.ledger.model_turns
             operation = (lambda handler=handler: handler(context)) if custom else handler
@@ -2022,6 +2426,18 @@ class Worker:
                 "observed_model_turns": observed_turns,
                 "assertions": [{"name": check, "status": "PASS"} for check in checks],
             }
+            if self.tool_counts:
+                result["tool_counts"] = self.tool_counts
+            if self.policy_audits:
+                result["policy_audits"] = self.policy_audits
+            if "test_environment" in scenario:
+                result["test_environment"] = scenario["test_environment"]
+                for assertion in result["assertions"]:
+                    assertion["oracle"] = (
+                        "offline-projection-and-public-api" if assertion["name"] in
+                        {"recipient-independence", "terminal-ack-exactly-once", "terminal-no-duplicates", "non-attended-member"}
+                        else "protocol-api" if scenario["id"] == "C9" else "real-client-and-public-api"
+                    )
             if observed_turns != estimated_turns:
                 result["status"] = "FAIL"
                 self.results.append(result)
@@ -2082,6 +2498,9 @@ def main() -> None:
                 scenario=worker.active_scenario,
                 check=worker.active_check,
                 error=error,
+                tool_counts=worker.tool_counts,
+                policy_audits=worker.policy_audits,
+                wake_diagnostic=worker.managed_wake_failure_diagnostic(),
             )
         finally:
             worker.stop_daemon()

@@ -250,6 +250,8 @@ class WorkerTests(unittest.TestCase):
             run_codex=lambda *args: "",
             wait_for_live_registration=lambda *args: None,
             handler_query=lambda *args, **kwargs: {},
+            managed_fixture=lambda: None,
+            wait_for_no_live_registration=lambda *args, **kwargs: None,
             launcher=lambda *args: [],
             env={},
             ledger=BudgetLedger({

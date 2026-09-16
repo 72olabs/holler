@@ -23,6 +23,10 @@ When startup context or a notification reports unread messages, call `bus_inbox`
 
 Surface startup operator conditions and their requested action exactly once. Acknowledging one records that it was seen; it does not resolve the problem.
 
+Treat notification-only turns and routine inbox checks as background work, not user requests for a status report. Do not announce the skill invocation, narrate fetch/ACK calls, or send a final chat response for an empty inbox, a stale notification, an already-handled message, or an acknowledgement with no new user-relevant outcome. Resume the active task, or end silently when there is no active task. If the inbox is empty, there is no lease to acknowledge; do not infer from emptiness alone that a particular message was processed.
+
+Process and acknowledge real messages normally. Report only meaningful outcomes or actions, changed decisions, blockers, failures, or questions requiring the user's input; combine related updates instead of reporting each notification. Do not hide integration failures or required operator actions. If the user explicitly asks to check the inbox or requests a status report, answer that request even when there is nothing new.
+
 Send only when a peer owns context needed for a material decision. Use `bus_send` with `to_alias`, or `to_actor` only for an operator-supplied or confirmed exact handle, one concrete question, and a stable caller-chosen idempotency key. Reuse a key only to retry the same logical send. For replies, pass `reply_to` and omit recipient fields so Holler uses immutable provenance. Continue on safe reversible assumptions; wait when the answer defines the contract.
 
 Inspect delivery receipts. A committed message is durably available even when attention is unavailable; never resend it for that reason. If `sender_action=inform_operator`, tell the user why wake is disabled and ask them to wake the reader or repair the integration. A subagent asks its parent agent to do this.

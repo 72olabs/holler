@@ -63,7 +63,7 @@ func TestAllocateActorIsAtomicAndContinuitySafe(t *testing.T) {
 	if second.Actor == first.Actor || !second.Minted {
 		t.Fatalf("second allocation = %+v", second)
 	}
-	events, err := db.ListEvents(ctx, "coupon", "durable", 0, 100)
+	events, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "coupon", "durable", 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestSessionContinuityReconcilesMCPFirstResumeWithoutPhantomActor(t *testing
 		t.Fatalf("released suffix allocation = %+v, err = %v", second, err)
 	}
 	assertOpaqueActor(t, second.Actor, "reviewer")
-	events, err := db.ListEvents(ctx, "coupon", "durable", 0, 100)
+	events, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "coupon", "durable", 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

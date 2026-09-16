@@ -51,8 +51,8 @@ func TestMCPQuestionClaimAckRoundTrip(t *testing.T) {
 		t.Fatalf("server name = %q", got)
 	}
 	tools := nestedSlice(t, responses[1], "result", "tools")
-	if len(tools) != 18 {
-		t.Fatalf("tool count = %d, want 18", len(tools))
+	if len(tools) != 23 {
+		t.Fatalf("tool count = %d, want 23", len(tools))
 	}
 	adoptTool := tools[10].(map[string]interface{})
 	annotations := adoptTool["annotations"].(map[string]interface{})
@@ -727,11 +727,12 @@ func TestToolSurfaceIdentityIsStable(t *testing.T) {
 		"bus_send", "bus_check_inbox", "bus_claim", "bus_inbox", "bus_ack", "bus_extend", "bus_nack", "bus_status",
 		"holler_profile", "holler_who", "holler_adopt", "holler_aliases", "holler_alias_resolve",
 		"holler_alias_set", "holler_alias_remove", "holler_capabilities", "holler_read", "holler_write",
+		"holler_channel_inbox", "holler_channel_claim", "holler_channel_ack", "holler_channel_extend", "holler_channel_nack",
 	}
 	if got := strings.Join(mcp.ToolNames(), ","); got != strings.Join(wantNames, ",") {
 		t.Fatalf("tool names = %q", got)
 	}
-	const wantHash = "sha256:b0514237f023357701db6274a7597aa227fa0f1b9890abc890dbccea9055982a"
+	const wantHash = "sha256:8e0c32f1f8418d63efd0c1c9e772eb27d0c7ab1d9b929931f4d4a213418ead2f"
 	if got := mcp.ToolSurfaceHash(); got != wantHash {
 		t.Fatalf("tool surface hash = %q, want %q; connector reauthorization is required for an intentional schema change", got, wantHash)
 	}

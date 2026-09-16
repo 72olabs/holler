@@ -9,6 +9,7 @@ Requirements:
 
 - Go 1.26 or newer;
 - macOS or Linux;
+- Node.js 22 or newer for deterministic connector and Studio UI tests;
 - Claude Code or Codex only for live connector canaries.
 
 Build and run the deterministic checks:
@@ -78,8 +79,9 @@ adding and running contributor-defined scenarios with `--scenario C<number>`.
 - Hooks fail open when Holler is unavailable; connector failure must not
   prevent the underlying harness from starting or stopping.
 - Durable routing and organizational/task policy remain separate concerns.
-- Real channels are V2 work. Do not describe a shared `channel_id` label as
-  membership or broadcast.
+- Managed conversations are opt-in and enforce channel membership. Legacy
+  `channel_id` labels do not grant membership or broadcast. See
+  [CONVERSATIONS.md](CONVERSATIONS.md) for the boundary and deferred features.
 
 Read [API.md](API.md) and [connectors/README.md](connectors/README.md) before
 changing these boundaries.

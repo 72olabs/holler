@@ -126,6 +126,28 @@ def load_handler(path: Path) -> Callable[[Any], list[str]]:
         ) from error
 
 
+def validate_write_contract(path: Path, scenario: dict[str, Any]) -> None:
+    """Static tripwire, not a Python sandbox or semantic prompt authorization."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    needs_write = any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run_codex_write" for node in ast.walk(tree)
+    )
+    approved = scenario.get("test_environment", {}).get("write_policy") == "fixture-approved-codex-write"
+    if needs_write != approved:
+        raise HandlerContractError("explicit Codex write calls must match the declared fixture write policy")
+    # Catch the original C10 mistake without interpreting arbitrary English.
+    # Negated mentions in C11's instructions are not write declarations.
+    for node in ast.walk(tree):
+        if (not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute)
+                or node.func.attr not in {"run_codex", "run_claude"}):
+            continue
+        text = " ".join(item.value for item in ast.walk(node)
+                        if isinstance(item, ast.Constant) and isinstance(item.value, str))
+        if re.search(r"(?:^|[.!?]\s+)Use holler_write\b", text):
+            raise HandlerContractError("positive generic-write prompts require run_codex_write")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("handler_directory", type=Path)

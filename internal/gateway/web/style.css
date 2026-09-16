@@ -1,0 +1,284 @@
+:root {
+  font:
+    16px/1.5 system-ui,
+    sans-serif;
+  color: #182438;
+  background: #f3f6fa;
+  --line: #ced7e2;
+  --accent: #1555b4;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 1rem 2rem;
+  background: #101e34;
+  color: white;
+}
+h1 {
+  font-size: 1.35rem;
+  margin: 0;
+}
+h1 span {
+  font-weight: 400;
+  color: #a9c8ff;
+}
+h2 {
+  font-size: 1.2rem;
+  margin: 0.5rem 0;
+}
+h3 {
+  font-size: 1rem;
+  margin: 1rem 0 0.5rem;
+}
+#identity {
+  flex: 1;
+  font-size: 0.875rem;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+button {
+  border: 1px solid var(--line);
+  background: white;
+  color: #193250;
+  border-radius: 6px;
+  padding: 0.5rem 0.8rem;
+  cursor: pointer;
+}
+button:hover {
+  border-color: var(--accent);
+  background: #edf4ff;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+button[type="submit"],
+#confirm {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+:focus-visible {
+  outline: 3px solid #7cafff;
+  outline-offset: 2px;
+}
+input:not([type="checkbox"]),
+select,
+textarea {
+  display: block;
+  width: 100%;
+  padding: 0.55rem;
+  border: 1px solid #aebaca;
+  border-radius: 5px;
+  background: white;
+  color: inherit;
+}
+label {
+  display: block;
+  font-size: 0.875rem;
+  margin: 0.6rem 0;
+}
+textarea {
+  resize: vertical;
+  min-height: 5rem;
+}
+p {
+  margin: 0.65rem 0;
+}
+#status {
+  margin: 0;
+  padding: 0 2rem;
+  background: #fff0c9;
+  white-space: pre-wrap;
+}
+#status:not(:empty) {
+  padding: 0.6rem 2rem;
+}
+#login {
+  max-width: 480px;
+  margin: 8vh auto;
+  padding: 2rem;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+#workspace {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  min-height: calc(100vh - 72px);
+}
+[hidden] {
+  display: none !important;
+}
+aside {
+  padding: 1rem;
+  border-right: 1px solid var(--line);
+  background: #eaf0f7;
+}
+nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+nav button {
+  text-align: left;
+  padding: 0.9rem;
+}
+nav button.selected {
+  border-left: 4px solid var(--accent);
+  background: white;
+}
+nav small {
+  display: block;
+  color: #4a617c;
+}
+.row,
+.toolbar {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.row > label {
+  flex: 1;
+}
+.row > h2 {
+  flex: 1;
+}
+.toolbar {
+  margin: 0.8rem 0;
+}
+.secondary {
+  font-size: 0.875rem;
+  color: #586a80;
+}
+#conversation {
+  padding: 1.5rem 2rem;
+  max-width: 1100px;
+  width: 100%;
+}
+#empty {
+  margin-top: 8vh;
+  max-width: 580px;
+}
+#audience {
+  font-size: 0.875rem;
+  padding: 0.7rem;
+  background: #e5efff;
+  border-left: 3px solid #3774c9;
+  white-space: pre-wrap;
+}
+.badge {
+  font-size: 0.875rem;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 0.15rem 0.6rem;
+}
+.message {
+  padding: 1rem;
+  margin: 0.7rem 0;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.message.selected {
+  border-color: var(--accent);
+}
+.message p,
+.message pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.message pre {
+  font: inherit;
+}
+.message .meta {
+  font-size: 0.875rem;
+  color: #556a82;
+}
+.reference {
+  font-size: 0.875rem;
+  color: #62728b;
+  border-left: 2px solid var(--line);
+  padding-left: 0.5rem;
+}
+.brief {
+  background: #eaf2ff;
+  padding: 1rem;
+  border: 1px solid #afc9ee;
+  white-space: pre-wrap;
+}
+.request {
+  border: 1px solid var(--line);
+  padding: 0.7rem;
+  margin: 0.5rem 0;
+  background: white;
+}
+#compose {
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+  margin-top: 1.5rem;
+}
+dialog {
+  width: min(620px, 95vw);
+  max-height: 90vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.5rem;
+}
+dialog::backdrop {
+  background: #10223999;
+}
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+#participants label {
+  display: flex;
+  gap: 0.5rem;
+}
+#admin {
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+  margin-top: 2rem;
+}
+@media (max-width: 740px) {
+  header {
+    padding: 1rem;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  #workspace {
+    grid-template-columns: 1fr;
+  }
+  aside {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  nav {
+    max-height: 220px;
+    overflow: auto;
+  }
+  #conversation {
+    padding: 1rem;
+  }
+  #login {
+    margin: 2rem 1rem;
+  }
+  #identity {
+    min-width: 50%;
+  }
+}

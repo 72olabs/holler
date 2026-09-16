@@ -82,6 +82,7 @@ const (
 	DeliveryClaimed      DeliveryState = "claimed"
 	DeliveryAcked        DeliveryState = "acked"
 	DeliveryDeadLettered DeliveryState = "dead-lettered"
+	DeliveryRevoked      DeliveryState = "revoked"
 )
 
 // RouteKind distinguishes a mutable human-facing route from an immutable

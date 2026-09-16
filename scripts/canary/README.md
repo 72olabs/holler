@@ -51,8 +51,10 @@ The underlying flow is:
 5. Rerun the printed command to execute the approved request using dedicated
    test subscriptions.
 6. Fix on the branch, create another checkpoint commit, and repeat.
-7. Open the PR only after the release-tier canary passes; squash-merge after
-   review.
+7. Use core-tier and relevant feature canaries for checkpoints and PRs;
+   squash-merge after review and deterministic CI. Before tagging a versioned
+   release, require a fresh release-tier pass bound to the candidate commit.
+   Feature-only scenarios do not substitute for that release gate.
 
 The lower-level zero-cost preparation steps remain available for harness
 development and debugging:

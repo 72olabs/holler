@@ -21,9 +21,15 @@ const maximumContinuityHandles = 8
 // stamped with its immutable actor identity. Allocation, continuity binding,
 // supersession, and their events share one SQLite transaction.
 func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bus.ActorBindResult, error) {
+	if bus.IsHumanActor(request.RequestedActor) {
+		return bus.ActorBindResult{}, bus.ErrChannelCapability
+	}
 	req, err := normalizeActorBindRequest(request)
 	if err != nil {
 		return bus.ActorBindResult{}, err
+	}
+	if bus.IsHumanActor(req.RequestedActor) {
+		return bus.ActorBindResult{}, bus.ErrChannelCapability
 	}
 	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -137,6 +143,9 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			return bus.ActorBindResult{}, err
 		}
 		if found {
+			if bus.IsHumanActor(boundActor) {
+				return bus.ActorBindResult{}, bus.ErrChannelCapability
+			}
 			if archived, archiveErr := s.actorArchivedTx(ctx, tx, boundActor); archiveErr != nil {
 				return bus.ActorBindResult{}, archiveErr
 			} else if archived {
@@ -246,6 +255,9 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 			}
 		}
 	}
+	if bus.IsHumanActor(result.Actor) {
+		return bus.ActorBindResult{}, bus.ErrChannelCapability
+	}
 	if !result.Provisional {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT OR IGNORE INTO actor_names(actor, first_seen_at_ns) VALUES (?, ?)`,
@@ -266,6 +278,9 @@ func (s *Store) BindActor(ctx context.Context, request bus.ActorBindRequest) (bu
 // alias namespace without adding it to discovery or fabricating presence.
 func (s *Store) ReserveActorName(ctx context.Context, actor string) error {
 	actor = strings.TrimSpace(actor)
+	if bus.IsHumanActor(actor) {
+		return bus.ErrChannelCapability
+	}
 	if actor == "" {
 		return &bus.ValidationError{Field: "actor", Problem: "is required"}
 	}

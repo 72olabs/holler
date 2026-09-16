@@ -14,6 +14,7 @@ import (
 
 	"github.com/72olabs/holler/internal/connector"
 	"github.com/72olabs/holler/internal/daemon"
+	"github.com/72olabs/holler/internal/gateway"
 )
 
 func main() {
@@ -22,15 +23,25 @@ func main() {
 	socketPath := flags.String("socket", defaultSocketPath(), "Unix socket path")
 	codexBinary := flags.String("codex-binary", "", "Codex executable used by native queue notifications; defaults to the setup-recorded absolute path")
 	notificationTimeout := flags.Duration("notification-timeout", 5*time.Second, "maximum duration of one harness notification attempt")
+	conversations := flags.Bool("conversations", false, "enable managed private-channel capabilities")
+	humanListen := flags.String("human-listen", "", "opt-in human gateway address (127.0.0.1:port only)")
+	humanActor := flags.String("human-actor", "", "stable human: identity for the local gateway")
+	humanScope := flags.String("human-scope", "observe", "gateway enrollment scope: observe or observe+admin")
+	humanCredentials := flags.String("human-credentials", "", "absolute private gateway credential file path; bearer is never accepted on the command line")
 	flags.Parse(os.Args[1:])
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	resolvedCodexBinary := resolveCodexBinary(*codexBinary)
+	var humanConfig *gateway.Config
+	if *humanListen != "" {
+		humanConfig = &gateway.Config{Address: *humanListen, Human: *humanActor, Scope: *humanScope, CredentialPath: *humanCredentials}
+	}
 	if err := daemon.Run(ctx, daemon.Config{
 		DatabasePath: *dbPath, SocketPath: *socketPath, CodexBinary: resolvedCodexBinary,
 		CodexBinaryResolver:       func() string { return resolveCodexBinary(*codexBinary) },
 		NotificationTimeout:       *notificationTimeout,
 		ExperimentalHostAttention: strings.TrimSpace(os.Getenv("HOLLER_EXPERIMENTAL_HOST_ATTENTION")) == "1",
+		Conversations:             *conversations, HumanGateway: humanConfig,
 	}, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

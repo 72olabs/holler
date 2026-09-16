@@ -133,7 +133,7 @@ func TestCertificationRejectsCLIAndMonitorEvidence(t *testing.T) {
 	_, _ = db.Send(cliCtx, bus.SendRequest{IdempotencyKey: "cli-output", ProjectID: "experiment", ChannelID: "direct", FromActor: actor, FromRun: runID, ToActors: []string{"observer"}, Type: "MESSAGE", DeliveryRequest: bus.DeliveryWake, Body: []byte(`{"text":"cli"}`)})
 	notifyCtx := bus.WithCaller(context.Background(), bus.Caller{Client: "hollerd/0.1", BuildID: "test@clean", DaemonBuildID: "test@clean"})
 	_ = db.RecordNotification(notifyCtx, "experiment", inbound.ID, bus.NotificationAttempt{Actor: actor, RunID: runID, SessionID: "thread-cli", Harness: "codex", Result: "monitor-notified"})
-	report, err := connector.Certify(context.Background(), db, connector.CertificationConfig{Harness: "codex", Profile: "live-review", ProjectID: "experiment", Actor: actor, RunID: runID})
+	report, err := connector.Certify(bus.WithCaller(context.Background(), bus.Caller{Actor: "operator"}), db, connector.CertificationConfig{Harness: "codex", Profile: "live-review", ProjectID: "experiment", Actor: actor, RunID: runID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestCertificationRejectsDirtyMCPBuildEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := connector.Certify(context.Background(), db, connector.CertificationConfig{
+	report, err := connector.Certify(bus.WithCaller(context.Background(), bus.Caller{Actor: "operator"}), db, connector.CertificationConfig{
 		Harness: "codex", Profile: "async-peer", ProjectID: "experiment", Actor: actor, RunID: runID,
 	})
 	if err != nil {
@@ -214,7 +214,7 @@ func TestCertificationExplainsMissingLegacyClientBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := connector.Certify(context.Background(), db, connector.CertificationConfig{
+	report, err := connector.Certify(bus.WithCaller(context.Background(), bus.Caller{Actor: "operator"}), db, connector.CertificationConfig{
 		Harness: "codex", Profile: "async-peer", ProjectID: "experiment", Actor: actor, RunID: runID,
 	})
 	if err != nil {

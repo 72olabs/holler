@@ -552,6 +552,8 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			return nil, err
 		}
 		return map[string]interface{}{"capabilities": capabilities}, nil
+	case "holler_channel_inbox", "holler_channel_claim", "holler_channel_ack", "holler_channel_extend", "holler_channel_nack":
+		return s.consumeManaged(ctx, name, raw)
 	case "holler_read", "holler_write":
 		var args struct {
 			Capability string          `json:"capability"`
@@ -699,7 +701,7 @@ func toolDefinitions() []map[string]interface{} {
 	integerProperty := func(description string) map[string]interface{} {
 		return map[string]interface{}{"type": "integer", "description": description}
 	}
-	return []map[string]interface{}{
+	return append([]map[string]interface{}{
 		{
 			"name": "bus_send", "description": "Send a durable message. Sender identity is fixed by the connector session.",
 			"inputSchema": object(map[string]interface{}{
@@ -842,7 +844,7 @@ func toolDefinitions() []map[string]interface{} {
 			}, "capability"),
 			"annotations": map[string]bool{"readOnlyHint": false, "idempotentHint": false, "destructiveHint": true},
 		},
-	}
+	}, channelToolDefinitions()...)
 }
 
 // ToolSurfaceHash identifies the complete MCP name, schema, description, and

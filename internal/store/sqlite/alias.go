@@ -21,6 +21,9 @@ func (s *Store) SetAlias(ctx context.Context, request bus.AliasSetRequest) (bus.
 	if err != nil {
 		return bus.AliasMutationResult{}, err
 	}
+	if bus.IsHumanActor(req.Alias) || bus.IsHumanActor(req.Actor) {
+		return bus.AliasMutationResult{}, bus.ErrChannelCapability
+	}
 	return s.mutateAlias(ctx, req.Alias, req.Actor, aliasActionSet, req.UpdatedByActor,
 		req.UpdatedByRun, req.ProjectID, req.IdempotencyKey)
 }
@@ -32,6 +35,9 @@ func (s *Store) ClaimAliasIfAbsent(ctx context.Context, request bus.AliasClaimRe
 	req, err := normalizeAliasClaimRequest(request)
 	if err != nil {
 		return bus.AliasClaimResult{}, err
+	}
+	if bus.IsHumanActor(req.Alias) || bus.IsHumanActor(req.Actor) {
+		return bus.AliasClaimResult{}, bus.ErrChannelCapability
 	}
 	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)

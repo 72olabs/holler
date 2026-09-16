@@ -89,7 +89,7 @@ func TestActorProfileHistoryAndDirectory(t *testing.T) {
 		t.Fatalf("directory exposed internal session routing data: %s", encodedDirectory)
 	}
 
-	events, err := db.ListEvents(ctx, "coupon", "durable", 0, 100)
+	events, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "coupon", "durable", 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

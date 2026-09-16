@@ -183,6 +183,7 @@ def make_runtime_bundle(output: Path, *, scenario_ids: set[str] | None = None) -
         "clients.py",
         "handler_contract.py",
         "manifest.py",
+        "managed.py",
         "worker.py",
     ]
     with tarfile.open(output, "w:gz") as bundle:

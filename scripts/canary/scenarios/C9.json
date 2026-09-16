@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "C9",
+  "name": "managed-protocol-studio",
+  "description": "Protocol-client and synthetic HTTP human workflow, audience/reference isolation and durable view/response/delivery semantics; no real model clients or model calls in this scenario.",
+  "required_clients": [],
+  "estimated_model_turns": 0,
+  "timeout_seconds": 240,
+  "daemon": {
+    "conversations": true,
+    "human_gateway": {
+      "human": "human:canary",
+      "scope": "observe+admin"
+    }
+  },
+  "test_environment": {
+    "human": "synthetic-http",
+    "write_policy": "generated-default",
+    "terminal_oracle": "stopped-daemon-fixed-projection-and-public-api"
+  },
+  "checks": [
+    "observer-read-only",
+    "legacy-isolation",
+    "private-continuation",
+    "exact-audience-group",
+    "reference-redaction",
+    "designated-response-decision",
+    "view-restart",
+    "revocation-and-stranger-denial"
+  ]
+}
