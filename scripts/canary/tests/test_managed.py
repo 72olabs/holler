@@ -5,6 +5,7 @@ from contextlib import closing
 import io
 import json
 import os
+import re
 from pathlib import Path
 import sqlite3
 import struct
@@ -22,13 +23,22 @@ from managed import exchange, receive_exact
 from worker import (BudgetedInteractiveSession, CanaryFailure, PtyProcess, Worker,
                     approved_fixture_policy, assert_fixture_policy_baseline, fixture_write_policy,
                     codex_tool_counts, make_failure_evidence, terminal_wait_diagnostic,
-                    terminal_marker_seen, marker_instruction)
+                    terminal_marker_seen, marker_instruction, CURRENT_DATABASE_SCHEMA,
+                    MANAGED_TABLES, verify_upgraded_database)
 from clients import client_policy
 from types import SimpleNamespace
 from budget import BudgetExceeded, BudgetLedger
 
 
 class FrameTests(unittest.TestCase):
+    def test_database_schema_pin_matches_product_and_all_managed_tables(self):
+        store = SCRIPT_DIR.parents[1] / "internal" / "store" / "sqlite"
+        version = re.search(r"const migrationVersion = (\d+)", (store / "store.go").read_text())
+        self.assertIsNotNone(version)
+        self.assertEqual(CURRENT_DATABASE_SCHEMA, int(version.group(1)))
+        schema = (store / "conversation_schema.sql").read_text() + (store / "channel_table.sql").read_text()
+        self.assertEqual(set(MANAGED_TABLES), set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", schema)))
+
     def test_terminal_diagnostic_exports_only_fixed_signals_not_transcript(self):
         output = b"SECRET Please run /login API Error: Do you want to proceed? DONE_\x1b[0mSUFFIX\n$"
         diag = terminal_wait_diagnostic(output, "DONE_SUFFIX", client_running=True)
@@ -431,6 +441,33 @@ class ManagedDaemonTests(unittest.TestCase):
         self.addCleanup(w.stop_daemon)
         w.start_daemon()
         self.fixture = w.managed_fixture()
+
+    def test_c6_post_upgrade_oracle_against_real_daemon_database(self):
+        w = self.worker
+        sent = w.json_command([
+            str(w.holler), "send", "--socket", str(w.socket),
+            "--actor", "c6-controller", "--run", "c6-before", "--project", "canary",
+            "--channel", "direct", "--to-actor", "c6-claude",
+            "--idempotency-key", "c6-unit", "--body", '{"text":"synthetic"}',
+        ])
+        mid = sent["message"]["message_id"]
+        w.stop_daemon()
+        verify_upgraded_database(w.database, mid)
+        with self.assertRaisesRegex(CanaryFailure, "lost the pre-upgrade message"):
+            verify_upgraded_database(w.database, "msg_missing")
+        with closing(sqlite3.connect(w.database)) as connection:
+            connection.execute("DELETE FROM schema_migrations WHERE version=?", (CURRENT_DATABASE_SCHEMA,))
+            connection.commit()
+        with self.assertRaisesRegex(CanaryFailure, "not schema 16"):
+            verify_upgraded_database(w.database, mid)
+        w.start_daemon()
+        w.stop_daemon()
+        verify_upgraded_database(w.database, mid)
+        with closing(sqlite3.connect(w.database)) as connection:
+            connection.execute("DROP TABLE channel_responses")
+            connection.commit()
+        with self.assertRaisesRegex(CanaryFailure, "all managed tables"):
+            verify_upgraded_database(w.database, mid)
 
     def test_c9_full_protocol_and_synthetic_http_workflow(self):
         context = type("Context", (), {})()

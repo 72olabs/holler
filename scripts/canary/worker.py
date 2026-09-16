@@ -45,6 +45,16 @@ from managed import ManagedFixture  # noqa: E402
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
 
 
+# Pin stopped-database oracles to the product migration; checked against Go in CI.
+CURRENT_DATABASE_SCHEMA = 16
+MANAGED_TABLES = (
+    "channels", "human_actors", "channel_attention_clients", "supervision_links",
+    "channel_grants", "channel_events", "channel_threads", "managed_deliveries",
+    "channel_references", "channel_operations", "channel_message_requests",
+    "channel_views", "channel_responses",
+)
+
+
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 TERMINAL_QUERY_RESPONSES = {
     b"\x1b[6n": b"\x1b[1;1R",
@@ -407,6 +417,17 @@ def sqlite_scalar(database: Path, query: str, *parameters: object) -> Any:
     if row is None:
         raise CanaryFailure("canary database query returned no row")
     return row[0]
+
+
+def verify_upgraded_database(database: Path, message_id: str) -> None:
+    """Inspect only a stopped canary database; never emit message contents."""
+    if sqlite_scalar(database, "SELECT MAX(version) FROM schema_migrations") != CURRENT_DATABASE_SCHEMA:
+        raise CanaryFailure(f"C6 current database is not schema {CURRENT_DATABASE_SCHEMA}")
+    for table in MANAGED_TABLES:
+        if sqlite_scalar(database, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table) != 1:
+            raise CanaryFailure("C6 migration did not create all managed tables")
+    if sqlite_scalar(database, "SELECT COUNT(*) FROM messages WHERE message_id = ?", message_id) != 1:
+        raise CanaryFailure("C6 migration lost the pre-upgrade message")
 
 
 def codex_reported_tokens(output: str) -> int:
@@ -1255,8 +1276,8 @@ class Worker:
         try:
             with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as connection:
                 connection.row_factory = sqlite3.Row
-                if connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] != 16:
-                    raise CanaryFailure("managed terminal projection requires schema 16")
+                if connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] != CURRENT_DATABASE_SCHEMA:
+                    raise CanaryFailure(f"managed terminal projection requires schema {CURRENT_DATABASE_SCHEMA}")
                 result = []
                 for message_id in message_ids:
                     for actor in ("canary-claude", "canary-codex"):
@@ -2210,18 +2231,14 @@ class Worker:
             self.active_check = "c6-current-shutdown-after-migration"
             self.stop_daemon()
             self.active_check = "c6-migration-backup-count"
-            backups = list(c6_runtime.glob("holler.sqlite3.pre-v15.*.bak"))
+            backups = list(c6_runtime.glob(f"holler.sqlite3.pre-v{CURRENT_DATABASE_SCHEMA}.*.bak"))
             if len(backups) != 1:
                 raise CanaryFailure("C6 migration did not create exactly one schema-14 backup")
             self.active_check = "c6-migration-backup-schema"
             if sqlite_scalar(backups[0], "SELECT MAX(version) FROM schema_migrations") != 14:
                 raise CanaryFailure("C6 migration backup does not preserve schema 14")
-            self.active_check = "c6-migrated-schema"
-            if sqlite_scalar(c6_database, "SELECT MAX(version) FROM schema_migrations") != 15:
-                raise CanaryFailure("C6 current database is not schema 15")
-            self.active_check = "c6-migrated-message"
-            if sqlite_scalar(c6_database, "SELECT COUNT(*) FROM messages WHERE message_id = ?", before_id) != 1:
-                raise CanaryFailure("C6 migration lost the pre-upgrade message")
+            self.active_check = "c6-migrated-database"
+            verify_upgraded_database(c6_database, before_id)
 
             self.active_check = "c6-connector-refresh"
             self.start_daemon()
