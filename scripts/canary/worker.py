@@ -114,6 +114,17 @@ def atomic_policy_write(path: Path, content: bytes, mode: int) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def assert_fixture_policy_baseline(path: Path, *, missing_ok: bool = False) -> None:
+    if path.is_symlink():
+        raise CanaryFailure("fixture baseline must not be a symlink", code="policy-invalid")
+    if missing_ok and not path.exists():
+        return  # A fresh runner has not run C0 connector setup yet.
+    try:
+        approved_fixture_policy(path.read_bytes())  # Validate only; never write.
+    except OSError as error:
+        raise CanaryFailure("fixture baseline unavailable", code="policy-invalid") from error
+
+
 @contextmanager
 def fixture_write_policy(path: Path, audits: list[dict[str, Any]]):
     """Exclusive runner only; temporary generated policy edit, never OAuth data."""
@@ -1041,6 +1052,9 @@ class Worker:
         self.human_credentials = self.runtime / "human" / "credentials.json"
 
     def prepare(self) -> None:
+        if self.managed_config:
+            # Detect a prior killed worker before C0 setup could hide the stale approval.
+            assert_fixture_policy_baseline(Path(self.env["CODEX_HOME"]) / "holler.config.toml", missing_ok=True)
         for directory in (self.home, self.runtime, self.package.parent):
             directory.mkdir(parents=True, exist_ok=True)
         if not (self.fixture / ".git").is_dir():
@@ -2257,6 +2271,9 @@ class Worker:
             self.active_check = "scenario-start"
             self.tool_counts = []
             self.policy_audits = []
+            if "daemon" in scenario:
+                self.active_check = "managed-policy-baseline"
+                assert_fixture_policy_baseline(Path(self.env["CODEX_HOME"]) / "holler.config.toml")
             started = time.monotonic()
             turns_before = self.ledger.model_turns
             operation = (lambda handler=handler: handler(context)) if custom else handler

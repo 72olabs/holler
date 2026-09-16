@@ -50,8 +50,9 @@ python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
   preserve file permissions. A `finally` restores the original bytes and verifies
   the original hash. Evidence records original/approved/restored policy hashes.
   Unexpected concurrent edits are not overwritten: restoration fails closed and
-  the controller stops the runner. A hard kill can prevent `finally`; inspect the
-  policy before manual reuse after a killed worker. This requires an exclusive
+  the controller stops the runner. A hard kill can prevent `finally`; baseline
+  checks before setup and before each managed scenario reject a stale approval
+  without rewriting it. Inspect the policy before manual recovery. This requires an exclusive
   runner, not a shared developer session. OAuth files are never read or changed.
   This approves the generic write tool within the fixture turn, not just two
   operations; daemon identity/audience checks still apply. Source templates and

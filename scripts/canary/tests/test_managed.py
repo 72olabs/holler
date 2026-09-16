@@ -20,13 +20,33 @@ from catalog import CatalogError, load_catalog, validate_scenario
 from handler_contract import HandlerContractError, load_handler, validate_write_contract
 from managed import exchange, receive_exact
 from worker import (BudgetedInteractiveSession, CanaryFailure, PtyProcess, Worker,
-                    approved_fixture_policy, fixture_write_policy, codex_tool_counts, make_failure_evidence)
+                    approved_fixture_policy, assert_fixture_policy_baseline, fixture_write_policy,
+                    codex_tool_counts, make_failure_evidence)
 from clients import client_policy
 from types import SimpleNamespace
 from budget import BudgetExceeded, BudgetLedger
 
 
 class FrameTests(unittest.TestCase):
+    def test_baseline_rejects_stale_approval_and_symlinks_without_writing(self):
+        original = (SCRIPT_DIR.parents[1] / "connectors/policies/codex-live-review.toml").read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "holler.config.toml"
+            assert_fixture_policy_baseline(path, missing_ok=True)
+            with self.assertRaises(CanaryFailure):
+                assert_fixture_policy_baseline(path)
+            path.write_bytes(original)
+            assert_fixture_policy_baseline(path)
+            stale = approved_fixture_policy(original)
+            path.write_bytes(stale)
+            with self.assertRaises(CanaryFailure):
+                assert_fixture_policy_baseline(path, missing_ok=True)
+            self.assertEqual(path.read_bytes(), stale)
+            link = Path(directory) / "link"
+            link.symlink_to(path)
+            with self.assertRaises(CanaryFailure):
+                assert_fixture_policy_baseline(link, missing_ok=True)
+
     def test_write_contract_requires_declaration_and_explicit_method(self):
         catalog = load_catalog()
         for sid in ("C9", "C10", "C11"):
