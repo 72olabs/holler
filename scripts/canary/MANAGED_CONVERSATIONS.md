@@ -5,7 +5,7 @@ Use the same committed harness and pinned subscription models as the built-in
 canaries. The source must be committed on a local topic branch; no push is
 required. Scenario definitions bind the managed daemon, loopback gateway,
 synthetic human identity, generated policy and terminal-oracle choice into the
-approved request hash. No broad tool permission or model override is used.
+approved request hash. No model override or production permission change is used.
 These local checkpoints are unpublished; passing them does not substitute for
 GitHub PR/merge checks.
 
@@ -14,7 +14,7 @@ Run separately, in this order, only after review:
 | Selection (C0 always prepended) | Model turns | Purpose |
 | --- | ---: | --- |
 | C9 | 0 | Protocol-client + synthetic HTTP human observation, privacy, private/group reference continuation, response/decision, view restart and revocation |
-| C10 | 3 | Real Codex create/post, Claude narrow consumption, independent Codex designated answer/ACK after restart |
+| C10 | 3 | Fixture-approved real Codex create/post, Claude narrow consumption, independent Codex designated answer/ACK after restart |
 | C11 | 4 | One arm and one unsolicited managed-wake turn for each real client; no generic Claude write |
 
 Each selection uses `--tier core`: at most 8 turns, $0.50 reported Claude cost,
@@ -43,7 +43,20 @@ python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
   process, network destination or database path. HTTP 429 is bounded/backed off.
 - C0 verifies actual installed connector versions, generated policies, tool
   surface, onboarding and lifecycle. Claude uses only narrow consumption tools
-  and reads; Codex performs managed writes under its generated fixture policy.
+  and reads. C10 explicitly declares `fixture-approved-codex-write`: only its
+  two `run_codex_write` turns add a CLI setting approving the `holler_write`
+  tool. This approves the generic write tool within that synthetic process, not
+  just two operations; daemon identity/audience checks still apply. No source,
+  generated, persistent auth-home, or operator policy file is changed. Normal
+  Codex calls, Claude, C0, C9 and C11 retain generated defaults. This tests the
+  preapproved write path, not approval UI or unchanged-default write behavior.
+- Static check-time validation requires explicit write calls and the declared
+  policy to agree; a runtime guard rejects missing declaration before model
+  launch. This is a review tripwire, not semantic analysis or a Python sandbox.
+- C10 has separate marker, session-end, channel-count, opening-correlation and
+  controller-post failure checkpoints. Closed harness reason codes and known
+  Codex tool terminal-status counts are exported without arguments, results,
+  errors or transcript text. Missing telemetry never proves a denied call.
 - Marker strings are turn-accounting checkpoints, never the success oracle.
   API-visible messages, actor/run/thread correlation, response state, per-actor
   inboxes, negative claims, observer rights and view state are asserted separately.

@@ -39,7 +39,7 @@ from clients import (  # noqa: E402
     codex_exec_command,
     codex_live_command,
 )
-from handler_contract import HandlerContractError, handler_path, load_handler  # noqa: E402
+from handler_contract import HandlerContractError, handler_path, load_handler, validate_write_contract  # noqa: E402
 from managed import ManagedFixture  # noqa: E402
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
 
@@ -73,7 +73,47 @@ def terminal_query_responses(data: bytes, *, previous_tail_length: int = 0) -> b
 
 
 class CanaryFailure(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "check-failed"):
+        if code not in {"check-failed", "marker-missing", "write-policy-mismatch"}:
+            raise ValueError("unsupported canary failure code")
+        super().__init__(message)
+        self.code = code
+
+
+CODEX_FIXTURE_WRITE_OVERRIDE = (
+    'plugins."holler@holler".mcp_servers.holler.tools.holler_write.approval_mode="approve"'
+)
+TELEMETRY_TOOLS = frozenset({
+    "holler_capabilities", "holler_read", "holler_write", "holler_channel_inbox",
+    "holler_channel_claim", "holler_channel_ack", "holler_channel_extend", "holler_channel_nack",
+})
+
+
+def codex_tool_counts(output: str) -> list[dict[str, Any]]:
+    """Only known tool names and terminal status counts; never args/results/errors.
+
+    Missing events do not establish denial or prove a tool was not attempted.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "mcp_tool_call":
+            continue
+        tool, status = item.get("tool"), item.get("status")
+        if not isinstance(tool, str) or not isinstance(status, str):
+            continue
+        if tool not in TELEMETRY_TOOLS or status not in {"completed", "failed"}:
+            continue
+        key = (tool, status)
+        counts[key] = counts.get(key, 0) + 1
+    return [{"tool": tool, "status": status, "count": count}
+            for (tool, status), count in sorted(counts.items())]
 
 
 class ScenarioTimeout(BaseException):
@@ -140,6 +180,7 @@ def make_failure_evidence(
     scenario: str,
     check: str,
     error: BaseException,
+    tool_counts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "schema_version": 1,
@@ -155,6 +196,14 @@ def make_failure_evidence(
         "limits": request["budget"],
         "message_bodies_included": False,
     }
+    if isinstance(error, CanaryFailure):
+        evidence["failure"]["code"] = error.code
+    environment = next((s.get("test_environment") for s in request.get("scenarios", [])
+                        if s["id"] == scenario), None)
+    if environment:
+        evidence["failure"]["test_environment"] = environment
+    if tool_counts is not None:
+        evidence["tool_counts"] = tool_counts
     evidence["evidence_hash"] = sha256_bytes(canonical_json(evidence))
     return evidence
 
@@ -817,14 +866,21 @@ class HandlerContext:
         self._guard_prompt(prompt, expect)
         output = self._run_claude(actor, run_id, prompt)
         if expect not in output:
-            raise CanaryFailure("Claude did not report the expected handler marker")
+            raise CanaryFailure("Claude did not report the expected handler marker", code="marker-missing")
         return output
 
     def run_codex(self, actor: str, run_id: str, prompt: str, expect: str) -> str:
         self._guard_prompt(prompt, expect)
         output = self._run_codex(actor, run_id, prompt)
         if expect not in output:
-            raise CanaryFailure("Codex did not report the expected handler marker")
+            raise CanaryFailure("Codex did not report the expected handler marker", code="marker-missing")
+        return output
+
+    def run_codex_write(self, actor: str, run_id: str, prompt: str, expect: str) -> str:
+        self._guard_prompt(prompt, expect)
+        output = self._run_codex(actor, run_id, prompt, fixture_write=True)
+        if expect not in output:
+            raise CanaryFailure("Codex did not report the expected handler marker", code="marker-missing")
         return output
 
     def interactive(
@@ -905,6 +961,7 @@ class Worker:
         self.results: list[dict[str, Any]] = []
         self.active_scenario = "initialization"
         self.active_check = "initialization"
+        self.tool_counts: list[dict[str, Any]] = []
         configurations = [s["daemon"] for s in request["scenarios"] if "daemon" in s]
         self.managed_config = configurations[0] if configurations else None
         if any(item != self.managed_config for item in configurations):
@@ -1336,10 +1393,19 @@ class Worker:
         run_id: str,
         prompt: str,
         config: dict[str, Any] | None = None,
+        *,
+        fixture_write: bool = False,
     ) -> str:
         config = config or self.request["clients"]["codex"]
-        self.ledger.ensure_capacity(client="codex", turns=1)
         command = codex_exec_command(config)[1:]
+        if fixture_write:
+            scenario = next((s for s in self.request["scenarios"] if s["id"] == self.active_scenario), {})
+            if (not self.managed_config or actor != "canary-codex"
+                    or scenario.get("test_environment", {}).get("write_policy") != "fixture-approved-codex-write"):
+                raise CanaryFailure("fixture write requires declared Codex approval", code="write-policy-mismatch")
+            # A per-process CLI setting; no auth-home or generated policy file is changed.
+            command[-1:-1] = ["--config", CODEX_FIXTURE_WRITE_OVERRIDE]
+        self.ledger.ensure_capacity(client="codex", turns=1)
         started = time.monotonic()
         result = run_command(
             self.launcher("codex", actor, run_id, command),
@@ -1352,6 +1418,7 @@ class Worker:
             client="codex", turns=1, reported_tokens=codex_reported_tokens(result.stdout),
             wall_seconds=time.monotonic() - started,
         )
+        self.tool_counts.extend(codex_tool_counts(result.stdout))
         return result.stdout
 
     def run_allocated_claude(
@@ -2102,6 +2169,7 @@ class Worker:
             if not callable(handler):
                 try:
                     custom_path = handler_path(SCRIPT_DIR / "handlers", scenario["id"])
+                    validate_write_contract(custom_path, scenario)
                     handler = load_handler(custom_path)
                 except HandlerContractError as error:
                     raise CanaryFailure(
@@ -2115,6 +2183,7 @@ class Worker:
         for scenario, handler, custom in handlers:
             self.active_scenario = scenario["id"]
             self.active_check = "scenario-start"
+            self.tool_counts = []
             started = time.monotonic()
             turns_before = self.ledger.model_turns
             operation = (lambda handler=handler: handler(context)) if custom else handler
@@ -2134,6 +2203,8 @@ class Worker:
                 "observed_model_turns": observed_turns,
                 "assertions": [{"name": check, "status": "PASS"} for check in checks],
             }
+            if self.tool_counts:
+                result["tool_counts"] = self.tool_counts
             if "test_environment" in scenario:
                 result["test_environment"] = scenario["test_environment"]
                 for assertion in result["assertions"]:
@@ -2202,6 +2273,7 @@ def main() -> None:
                 scenario=worker.active_scenario,
                 check=worker.active_check,
                 error=error,
+                tool_counts=worker.tool_counts,
             )
         finally:
             worker.stop_daemon()

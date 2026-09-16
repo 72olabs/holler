@@ -18,7 +18,7 @@
   },
   "test_environment": {
     "human": "synthetic-http",
-    "write_policy": "generated-default",
+    "write_policy": "fixture-approved-codex-write",
     "terminal_oracle": "stopped-daemon-fixed-projection-and-public-api"
   },
   "checks": [

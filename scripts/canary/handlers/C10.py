@@ -1,4 +1,4 @@
-"""Real writes plus per-recipient recovery/ACK using unchanged client policies."""
+"""Real writes with explicit per-process fixture approval; narrow ACKs unchanged."""
 
 
 def run(context):
@@ -6,9 +6,9 @@ def run(context):
     a, b, controller = "canary-claude", "canary-codex", "canary-controller"
     for actor in (a, b, controller):
         f.api(actor, "channel.list")
-    context.check("c10-real-codex-create-post")
+    context.check("c10-codex-turn-marker")
     marker = context.marker("C10_CREATED")
-    context.run_codex(b, "c10-create", (
+    context.run_codex_write(b, "c10-create", (
         'Use only Holler tools, no shell or file access. Discover channel.create and channel.post with holler_capabilities. '
         'Use holler_write channel.create with project_id=canary, kind=named, title=c10-real, '
         'participants=["canary-controller","canary-claude","canary-codex"], idempotency_key=c10-real. '
@@ -16,13 +16,17 @@ def run(context):
         'idempotency_key=c10-opening, body={"text":"synthetic client opening"}, no attention targets. '
         'Do not use legacy bus_send. After both operations succeed, finish with '
         + context.marker_instruction(marker)), marker)
+    context.check("c10-codex-session-end")
     context.wait_for_session_end(b, "c10-create", "codex")
+    context.check("c10-channel-count")
     channels = [c for c in f.api(controller, "channel.list") if c["title"] == "c10-real"]
     f.require(len(channels) == 1, "real Codex create did not produce one channel")
     cid = channels[0]["channel_id"]
+    context.check("c10-opening-correlation")
     opening = f.api(controller, "channel.history", {"channel_id": cid})["messages"]
     f.require(len(opening) == 1 and opening[0]["from_actor"] == b and opening[0]["from_run"] == "c10-create",
               "real Codex post correlation failed")
+    context.check("c10-controller-post")
     sent = f.post(controller, cid, "c10-queued", attention=[a, b], respondent=b)["message"]
     mid = sent["message_id"]
     context.check("c10-restart-queued-identity")
@@ -50,7 +54,7 @@ def run(context):
     f.require(any(d["message"]["message_id"] == mid for d in f.inbox(b)), "other recipient lost after restart")
     context.check("c10-codex-designated-response-and-consume")
     marker = context.marker("C10_CODEX_ACKED")
-    context.run_codex(b, "c10-consume-codex", (
+    context.run_codex_write(b, "c10-consume-codex", (
         'Use only Holler tools, no shell or file access. Call holler_channel_inbox and holler_channel_claim for message ' + mid +
         '. This question designates you. Use holler_read channel.get and channel.responses for channel ' + cid +
         ' to get current revisions. Use holler_write channel.post with channel_id=' + cid +

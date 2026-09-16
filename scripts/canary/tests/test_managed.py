@@ -17,13 +17,79 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from catalog import CatalogError, load_catalog, validate_scenario
-from handler_contract import load_handler
+from handler_contract import HandlerContractError, load_handler, validate_write_contract
 from managed import exchange, receive_exact
-from worker import BudgetedInteractiveSession, CanaryFailure, PtyProcess, Worker
+from worker import (BudgetedInteractiveSession, CanaryFailure, PtyProcess, Worker,
+                    CODEX_FIXTURE_WRITE_OVERRIDE, codex_tool_counts, make_failure_evidence)
+from clients import client_policy
+from types import SimpleNamespace
 from budget import BudgetExceeded, BudgetLedger
 
 
 class FrameTests(unittest.TestCase):
+    def test_write_contract_requires_declaration_and_explicit_method(self):
+        catalog = load_catalog()
+        for sid in ("C9", "C10", "C11"):
+            validate_write_contract(SCRIPT_DIR / "handlers" / (sid + ".py"), catalog[sid])
+        bad = copy.deepcopy(catalog["C10"])
+        bad["test_environment"]["write_policy"] = "generated-default"
+        with self.assertRaises(HandlerContractError):
+            validate_write_contract(SCRIPT_DIR / "handlers" / "C10.py", bad)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "C10.py"
+            original = (SCRIPT_DIR / "handlers" / "C10.py").read_text()
+            path.write_text(original.replace("run_codex_write", "run_codex"))
+            with self.assertRaises(HandlerContractError):
+                validate_write_contract(path, bad)
+
+    def test_codex_write_approval_is_per_process_and_fail_closed(self):
+        w = object.__new__(Worker)
+        w.request = {"clients": client_policy(), "scenarios": [load_catalog()["C10"]]}
+        w.active_scenario = "C10"
+        w.managed_config = load_catalog()["C10"]["daemon"]
+        w.fixture, w.env, w.tool_counts = Path("/tmp"), {}, []
+        w.ledger = BudgetLedger({"claude_usd": 1, "codex_reported_tokens": 100,
+                                "model_turns": 8, "wall_seconds": 60})
+        w.launcher = lambda harness, actor, run_id, args: args
+        with patch("worker.run_command", return_value=SimpleNamespace(stdout="")) as run:
+            w.run_codex("canary-codex", "c10-create", "prompt", fixture_write=True)
+            approved_command = run.call_args.args[0]
+            self.assertEqual(approved_command[-3:], ["--config", CODEX_FIXTURE_WRITE_OVERRIDE, "-"])
+            self.assertEqual(approved_command.count(CODEX_FIXTURE_WRITE_OVERRIDE), 1)
+            w.run_codex("canary-codex", "plain", "prompt")
+            self.assertNotIn(CODEX_FIXTURE_WRITE_OVERRIDE, run.call_args.args[0])
+            for actor, scenario in (("canary-claude", "C10"), ("canary-codex", "C11")):
+                w.active_scenario = scenario
+                before = w.ledger.model_turns
+                with self.assertRaises(CanaryFailure) as error:
+                    w.run_codex(actor, "bad", "prompt", fixture_write=True)
+                self.assertEqual(error.exception.code, "write-policy-mismatch")
+                self.assertEqual(w.ledger.model_turns, before)
+            self.assertEqual(run.call_count, 2)
+        self.assertEqual(w.env, {})
+
+    def test_tool_telemetry_and_failure_export_no_bodies(self):
+        events = [
+            {"type": "item.completed", "item": {"type": "mcp_tool_call", "tool": "holler_write",
+             "status": "failed", "arguments": "SECRET", "error": "SECRET", "result": "SECRET"}},
+            {"type": "item.completed", "item": {"type": "mcp_tool_call", "tool": "SECRET",
+             "status": "completed"}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "SECRET"}},
+            [], {"type": "item.completed", "item": None},
+        ]
+        counts = codex_tool_counts("\n".join(json.dumps(e) for e in events))
+        self.assertEqual(counts, [{"tool": "holler_write", "status": "failed", "count": 1}])
+        evidence = make_failure_evidence(
+            {"request_hash": "hash", "source": {}, "tier": "core", "budget": {},
+             "scenarios": [load_catalog()["C10"]]}, results=[], usage={}, scenario="C10",
+            check="c10-codex-turn-marker", error=CanaryFailure("SECRET", code="marker-missing"),
+            tool_counts=counts)
+        self.assertEqual(evidence["failure"]["code"], "marker-missing")
+        self.assertEqual(evidence["failure"]["test_environment"]["write_policy"], "fixture-approved-codex-write")
+        self.assertNotIn("SECRET", json.dumps(evidence))
+        with self.assertRaises(ValueError):
+            CanaryFailure("ignored", code="SECRET")
+
     def test_graceful_exit_then_close_is_idempotent(self):
         process = object.__new__(PtyProcess)
         read_fd, write_fd = os.pipe()
@@ -124,6 +190,42 @@ class ManagedDaemonTests(unittest.TestCase):
         result = load_handler(SCRIPT_DIR / "handlers" / "C9.py")(context)
         self.assertEqual(result, load_catalog()["C9"]["checks"])
         self.assertIn("c9-view-restart", checks)
+
+    def test_c10_post_turn_oracles_with_protocol_stand_ins_not_models(self):
+        """Zero-model regression of C10 oracles; never real-client evidence."""
+        f = self.fixture
+        controller, a, b = "canary-controller", "canary-claude", "canary-codex"
+        def channel():
+            return next(c for c in f.api(controller, "channel.list") if c["title"] == "c10-real")
+        def consume(actor, run_id, prompt, marker):
+            target = next(d for d in f.inbox(actor) if d["message"].get("response_request_id"))
+            mid = target["message"]["message_id"]
+            claim = f.api(actor, "channel.claim", {"message_id": mid})
+            if actor == b:
+                c = channel()
+                response = f.api(b, "channel.responses", {"channel_id": c["channel_id"]})[0]
+                f.api(b, "channel.post", {"channel_id": c["channel_id"], "expected_policy_revision": c["policy_revision"],
+                    "idempotency_key": "local-answer", "body": {"text": "synthetic"},
+                    "response_to": response["request_id"], "expected_response_revision": response["revision"]}, run_id=run_id)
+            f.api(actor, "channel.delivery", {"message_id": mid, "lease_token": claim["lease_token"], "action": "ack"})
+        def codex(actor, run_id, prompt, marker):
+            if run_id != "c10-create":
+                return consume(actor, run_id, prompt, marker)
+            c = f.api(b, "channel.create", {"project_id": "canary", "kind": "named", "title": "c10-real",
+                "participants": [controller, a, b], "idempotency_key": "local-create"}, run_id=run_id)
+            f.api(b, "channel.post", {"channel_id": c["channel_id"], "expected_policy_revision": c["policy_revision"],
+                "idempotency_key": "local-opening", "body": {"text": "synthetic"}}, run_id=run_id)
+        checks = []
+        context = SimpleNamespace(managed=lambda: f, check=checks.append, marker=lambda name: name,
+                                  marker_instruction=lambda name: name, run_codex_write=codex,
+                                  run_claude=consume, wait_for_session_end=lambda *args: None)
+        result = load_handler(SCRIPT_DIR / "handlers" / "C10.py")(context)
+        self.assertEqual(result, load_catalog()["C10"]["checks"])
+        self.assertIn("c10-opening-correlation", checks)
+        with self.assertRaises(CanaryFailure):
+            f.api(a, "channel.list", run_id="c10-create")
+        with self.assertRaises(CanaryFailure):
+            f.api(b, "channel.list", run_id="arbitrary")
 
     def test_real_schema_projection_and_public_terminal_state(self):
         f = self.fixture

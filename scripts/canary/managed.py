@@ -70,15 +70,19 @@ class ManagedFixture:
             self._fail(check)
 
     def api(self, actor: str, operation: str, arguments: dict | None = None,
-            *, error: str | None = None) -> Any:
+            *, error: str | None = None, run_id: str = "managed-controller") -> Any:
         if actor not in ACTORS or operation not in READS | WRITES:
             self._fail("managed fixture operation or identity is not allowed")
+        if run_id != "managed-controller" and (actor != "canary-codex" or run_id not in {
+            "c10-create", "c10-consume-codex",
+        }):
+            self._fail("managed fixture run identity is not allowed")
         args = arguments or {}
         if operation == "channel.create" and args.get("project_id") != "canary":
             self._fail("managed fixture project is not canary")
         result = self._raw(actor,
                            "invoke_read_capability" if operation in READS else "invoke_write_capability",
-                           {"name": operation, "arguments": args})
+                           {"name": operation, "arguments": args}, run_id=run_id)
         if error is not None:
             self.require(not result.get("ok") and result.get("error", {}).get("code") == error,
                          "managed fixture expected API rejection: " + error)
@@ -86,13 +90,13 @@ class ManagedFixture:
         self.require(result.get("ok") is True, "managed fixture API operation failed: " + operation)
         return result.get("result")
 
-    def _raw(self, actor: str, operation: str, arguments: dict) -> dict:
+    def _raw(self, actor: str, operation: str, arguments: dict, *, run_id: str = "managed-controller") -> dict:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(10)
                 connection.connect(str(self._socket))
                 hello = exchange(connection, 1, "hello", {
-                    "protocol": 1, "actor": actor, "run_id": "managed-controller",
+                    "protocol": 1, "actor": actor, "run_id": run_id,
                     "client": "canary-fixture", "capabilities": ["capability-bridge-v1"],
                 })
                 if not hello.get("ok"):

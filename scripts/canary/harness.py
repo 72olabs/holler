@@ -22,6 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from catalog import BUILTIN_SCENARIOS, HANDLER_DIR, TIER_SCENARIOS  # noqa: E402
 from clients import assert_low_cost_defaults, client_policy  # noqa: E402
+from handler_contract import handler_path, validate_write_contract  # noqa: E402
 from daytona_controller import (  # noqa: E402
     build_client_bundle,
     build_daytona,
@@ -66,6 +67,7 @@ def validate_selected_handlers(request: dict[str, Any]) -> list[str]:
         scenario_id = scenario["id"]
         if scenario_id in BUILTIN_SCENARIOS:
             continue
+        validate_write_contract(handler_path(HANDLER_DIR, scenario_id), scenario)
         try:
             result = subprocess.run(
                 [sys.executable, str(validator), str(HANDLER_DIR), scenario_id],
