@@ -27,15 +27,17 @@ def run(context):
         context.wait_for_session_end(actor, run_id, client)
         other = b if actor == a else a
         context.check("c11-non-attended-member-" + client)
-        f.require(not any(d["message"]["message_id"] == ids[-1] for d in f.inbox(other)),
-                  "non-attended member received a managed delivery")
+        pending = [d for d in f.inbox(other) if d["message"]["message_id"] == ids[-1]]
+        f.require(len(pending) == 1 and pending[0]["state"] == "queued" and pending[0]["attempt"] == 0,
+                  "non-attended member did not retain an unconsumed delivery")
     context.check("c11-terminal-no-duplicates")
     states = f.terminal(ids)
     targets = [d for d in states if (d["message_id"], d["recipient_actor"]) in ((ids[0], a), (ids[1], b))]
     others = [d for d in states if d not in targets]
     f.require(len(targets) == 2 and len(others) == 2, "wake recipient set mismatch")
-    f.require(all(d["state"] == "absent" and d["attention_attempts"] == 0 and d["attention_adapters"] == 0 for d in others),
-              "non-attended member has attention events")
+    f.require(all(d["state"] == "queued" and d["attempt"] == 0 and d["claims"] == 0 and d["acks"] == 0
+                  and d["attention_attempts"] == 0 and d["attention_adapters"] == 0 for d in others),
+              "non-attended member was woken or consumed")
     f.require(all(d["state"] == "acked" and d["attempt"] == 1 and d["claims"] == 1 and d["acks"] == 1 and d["attention_adapters"] >= 1 for d in targets),
               "wake produced missing or duplicate consumption")
     for actor, mid in zip((a, b), ids):

@@ -23,6 +23,11 @@ gateway-only, including protection against prefix lookalikes, aliases and legacy
 Named-channel creators control join-forward admission/removal; creator removal
 requires future management-transfer support. DMs cannot admit a third actor.
 
+Audience delivers; attention wakes. Every other posting participant receives a
+managed delivery, even when not named in `attention_targets`. Non-targets retain
+queued work without being woken. Read-only observers receive neither those agent
+deliveries nor automatic agent wakes.
+
 The human can ask privately or start a named discussion as themselves. **Request
 to join** asks a named-channel creator; it never grants membership itself. DMs
 do not offer that action. Reference-only continuations leave the source unchanged:

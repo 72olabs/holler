@@ -6,6 +6,8 @@ canaries. The source must be committed on a local topic branch; no push is
 required. Scenario definitions bind the managed daemon, loopback gateway,
 synthetic human identity, generated policy and terminal-oracle choice into the
 approved request hash. No broad tool permission or model override is used.
+These local checkpoints are unpublished; passing them does not substitute for
+GitHub PR/merge checks.
 
 Run separately, in this order, only after review:
 
@@ -54,7 +56,8 @@ python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
   them with public API assertions after restart. No bodies, tokens, reasons or
   event payloads are exported. Tests use a real-daemon-created schema; CI requires
   those tests rather than accepting a mock schema or skipped fixture.
-- The non-attended member must have no delivery or attention events. Legacy
+- The non-attended member must retain a queued delivery with zero claims/ACKs
+  and zero attention events: audience delivers; attention wakes. Legacy
   inboxes/events must contain no managed message IDs. Human observation must not
   consume agent delivery. Source private continuations must not add source-side
   messages/events; inaccessible references hide the source ID.

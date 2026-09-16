@@ -19,11 +19,24 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from catalog import CatalogError, load_catalog, validate_scenario
 from handler_contract import load_handler
 from managed import exchange, receive_exact
-from worker import BudgetedInteractiveSession, CanaryFailure, Worker
+from worker import BudgetedInteractiveSession, CanaryFailure, PtyProcess, Worker
 from budget import BudgetExceeded, BudgetLedger
 
 
 class FrameTests(unittest.TestCase):
+    def test_graceful_exit_then_close_is_idempotent(self):
+        process = object.__new__(PtyProcess)
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, write_fd)
+        process.master = read_fd
+        process.process = type("Child", (), {"poll": lambda _self: 0})()
+        process.selector = type("Selector", (), {"close": lambda _self: None})()
+        process._sweep_process_group = lambda: None
+        process.graceful_claude_exit()
+        process.close()
+        process.graceful_claude_exit()
+        self.assertEqual(process.master, -1)
+
     def test_wake_reserves_budget_before_trigger_and_sends_no_input(self):
         session = object.__new__(BudgetedInteractiveSession)
         session.client = "claude"
@@ -136,6 +149,19 @@ class ManagedDaemonTests(unittest.TestCase):
             with self.assertRaisesRegex(CanaryFailure, "sessions ended"):
                 self.worker.managed_snapshot(["msg_test"])
         self.assertIsNone(self.worker.daemon.poll())
+
+    def test_non_attended_member_is_delivered_but_never_notified(self):
+        f = self.fixture
+        a, b, controller = "canary-claude", "canary-codex", "canary-controller"
+        for actor in (a, b, controller):
+            f.api(actor, "channel.list")
+        channel = f.create(controller, [controller, a, b], "attention-separation")
+        mid = f.post(controller, channel["channel_id"], "attention-one", attention=[a])["message"]["message_id"]
+        pending = f.inbox(b)
+        self.assertEqual([(d["message"]["message_id"], d["state"], d["attempt"]) for d in pending], [(mid, "queued", 0)])
+        states = {d["recipient_actor"]: d for d in f.terminal([mid])}
+        self.assertEqual(states[b], {"message_id": mid, "recipient_actor": b, "state": "queued", "attempt": 0,
+                                     "claims": 0, "acks": 0, "attention_attempts": 0, "attention_adapters": 0})
 
     def test_projection_rejects_running_daemon_and_remaining_socket(self):
         with patch.object(self.worker, "stop_daemon", return_value=None):

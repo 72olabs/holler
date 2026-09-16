@@ -616,6 +616,8 @@ class PtyProcess:
                 self.query_tail = combined[-(maximum - 1):]
 
     def close(self, *, abrupt: bool = False) -> None:
+        if self.master < 0:
+            return
         if self.process.poll() is None:
             if abrupt:
                 self._signal(signal.SIGKILL)
@@ -629,9 +631,12 @@ class PtyProcess:
                     self.process.wait(timeout=5)
         self.selector.close()
         os.close(self.master)
+        self.master = -1
 
     def graceful_claude_exit(self, timeout: float = 20) -> None:
         """Exit an input-ready Claude TUI through its lifecycle-aware command."""
+        if self.master < 0:
+            return
         if self.process.poll() is None:
             self.send("/exit")
             time.sleep(0.1)
@@ -641,8 +646,7 @@ class PtyProcess:
             except subprocess.TimeoutExpired as error:
                 raise CanaryFailure("Claude did not complete its graceful session exit") from error
         self._sweep_process_group()
-        self.selector.close()
-        os.close(self.master)
+        self.close()
 
     def _sweep_process_group(self) -> None:
         """Stop hook/monitor descendants that can outlive an exited TUI leader."""

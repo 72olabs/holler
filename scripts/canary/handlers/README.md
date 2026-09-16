@@ -39,6 +39,12 @@ sessions are context managers; their `turn` method reserves budget before
 submitting and charges only after observing the expected marker. Every handler
 must consume exactly its declared `estimated_model_turns`.
 
+Managed scenarios additionally use `context.managed()` for the fixed synthetic
+protocol/human fixture and `session.wake()` for a budgeted unsolicited turn.
+The Python fixture's private attributes are not a security boundary: handlers
+must not inspect its bearer/session or export bodies. Evidence records only
+reviewed IDs, states, counts and declared oracle labels.
+
 `HandlerContext` is an ergonomics and accidental-spend control, not a Python
 security sandbox. Commit review plus exact-tree approval is the credential
 security boundary. A static CI tripwire rejects direct process, PTY, socket,
