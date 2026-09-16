@@ -78,7 +78,8 @@ class CanaryFailure(RuntimeError):
         if code not in {"check-failed", "marker-missing", "write-policy-mismatch",
                         "policy-invalid", "policy-restore-failed", "registration-timeout",
                         "projection-clients-live", "projection-daemon-live",
-                        "terminal-marker-timeout", "terminal-client-exited"}:
+                        "terminal-marker-timeout", "terminal-client-exited",
+                        "session-end-timeout", "session-exit-failed"}:
             raise ValueError("unsupported canary failure code")
         super().__init__(message)
         self.code = code
@@ -824,6 +825,27 @@ class PtyProcess:
         self._sweep_process_group()
         self.close()
 
+    def graceful_codex_exit(self, timeout: float = 20) -> None:
+        """Let the Codex TUI run SessionEnd before sweeping its descendants."""
+        if self.master < 0:
+            return
+        if self.process.poll() is None:
+            self.send("/quit")
+            time.sleep(0.1)
+            self.send("\r")
+            deadline = time.monotonic() + timeout
+            while self.process.poll() is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CanaryFailure("Codex did not complete its graceful session exit",
+                                        code="session-end-timeout")
+                # Drain terminal output and answer terminal queries during shutdown.
+                self._read_available(min(0.1, remaining))
+        if self.process.poll() != 0:
+            raise CanaryFailure("Codex exited unsuccessfully", code="session-exit-failed")
+        self._sweep_process_group()
+        self.close()
+
     def _sweep_process_group(self) -> None:
         """Stop hook/monitor descendants that can outlive an exited TUI leader."""
         self._signal(signal.SIGTERM)
@@ -913,8 +935,10 @@ class BudgetedInteractiveSession:
             try:
                 if _type is None:
                     self.phase("exit")
-                if self.client == "claude" and _type is None:
-                    self.process.graceful_claude_exit()
+                    if self.client == "claude":
+                        self.process.graceful_claude_exit()
+                    else:
+                        self.process.graceful_codex_exit()
             finally:
                 self.process.close()
                 self.process = None
@@ -1421,7 +1445,7 @@ class Worker:
             if live_actor != actor:
                 raise CanaryFailure(f"{run_id} remained live under an unexpected actor")
             time.sleep(0.25)
-        raise CanaryFailure(f"{actor} retained a live registration for {run_id}")
+        raise CanaryFailure(f"{actor} retained a live registration for {run_id}", code="session-end-timeout")
 
     def has_lifecycle_evidence(self, actor: str, run_id: str) -> bool:
         events = self.operational_events()

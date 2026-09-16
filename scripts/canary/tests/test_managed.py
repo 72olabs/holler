@@ -92,7 +92,77 @@ class FrameTests(unittest.TestCase):
             wait_until_ready=lambda *args, **kwargs: events.append(("ready",)),
             wait_until_quiet=lambda *args, **kwargs: None,
             normalized_output=lambda: "", submit=lambda *args, **kwargs: events.append(("submit",)),
-            close=lambda: events.append(("close",)), graceful_claude_exit=lambda: None)
+            close=lambda: events.append(("close",)), graceful_claude_exit=lambda: None,
+            graceful_codex_exit=lambda: events.append(("codex-exit",)))
+
+    def test_codex_graceful_exit_waits_before_sweeping_and_is_idempotent(self):
+        events = []
+        state = {"exit": None}
+        process = object.__new__(PtyProcess)
+        process.master = 1
+        process.process = SimpleNamespace(poll=lambda: state["exit"])
+        process.send = lambda text: events.append(("send", text))
+        def drain(timeout):
+            events.append(("drain",))
+            state["exit"] = 0
+        process._read_available = drain
+        def sweep():
+            self.assertEqual(state["exit"], 0)
+            events.append(("sweep",))
+        process._sweep_process_group = sweep
+        def close():
+            events.append(("close",))
+            process.master = -1
+        process.close = close
+        with patch("worker.time.sleep"):
+            process.graceful_codex_exit()
+            process.graceful_codex_exit()
+        self.assertEqual(events, [("send", "/quit"), ("send", "\r"), ("drain",), ("sweep",), ("close",)])
+
+    def test_codex_graceful_timeout_fails_and_context_still_closes(self):
+        events = []
+        session = self.interactive_session("codex", events)
+        process = object.__new__(PtyProcess)
+        process.master = 1
+        process.process = SimpleNamespace(poll=lambda: None)
+        process.send = lambda text: events.append(("send", text))
+        process.close = lambda: events.append(("close",))
+        process._sweep_process_group = lambda: self.fail("swept before successful exit")
+        session.process = process
+        with patch("worker.time.sleep"), patch("worker.time.monotonic", side_effect=[0, 21]):
+            with self.assertRaises(CanaryFailure) as caught:
+                session.__exit__(None, None, None)
+        self.assertEqual(caught.exception.code, "session-end-timeout")
+        self.assertEqual(events, [("phase", "exit"), ("send", "/quit"), ("send", "\r"), ("close",)])
+        self.assertIsNone(session.process)
+
+    def test_codex_nonzero_exit_is_not_success(self):
+        process = object.__new__(PtyProcess)
+        process.master = 1
+        process.process = SimpleNamespace(poll=lambda: 1)
+        with self.assertRaises(CanaryFailure) as caught:
+            process.graceful_codex_exit()
+        self.assertEqual(caught.exception.code, "session-exit-failed")
+
+    def test_interactive_exit_dispatch_preserves_exception_cleanup(self):
+        for client in ("codex", "claude"):
+            for failure in (None, CanaryFailure):
+                with self.subTest(client=client, failure=failure):
+                    events = []
+                    session = self.interactive_session(client, events)
+                    session.process = SimpleNamespace(
+                        close=lambda: events.append("close"),
+                        graceful_codex_exit=lambda: events.append("codex"),
+                        graceful_claude_exit=lambda: events.append("claude"))
+                    self.assertFalse(session.__exit__(failure, None, None))
+                    self.assertEqual(events, [("phase", "exit"), client, "close"] if failure is None else ["close"])
+                    self.assertIsNone(session.process)
+
+    def test_session_end_wait_timeout_has_closed_code(self):
+        w = object.__new__(Worker)
+        with self.assertRaises(CanaryFailure) as caught:
+            w.wait_for_no_live_registration("canary-codex", "run", harness="codex", timeout=0)
+        self.assertEqual(caught.exception.code, "session-end-timeout")
 
     def test_interactive_client_registration_order_and_first_turn_only(self):
         for client in ("claude", "codex"):

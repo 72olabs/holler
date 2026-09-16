@@ -82,6 +82,12 @@ python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
   check rejects prompts containing their expected marker, preventing echo-based
   completion. Marker instructions request a standalone line. These are only turn
   checkpoints: the independent API and terminal success oracles remain unchanged.
+  On a clean C11 session exit, Codex receives `/quit` and must exit successfully
+  within 20 seconds before descendant cleanup. Its actual SessionEnd hook must
+  remove the live registration within the existing 30-second wait; the harness
+  never invokes `holler session-end` to make that check pass. Timeout reports
+  `session-end-timeout`; an unsuccessful process exit reports `session-exit-failed`.
+  Exceptions still force process cleanup while preserving the test failure.
 - Marker strings are turn-accounting checkpoints, never the success oracle.
   API-visible messages, actor/run/thread correlation, response state, per-actor
   inboxes, negative claims, observer rights and view state are asserted separately.
