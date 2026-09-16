@@ -21,13 +21,44 @@ from handler_contract import HandlerContractError, load_handler, validate_write_
 from managed import exchange, receive_exact
 from worker import (BudgetedInteractiveSession, CanaryFailure, PtyProcess, Worker,
                     approved_fixture_policy, assert_fixture_policy_baseline, fixture_write_policy,
-                    codex_tool_counts, make_failure_evidence)
+                    codex_tool_counts, make_failure_evidence, terminal_wait_diagnostic)
 from clients import client_policy
 from types import SimpleNamespace
 from budget import BudgetExceeded, BudgetLedger
 
 
 class FrameTests(unittest.TestCase):
+    def test_terminal_diagnostic_exports_only_fixed_signals_not_transcript(self):
+        output = b"SECRET Please run /login API Error: Do you want to proceed? DONE_\x1b[0mSUFFIX\n$"
+        diag = terminal_wait_diagnostic(output, "DONE_SUFFIX", client_running=True)
+        self.assertFalse(diag["raw_marker_seen"])
+        self.assertTrue(diag["normalized_marker_seen"])
+        self.assertTrue(diag["screen_reader_prompt_at_end"])
+        self.assertEqual(diag["signals"], ["api-error", "auth-error", "permission-prompt"])
+        error = CanaryFailure("SECRET", code="terminal-marker-timeout")
+        error.terminal_diagnostic = diag
+        evidence = make_failure_evidence(
+            {"request_hash": "hash", "source": {}, "tier": "core", "budget": {}},
+            results=[], usage={}, scenario="C11", check="c11-claude-arm", error=error)
+        self.assertEqual(evidence["terminal_diagnostic"], diag)
+        self.assertNotIn("SECRET", json.dumps(evidence))
+        self.assertNotIn("Please run", json.dumps(evidence))
+
+    def test_terminal_wait_distinguishes_exit_from_timeout_without_changing_matching(self):
+        process = object.__new__(PtyProcess)
+        process.buffer = bytearray(b"SECRET DONE_\x1b[0mSUFFIX")
+        process._read_available = lambda *args: None
+        for exited in (True, False):
+            with self.subTest(exited=exited):
+                process.process = SimpleNamespace(poll=lambda: 1 if exited else None)
+                with self.assertRaises(CanaryFailure) as caught:
+                    process.wait_for("DONE_SUFFIX", 0.001)
+                self.assertEqual(caught.exception.code, "terminal-client-exited" if exited else "terminal-marker-timeout")
+                self.assertEqual(caught.exception.terminal_diagnostic["client_running"], not exited)
+                self.assertTrue(caught.exception.terminal_diagnostic["normalized_marker_seen"])
+        process.buffer = bytearray(b"DONE_SUFFIX")
+        process.wait_for("DONE_SUFFIX", 0.001)
+
     def interactive_session(self, client, events, registration=None):
         ledger = BudgetLedger({"claude_usd": 1, "codex_reported_tokens": 100,
                                "model_turns": 4, "wall_seconds": 60})

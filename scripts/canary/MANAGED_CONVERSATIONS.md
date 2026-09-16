@@ -74,6 +74,11 @@ python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
   projection described below. If lifecycle/daemon guards fail, the diagnostic is
   omitted with a safe reason; it never bypasses a guard or replaces the original
   failure. Failed interactive attempts may incur usage not charged by the ledger.
+  Terminal marker failures distinguish client exit from timeout and report only
+  byte counts, process/marker booleans and fixed permission/auth/rate/API/tool
+  error signal labels. These labels are diagnostic hints, not proof of cause;
+  no transcript, marker value, error text or credential is exported. Marker
+  matching and pass criteria are unchanged by diagnostic collection.
 - Marker strings are turn-accounting checkpoints, never the success oracle.
   API-visible messages, actor/run/thread correlation, response state, per-actor
   inboxes, negative claims, observer rights and view state are asserted separately.

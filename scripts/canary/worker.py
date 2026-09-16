@@ -77,10 +77,33 @@ class CanaryFailure(RuntimeError):
     def __init__(self, message: str, *, code: str = "check-failed"):
         if code not in {"check-failed", "marker-missing", "write-policy-mismatch",
                         "policy-invalid", "policy-restore-failed", "registration-timeout",
-                        "projection-clients-live", "projection-daemon-live"}:
+                        "projection-clients-live", "projection-daemon-live",
+                        "terminal-marker-timeout", "terminal-client-exited"}:
             raise ValueError("unsupported canary failure code")
         super().__init__(message)
         self.code = code
+        self.terminal_diagnostic: dict[str, Any] | None = None
+
+
+def terminal_wait_diagnostic(output: bytes, marker: str, *, client_running: bool) -> dict[str, Any]:
+    """Fixed booleans/counts only; signals are hints, never proof of their cause."""
+    normalized = ANSI_ESCAPE.sub("", output.decode("utf-8", errors="replace"))
+    signatures = {
+        "permission-prompt": ("Do you want to proceed?", "Do you want to allow", "Allow this tool"),
+        "auth-error": ("Invalid API key", "Please run /login", "Not logged in"),
+        "rate-limit": ("You've hit your limit", "rate_limit_error", "Rate limit"),
+        "api-error": ("API Error:", "overloaded_error"),
+        "tool-error": ("Error executing tool", "MCP error"),
+    }
+    return {
+        "output_bytes": len(output), "client_running": client_running,
+        "raw_marker_seen": marker.encode("utf-8") in output,
+        "normalized_marker_seen": marker in normalized,
+        "whitespace_folded_marker_seen": marker in re.sub(r"\s+", "", normalized),
+        "screen_reader_prompt_at_end": normalized.rstrip().endswith("$"),
+        "signals": sorted(label for label, values in signatures.items()
+                          if any(value.casefold() in normalized.casefold() for value in values)),
+    }
 
 
 def approved_fixture_policy(original: bytes) -> bytes:
@@ -279,6 +302,8 @@ def make_failure_evidence(
     }
     if isinstance(error, CanaryFailure):
         evidence["failure"]["code"] = error.code
+        if error.terminal_diagnostic is not None:
+            evidence["terminal_diagnostic"] = error.terminal_diagnostic
     environment = next((s.get("test_environment") for s in request.get("scenarios", [])
                         if s["id"] == scenario), None)
     if environment:
@@ -723,9 +748,16 @@ class PtyProcess:
             if marker_bytes in self.buffer[after:]:
                 return
             if self.process.poll() is not None:
-                raise CanaryFailure(f"interactive client exited before {marker}")
+                raise self._marker_failure(marker, after, exited=True)
             self._read_available(min(0.25, deadline - time.monotonic()))
-        raise CanaryFailure(f"timed out waiting for expected client marker {marker}")
+        raise self._marker_failure(marker, after, exited=self.process.poll() is not None)
+
+    def _marker_failure(self, marker: str, after: int, *, exited: bool) -> CanaryFailure:
+        error = CanaryFailure("interactive client marker not observed",
+                              code="terminal-client-exited" if exited else "terminal-marker-timeout")
+        error.terminal_diagnostic = terminal_wait_diagnostic(
+            bytes(self.buffer[after:]), marker, client_running=not exited)
+        return error
 
     def _read_available(self, timeout: float) -> None:
         for key, _ in self.selector.select(timeout=timeout):
