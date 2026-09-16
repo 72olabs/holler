@@ -20,7 +20,7 @@ from catalog import CatalogError, load_catalog, validate_scenario
 from handler_contract import HandlerContractError, load_handler, validate_write_contract
 from managed import exchange, receive_exact
 from worker import (BudgetedInteractiveSession, CanaryFailure, PtyProcess, Worker,
-                    CODEX_FIXTURE_WRITE_OVERRIDE, codex_tool_counts, make_failure_evidence)
+                    approved_fixture_policy, fixture_write_policy, codex_tool_counts, make_failure_evidence)
 from clients import client_policy
 from types import SimpleNamespace
 from budget import BudgetExceeded, BudgetLedger
@@ -42,22 +42,31 @@ class FrameTests(unittest.TestCase):
             with self.assertRaises(HandlerContractError):
                 validate_write_contract(path, bad)
 
-    def test_codex_write_approval_is_per_process_and_fail_closed(self):
+    def test_codex_write_approval_is_temporary_and_fail_closed(self):
         w = object.__new__(Worker)
         w.request = {"clients": client_policy(), "scenarios": [load_catalog()["C10"]]}
         w.active_scenario = "C10"
         w.managed_config = load_catalog()["C10"]["daemon"]
-        w.fixture, w.env, w.tool_counts = Path("/tmp"), {}, []
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        policy_path = Path(temporary.name) / "holler.config.toml"
+        original = (SCRIPT_DIR.parents[1] / "connectors/policies/codex-live-review.toml").read_bytes()
+        policy_path.write_bytes(original)
+        w.fixture, w.env, w.tool_counts = Path("/tmp"), {"CODEX_HOME": temporary.name}, []
+        w.policy_audits = []
         w.ledger = BudgetLedger({"claude_usd": 1, "codex_reported_tokens": 100,
                                 "model_turns": 8, "wall_seconds": 60})
         w.launcher = lambda harness, actor, run_id, args: args
-        with patch("worker.run_command", return_value=SimpleNamespace(stdout="")) as run:
+        def process(*args, **kwargs):
+            self.assertEqual(policy_path.read_bytes(), approved_fixture_policy(original))
+            return SimpleNamespace(stdout="")
+        with patch("worker.run_command", side_effect=process) as run:
             w.run_codex("canary-codex", "c10-create", "prompt", fixture_write=True)
-            approved_command = run.call_args.args[0]
-            self.assertEqual(approved_command[-3:], ["--config", CODEX_FIXTURE_WRITE_OVERRIDE, "-"])
-            self.assertEqual(approved_command.count(CODEX_FIXTURE_WRITE_OVERRIDE), 1)
+            self.assertEqual(policy_path.read_bytes(), original)
+            self.assertTrue(w.policy_audits[0]["restored"])
+            run.side_effect = lambda *args, **kwargs: SimpleNamespace(stdout="")
             w.run_codex("canary-codex", "plain", "prompt")
-            self.assertNotIn(CODEX_FIXTURE_WRITE_OVERRIDE, run.call_args.args[0])
+            self.assertEqual(len(w.policy_audits), 1)
             for actor, scenario in (("canary-claude", "C10"), ("canary-codex", "C11")):
                 w.active_scenario = scenario
                 before = w.ledger.model_turns
@@ -66,7 +75,35 @@ class FrameTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, "write-policy-mismatch")
                 self.assertEqual(w.ledger.model_turns, before)
             self.assertEqual(run.call_count, 2)
-        self.assertEqual(w.env, {})
+        self.assertEqual(w.env, {"CODEX_HOME": temporary.name})
+
+    def test_policy_restore_on_exception_and_reject_unexpected_changes(self):
+        original = (SCRIPT_DIR.parents[1] / "connectors/policies/codex-live-review.toml").read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "holler.config.toml"
+            path.write_bytes(original)
+            path.chmod(0o640)
+            audits = []
+            with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+                with fixture_write_policy(path, audits):
+                    self.assertEqual(path.read_bytes(), approved_fixture_policy(original))
+                    raise RuntimeError("synthetic failure")
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(audits[0]["original_sha256"], audits[0]["restored_sha256"])
+            self.assertTrue(audits[0]["restored"])
+            with self.assertRaises(CanaryFailure) as error:
+                with fixture_write_policy(path, audits):
+                    path.write_bytes(b"unexpected concurrent edit")
+            self.assertEqual(error.exception.code, "policy-restore-failed")
+            self.assertEqual(path.read_bytes(), b"unexpected concurrent edit")
+            self.assertFalse(audits[-1]["restored"])
+            with self.assertRaises(CanaryFailure) as error:
+                with fixture_write_policy(path, audits):
+                    self.fail("invalid baseline launched a client")
+            self.assertEqual(error.exception.code, "policy-invalid")
+            with self.assertRaises(CanaryFailure):
+                approved_fixture_policy(approved_fixture_policy(original))
 
     def test_tool_telemetry_and_failure_export_no_bodies(self):
         events = [

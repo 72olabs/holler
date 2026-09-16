@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager, nullcontext
+import copy
 import errno
 import fcntl
 import json
@@ -74,15 +75,81 @@ def terminal_query_responses(data: bytes, *, previous_tail_length: int = 0) -> b
 
 class CanaryFailure(RuntimeError):
     def __init__(self, message: str, *, code: str = "check-failed"):
-        if code not in {"check-failed", "marker-missing", "write-policy-mismatch"}:
+        if code not in {"check-failed", "marker-missing", "write-policy-mismatch",
+                        "policy-invalid", "policy-restore-failed"}:
             raise ValueError("unsupported canary failure code")
         super().__init__(message)
         self.code = code
 
 
-CODEX_FIXTURE_WRITE_OVERRIDE = (
-    'plugins."holler@holler".mcp_servers.holler.tools.holler_write.approval_mode="approve"'
-)
+def approved_fixture_policy(original: bytes) -> bytes:
+    """Change exactly one generated TOML field, retaining every other byte."""
+    try:
+        text = original.decode("utf-8")
+        before = tomllib.loads(text)
+        expected = copy.deepcopy(before)
+        tool = expected["plugins"]["holler@holler"]["mcp_servers"]["holler"]["tools"]["holler_write"]
+        if tool["approval_mode"] != "prompt":
+            raise ValueError("not the generated baseline")
+        tool["approval_mode"] = "approve"
+        pattern = r'(\[plugins\."holler@holler"\.mcp_servers\.holler\.tools\.holler_write\]\n)approval_mode = "prompt"'
+        updated, count = re.subn(pattern, r'\1approval_mode = "approve"', text)
+        if count != 1 or tomllib.loads(updated) != expected:
+            raise ValueError("unexpected policy shape")
+        return updated.encode("utf-8")
+    except (ValueError, KeyError, TypeError) as error:
+        raise CanaryFailure("fixture policy is not the expected generated policy", code="policy-invalid") from error
+
+
+def atomic_policy_write(path: Path, content: bytes, mode: int) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=".canary-policy-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+@contextmanager
+def fixture_write_policy(path: Path, audits: list[dict[str, Any]]):
+    """Exclusive runner only; temporary generated policy edit, never OAuth data."""
+    if path.name != "holler.config.toml" or path.is_symlink() or not path.is_file():
+        raise CanaryFailure("fixture policy path is invalid", code="policy-invalid")
+    try:
+        original = path.read_bytes()
+        mode = path.stat().st_mode & 0o777
+    except OSError as error:
+        raise CanaryFailure("cannot read generated fixture policy", code="policy-invalid") from error
+    approved = approved_fixture_policy(original)
+    audit = {"original_sha256": sha256_bytes(original), "approved_sha256": sha256_bytes(approved),
+             "restored": False}
+    audits.append(audit)
+    try:
+        atomic_policy_write(path, approved, mode)
+    except OSError as error:
+        raise CanaryFailure("cannot apply generated fixture policy", code="policy-invalid") from error
+    try:
+        if sha256_file(path) != audit["approved_sha256"]:
+            raise CanaryFailure("fixture approval could not be verified", code="policy-invalid")
+        yield
+    finally:
+        # Never clobber an unexpected concurrent edit. The worker fails and the
+        # controller stops the exclusive runner; do not continue to any client.
+        try:
+            if path.is_symlink() or sha256_file(path) != audit["approved_sha256"]:
+                raise OSError("fixture policy changed unexpectedly")
+            atomic_policy_write(path, original, mode)
+            audit["restored_sha256"] = sha256_file(path)
+            audit["restored"] = (audit["restored_sha256"] == audit["original_sha256"]
+                                 and path.stat().st_mode & 0o777 == mode)
+            if not audit["restored"]:
+                raise OSError("fixture policy restoration mismatch")
+        except OSError as error:
+            raise CanaryFailure("fixture policy restoration failed", code="policy-restore-failed") from error
 TELEMETRY_TOOLS = frozenset({
     "holler_capabilities", "holler_read", "holler_write", "holler_channel_inbox",
     "holler_channel_claim", "holler_channel_ack", "holler_channel_extend", "holler_channel_nack",
@@ -108,7 +175,7 @@ def codex_tool_counts(output: str) -> list[dict[str, Any]]:
         tool, status = item.get("tool"), item.get("status")
         if not isinstance(tool, str) or not isinstance(status, str):
             continue
-        if tool not in TELEMETRY_TOOLS or status not in {"completed", "failed"}:
+        if tool not in TELEMETRY_TOOLS or status not in {"completed", "failed", "declined", "rejected"}:
             continue
         key = (tool, status)
         counts[key] = counts.get(key, 0) + 1
@@ -181,6 +248,7 @@ def make_failure_evidence(
     check: str,
     error: BaseException,
     tool_counts: list[dict[str, Any]] | None = None,
+    policy_audits: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "schema_version": 1,
@@ -204,6 +272,8 @@ def make_failure_evidence(
         evidence["failure"]["test_environment"] = environment
     if tool_counts is not None:
         evidence["tool_counts"] = tool_counts
+    if policy_audits is not None:
+        evidence["policy_audits"] = policy_audits
     evidence["evidence_hash"] = sha256_bytes(canonical_json(evidence))
     return evidence
 
@@ -962,6 +1032,7 @@ class Worker:
         self.active_scenario = "initialization"
         self.active_check = "initialization"
         self.tool_counts: list[dict[str, Any]] = []
+        self.policy_audits: list[dict[str, Any]] = []
         configurations = [s["daemon"] for s in request["scenarios"] if "daemon" in s]
         self.managed_config = configurations[0] if configurations else None
         if any(item != self.managed_config for item in configurations):
@@ -1403,22 +1474,23 @@ class Worker:
             if (not self.managed_config or actor != "canary-codex"
                     or scenario.get("test_environment", {}).get("write_policy") != "fixture-approved-codex-write"):
                 raise CanaryFailure("fixture write requires declared Codex approval", code="write-policy-mismatch")
-            # A per-process CLI setting; no auth-home or generated policy file is changed.
-            command[-1:-1] = ["--config", CODEX_FIXTURE_WRITE_OVERRIDE]
         self.ledger.ensure_capacity(client="codex", turns=1)
         started = time.monotonic()
-        result = run_command(
-            self.launcher("codex", actor, run_id, command),
-            cwd=self.fixture,
-            env=self.env,
-            timeout=180,
-            stdin=prompt,
-        )
-        self.ledger.charge(
-            client="codex", turns=1, reported_tokens=codex_reported_tokens(result.stdout),
-            wall_seconds=time.monotonic() - started,
-        )
-        self.tool_counts.extend(codex_tool_counts(result.stdout))
+        policy = (fixture_write_policy(Path(self.env["CODEX_HOME"]) / "holler.config.toml", self.policy_audits)
+                  if fixture_write else nullcontext())
+        with policy:
+            result = run_command(
+                self.launcher("codex", actor, run_id, command),
+                cwd=self.fixture,
+                env=self.env,
+                timeout=180,
+                stdin=prompt,
+            )
+            self.ledger.charge(
+                client="codex", turns=1, reported_tokens=codex_reported_tokens(result.stdout),
+                wall_seconds=time.monotonic() - started,
+            )
+            self.tool_counts.extend(codex_tool_counts(result.stdout))
         return result.stdout
 
     def run_allocated_claude(
@@ -2184,6 +2256,7 @@ class Worker:
             self.active_scenario = scenario["id"]
             self.active_check = "scenario-start"
             self.tool_counts = []
+            self.policy_audits = []
             started = time.monotonic()
             turns_before = self.ledger.model_turns
             operation = (lambda handler=handler: handler(context)) if custom else handler
@@ -2205,6 +2278,8 @@ class Worker:
             }
             if self.tool_counts:
                 result["tool_counts"] = self.tool_counts
+            if self.policy_audits:
+                result["policy_audits"] = self.policy_audits
             if "test_environment" in scenario:
                 result["test_environment"] = scenario["test_environment"]
                 for assertion in result["assertions"]:
@@ -2274,6 +2349,7 @@ def main() -> None:
                 check=worker.active_check,
                 error=error,
                 tool_counts=worker.tool_counts,
+                policy_audits=worker.policy_audits,
             )
         finally:
             worker.stop_daemon()

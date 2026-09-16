@@ -44,11 +44,19 @@ python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
 - C0 verifies actual installed connector versions, generated policies, tool
   surface, onboarding and lifecycle. Claude uses only narrow consumption tools
   and reads. C10 explicitly declares `fixture-approved-codex-write`: only its
-  two `run_codex_write` turns add a CLI setting approving the `holler_write`
-  tool. This approves the generic write tool within that synthetic process, not
-  just two operations; daemon identity/audience checks still apply. No source,
-  generated, persistent auth-home, or operator policy file is changed. Normal
-  Codex calls, Claude, C0, C9 and C11 retain generated defaults. This tests the
+  two `run_codex_write` turns temporarily change the runner's generated
+  `holler.config.toml` entry for `holler_write` from `prompt` to `approve`.
+  Parsed before/after comparison proves only that field changed; atomic writes
+  preserve file permissions. A `finally` restores the original bytes and verifies
+  the original hash. Evidence records original/approved/restored policy hashes.
+  Unexpected concurrent edits are not overwritten: restoration fails closed and
+  the controller stops the runner. A hard kill can prevent `finally`; inspect the
+  policy before manual reuse after a killed worker. This requires an exclusive
+  runner, not a shared developer session. OAuth files are never read or changed.
+  This approves the generic write tool within the fixture turn, not just two
+  operations; daemon identity/audience checks still apply. Source templates and
+  the operator's local install stay unchanged. Normal Codex calls, Claude, C0,
+  C9 and C11 retain generated defaults. This tests the
   preapproved write path, not approval UI or unchanged-default write behavior.
 - Static check-time validation requires explicit write calls and the declared
   policy to agree; a runtime guard rejects missing declaration before model
