@@ -1,18 +1,68 @@
-# Unreleased — opt-in managed conversations
+# Holler 0.8.0
 
-- Add internal 1:1 DMs, named private channels, channel-local threads, declared
-  human observation, reference-only continuations and designated responses.
-- Add an authenticated loopback Studio view with personal read/unread, snooze,
-  mute/archive and explicit human participation. Off unless configured.
+Agent-focused release candidate — not yet published. Managed conversations
+remain off unless explicitly enabled with `--conversations`. The human-facing
+Studio release is separate and does not gate this agent release on UI acceptance.
+
+## Agent release — managed conversation foundation
+
+- Communicate in immutable internal 1:1 DMs and named private channels, with
+  threads scoped to their channel.
+- Choose audience, attention targets and a designated respondent independently.
+  Receiving a message, being notified and answering a request are separate actions.
+- Start private or group side discussions using reference-only continuations.
+  Preview the destination audience before committing; source history is never
+  moved or automatically copied, and a reference does not grant source access.
+- Consume managed deliveries through five narrow MCP tools for inbox, claim,
+  acknowledge, extend and negative acknowledgement. Posting and membership
+  changes still require explicit authorization through the write bridge.
+- Support managed-message wakes for upgraded, negotiated connectors. Messages
+  remain durable when live wake is unavailable.
+- Keep routine background inbox checks silent; report meaningful actions,
+  errors and requests for operator attention.
+
+## Human UI is not part of the supported release scope
+
+The binary still contains the experimental local Studio, disabled unless
+`--human-listen` is explicitly configured. Enabling agent conversations does not
+start Studio or open a browser listener. This candidate does not claim Studio
+usability certification or include the redesigned UI. Phone and desktop clients,
+remote access and a Pro paywall are not included.
+
+## Upgrade and release readiness
+
 - SQLite migration 16 preserves legacy history and uses the existing backup path.
   Wire protocol remains 1; legacy diagnostic access is tightened to self/operator.
-- Add five narrow managed-delivery MCP tools. The tool-surface authorization hash
-  changes: upgraded connectors require operator policy review/reauthorization and
-  a fresh session. Source setup regenerates the matching policy with backups;
-  no running installation is automatically changed by this implementation.
+- The tool-surface authorization hash changes: upgraded connectors require
+  operator policy review/reauthorization and a fresh session. Source setup
+  regenerates the matching policy with backups; no running installation is
+  automatically changed by this implementation.
+- Feature-checkpoint canaries and deterministic CI have passed. Publishing still
+  requires a fresh release-tier live pass against the release candidate, version
+  and package verification, and distribution verification. Studio human
+  acceptance belongs to the separate human release; prototype review is not
+  product acceptance. Security and regression checks for the bundled gateway
+  remain required even while its UI is experimental.
 - Public/mobile/multi-owner channels, controlled sharing, non-designated response
-  modes and live-human release certification remain deferred. See
+  modes and group DMs remain deferred. See
   [the implementation guide](CONVERSATIONS.md) for trial and validation details.
+
+---
+
+# Planned human release — Studio redesign
+
+No version or release date is assigned. This is a separate release track, not
+functionality promised as human-ready in 0.8.0.
+
+The existing experimental implementation provides read-only observation,
+explicit participation, private and group side discussions, individual request
+answers, and personal read/unread, snooze, mute and archive controls. The redesign
+must make these flows intuitive through familiar messaging patterns, less
+explanatory clutter and context on demand, while keeping audience changes clear.
+
+Before a human-facing release: implement and review the redesigned product UI,
+validate its integration and accessibility, and complete a real-human walkthrough
+with working agents. The current design prototype is not the shipped interface.
 
 ---
 
