@@ -32,6 +32,13 @@ func (s *Store) ArchivePreflight(ctx context.Context, actor string, limit int) (
 	if known == 0 {
 		return preflight, bus.ErrNotFound
 	}
+	var managed int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_grants WHERE actor=? AND revoked_seq IS NULL`, actor).Scan(&managed); err != nil {
+		return bus.ActorArchivePreflight{}, err
+	}
+	if managed != 0 || bus.IsHumanActor(actor) {
+		return bus.ActorArchivePreflight{}, bus.ErrChannelCapability
+	}
 	var state string
 	if err := s.db.QueryRowContext(ctx, `SELECT state FROM actor_lifecycle WHERE actor = ?`, actor).Scan(&state); err == nil {
 		preflight.Archived = state == "archived"
@@ -65,7 +72,7 @@ func (s *Store) ArchivePreflight(ctx context.Context, actor string, limit int) (
 	}
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM deliveries d
-		JOIN messages m ON m.message_id = d.message_id
+		JOIN legacy_messages m ON m.message_id = d.message_id
 		LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
 		WHERE COALESCE(a.adopting_actor, d.recipient_actor) = ? AND d.state = ?
 		  AND d.lease_expires_at_ns > ? AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)`,
@@ -77,7 +84,7 @@ func (s *Store) ArchivePreflight(ctx context.Context, actor string, limit int) (
 			SELECT m.message_id, m.from_actor, m.created_at_ns, COALESCE(m.thread_id, '') AS thread_id, m.message_type, m.body,
 			       ROW_NUMBER() OVER (PARTITION BY m.message_id ORDER BY d.recipient_actor) AS preference
 			FROM deliveries d
-			JOIN messages m ON m.message_id = d.message_id
+			JOIN legacy_messages m ON m.message_id = d.message_id
 			LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
 			WHERE COALESCE(a.adopting_actor, d.recipient_actor) = ?
 			  AND (d.state = ? OR (d.state = ? AND d.lease_expires_at_ns <= ?))
@@ -150,6 +157,13 @@ func (s *Store) ArchiveActor(ctx context.Context, actor, changedBy string, allow
 	}
 	defer tx.Rollback()
 	// Recheck action-time blockers in the same transaction.
+	var managed int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_grants WHERE actor=? AND revoked_seq IS NULL`, actor).Scan(&managed); err != nil {
+		return bus.ActorArchiveResult{}, err
+	}
+	if managed != 0 || bus.IsHumanActor(actor) {
+		return bus.ActorArchiveResult{}, bus.ErrChannelCapability
+	}
 	var aliases, live, claims, unread int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_aliases WHERE actor = ?`, actor).Scan(&aliases); err != nil {
 		return bus.ActorArchiveResult{}, err
@@ -165,7 +179,7 @@ func (s *Store) ArchiveActor(ctx context.Context, actor, changedBy string, allow
 		return bus.ActorArchiveResult{}, err
 	}
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+		SELECT COUNT(*) FROM deliveries d JOIN legacy_messages m ON m.message_id = d.message_id
 		LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
 		WHERE COALESCE(a.adopting_actor, d.recipient_actor) = ? AND (d.state = ? OR (d.state = ? AND d.lease_expires_at_ns <= ?))
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)`, actor, bus.DeliveryQueued,
@@ -267,7 +281,7 @@ func (s *Store) RevokeDeliveryLease(ctx context.Context, actor, messageID string
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO notification_outbox(message_id, recipient_actor, state, available_at_ns, created_at_ns)
 		SELECT ?, ?, 'pending', ?, ? WHERE EXISTS (
-			SELECT 1 FROM messages WHERE message_id = ? AND delivery_request <> ?
+			SELECT 1 FROM legacy_messages WHERE message_id = ? AND delivery_request <> ?
 		)
 		ON CONFLICT(message_id, recipient_actor) DO UPDATE SET state = 'pending', available_at_ns = excluded.available_at_ns, last_error = NULL`,
 		messageID, actor, now.UnixNano(), now.UnixNano(), messageID, bus.DeliveryNonBlocking); err != nil {
@@ -295,9 +309,11 @@ func (s *Store) ArchiveEligibleActors(ctx context.Context, inactiveFor time.Dura
 		SELECT n.actor FROM actor_names n
 		LEFT JOIN actor_lifecycle l ON l.actor = n.actor
 		WHERE n.actor <> 'operator' AND COALESCE(l.state, 'active') <> 'archived'
+		  AND n.actor NOT LIKE 'human:%'
+		  AND NOT EXISTS (SELECT 1 FROM channel_grants g WHERE g.actor=n.actor AND g.revoked_seq IS NULL)
 		  AND n.first_seen_at_ns <= ?
 		  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.actor_id = n.actor AND e.created_at_ns > ?)
-		  AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.from_actor = n.actor AND m.created_at_ns > ?)
+		  AND NOT EXISTS (SELECT 1 FROM legacy_messages m WHERE m.from_actor = n.actor AND m.created_at_ns > ?)
 		  AND NOT EXISTS (SELECT 1 FROM registrations r WHERE r.actor = n.actor AND r.updated_at_ns > ?)
 		  AND NOT EXISTS (SELECT 1 FROM actor_profiles p WHERE p.actor = n.actor AND p.updated_at_ns > ?)
 		  AND NOT EXISTS (SELECT 1 FROM actor_aliases a WHERE a.actor = n.actor)
@@ -305,7 +321,7 @@ func (s *Store) ArchiveEligibleActors(ctx context.Context, inactiveFor time.Dura
 		  AND NOT EXISTS (SELECT 1 FROM actor_adoptions a WHERE a.adopting_actor = n.actor)
 		  AND NOT EXISTS (SELECT 1 FROM registrations r WHERE r.actor = n.actor AND r.ended_at_ns IS NULL AND r.attention_superseded_at_ns IS NULL AND r.lease_expires_at_ns > ?)
 		  AND NOT EXISTS (
-			SELECT 1 FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+			SELECT 1 FROM deliveries d JOIN legacy_messages m ON m.message_id = d.message_id
 			WHERE d.recipient_actor = n.actor AND (d.state = ? OR (d.state = ? AND d.lease_expires_at_ns <= ?))
 			  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)
 		) ORDER BY n.actor`, now.Add(-inactiveFor).UnixNano(), now.Add(-inactiveFor).UnixNano(),

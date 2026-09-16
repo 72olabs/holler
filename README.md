@@ -457,9 +457,10 @@ what it is not, yet:
 
 - **One trusted OS user, one machine.** The owning account and the mode-`0600`
   socket are the trust boundary. Multi-user and multi-node security come later.
-- **Direct messages only.** A `channel_id` is currently a label, not a
-  membership-enforced channel. Real multi-party channels, broadcast, and
-  history replay are the core of the [V2 roadmap](ROADMAP.md).
+- **Legacy DMs by default.** The legacy `channel_id` is still only a label.
+  The unreleased, opt-in [managed conversation slice](CONVERSATIONS.md) adds
+  membership-enforced private channels and local human observation. Public
+  broadcast, mobile access and multi-owner transport remain future work.
 - **Peer messages are untrusted input.** They never grant tool, filesystem,
   credential, spend, or release authority.
 - **Not a task manager.** Holler answers who is talking to whom and whether the
@@ -508,6 +509,7 @@ durable database and logs are preserved.
 ## Documentation
 
 - [Local API](API.md): framing, handshake, operations, and client surfaces.
+- [Managed conversations](CONVERSATIONS.md): opt-in channels, human observation, local Studio, and upgrade boundaries.
 - [Connector integration](connectors/README.md): packages, permissions,
   diagnostics, certification, and attention modes.
 - [Security](SECURITY.md): current trust boundary and vulnerability reporting.

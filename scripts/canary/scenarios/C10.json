@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "C10",
+  "name": "managed-client-recovery",
+  "description": "Real Codex writes a managed response, Claude and Codex consume their own deliveries after restart using narrow tools, checked against terminal state.",
+  "required_clients": [
+    "claude",
+    "codex"
+  ],
+  "estimated_model_turns": 3,
+  "timeout_seconds": 600,
+  "daemon": {
+    "conversations": true,
+    "human_gateway": {
+      "human": "human:canary",
+      "scope": "observe+admin"
+    }
+  },
+  "test_environment": {
+    "human": "synthetic-http",
+    "write_policy": "generated-default",
+    "terminal_oracle": "stopped-daemon-fixed-projection-and-public-api"
+  },
+  "checks": [
+    "restart-queued-identity",
+    "claude-narrow-consume",
+    "recipient-independence",
+    "codex-designated-response",
+    "codex-narrow-consume",
+    "terminal-ack-exactly-once"
+  ]
+}

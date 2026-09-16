@@ -244,7 +244,7 @@ func (s *Store) ReconcileStaleUnreadConditions(ctx context.Context, staleAfter t
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT COALESCE(a.adopting_actor, d.recipient_actor), COUNT(*), MIN(m.created_at_ns)
 		FROM deliveries d
-		JOIN messages m ON m.message_id = d.message_id
+		JOIN legacy_messages m ON m.message_id = d.message_id
 		LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
 		WHERE m.delivery_request <> ?
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)

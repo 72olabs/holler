@@ -308,9 +308,9 @@ func (s *Store) who(ctx context.Context, limit int, includeArchived bool) (bus.A
 
 	activityRows, err := tx.QueryContext(ctx, `
 		WITH activity(actor, at_ns) AS (
-			SELECT from_actor, created_at_ns FROM messages
+			SELECT from_actor, created_at_ns FROM legacy_messages
 			UNION ALL
-			SELECT d.recipient_actor, m.created_at_ns FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+			SELECT d.recipient_actor, m.created_at_ns FROM deliveries d JOIN legacy_messages m ON m.message_id = d.message_id
 			UNION ALL
 			SELECT actor, updated_at_ns FROM registrations
 			UNION ALL
@@ -350,7 +350,7 @@ func (s *Store) who(ctx context.Context, limit int, includeArchived bool) (bus.A
 			LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
 		)
 		SELECT c.effective_actor, COUNT(*), MIN(m.created_at_ns)
-		FROM candidates c JOIN messages m ON m.message_id = c.message_id
+		FROM candidates c JOIN legacy_messages m ON m.message_id = c.message_id
 		WHERE c.preference = 1
 		  AND (c.state = ? OR (c.state = ? AND c.lease_expires_at_ns <= ?))
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)
@@ -393,7 +393,7 @@ func (s *Store) who(ctx context.Context, limit int, includeArchived bool) (bus.A
 			LEFT JOIN actor_adoptions a ON a.source_actor = d.recipient_actor
 		)
 		SELECT c.effective_actor, COUNT(*), MIN(c.lease_expires_at_ns)
-		FROM candidates c JOIN messages m ON m.message_id = c.message_id
+		FROM candidates c JOIN legacy_messages m ON m.message_id = c.message_id
 		WHERE c.preference = 1
 		  AND c.state = ?
 		  AND c.lease_expires_at_ns > ?

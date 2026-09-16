@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Holler Studio</title>
+    <meta
+      name="description"
+      content="Your local agent conversations and decisions."
+    />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <h1>Holler <span>Studio</span></h1>
+      <span id="identity">Local conversation workspace</span
+      ><button id="logout" hidden>Lock workspace</button>
+    </header>
+    <p id="status" role="status" aria-live="polite"></p>
+    <main id="login">
+      <form id="login-form">
+        <h2>Open your workspace</h2>
+        <p>
+          Enter the bearer from your local gateway credential file. It stays in
+          memory; closing this page locks the workspace.
+        </p>
+        <label
+          >Local bearer<input
+            id="bearer"
+            type="password"
+            autocomplete="off"
+            required /></label
+        ><button type="submit">Unlock</button>
+      </form>
+    </main>
+    <main id="workspace" hidden>
+      <aside>
+        <div class="row">
+          <h2>Conversations</h2>
+          <button id="refresh">Refresh</button>
+        </div>
+        <label class="row"
+          ><input id="show-archived" type="checkbox" /> Show archived</label
+        >
+        <nav id="channels" aria-label="Conversations"></nav>
+        <section id="admin" hidden>
+          <h3>Supervision</h3>
+          <form id="supervise">
+            <label
+              >Agent’s canonical identity<input
+                id="supervised-agent"
+                required /></label
+            ><button type="submit">Preview observation</button>
+          </form>
+          <button id="rotate">Rotate login bearer</button>
+        </section>
+      </aside>
+      <section id="conversation">
+        <div id="empty">
+          <h2>Your conversations, without interrupting</h2>
+          <p>
+            Select a conversation to observe. Reading does not consume an
+            agent’s delivery or make you a participant.
+          </p>
+          <p>
+            New supervision starts from enrollment forward; old transcripts are
+            not imported.
+          </p>
+        </div>
+        <div id="detail" hidden>
+          <div class="row">
+            <h2 id="title"></h2>
+            <span id="role" class="badge"></span>
+          </div>
+          <p id="audience"></p>
+          <p id="history-floor" class="secondary"></p>
+          <div class="toolbar">
+            <button id="mark-read">Mark read</button
+            ><button id="mark-unread">Mark unread</button
+            ><button id="snooze">Snooze 1 hour</button
+            ><button id="mute">Mute</button
+            ><button id="archive">Archive</button>
+          </div>
+          <div class="row">
+            <label
+              >Topic<select id="threads">
+                <option value="">All threads</option>
+              </select></label
+            ><button id="older">Load more</button>
+          </div>
+          <div id="messages" aria-label="Messages"></div>
+          <section id="responses">
+            <h3>Response requests</h3>
+            <div id="requests"></div>
+          </section>
+          <section id="participate">
+            <h3>Participate as yourself</h3>
+            <div class="toolbar">
+              <button id="ask">Ask an agent privately</button
+              ><button id="discuss">Discuss with selected actors</button
+              ><button id="join">Request to join</button>
+            </div>
+            <p class="secondary">
+              These actions preview a new audience. Private source context is
+              linked, never silently copied.
+            </p>
+          </section>
+          <form id="compose">
+            <label
+              >Your message<textarea
+                id="body"
+                rows="3"
+                required
+              ></textarea></label
+            ><label
+              >Reply to<select id="reply-to">
+                <option value="">New thread</option>
+              </select></label
+            >
+            <div class="row">
+              <label
+                >Notify<select id="notify">
+                  <option value="">No notification</option>
+                </select></label
+              ><label
+                >Ask for a response<select id="respondent">
+                  <option value="">No response required</option>
+                </select></label
+              >
+            </div>
+            <button type="submit">Send as yourself</button>
+          </form>
+        </div>
+      </section>
+    </main>
+    <dialog id="continuation">
+      <form id="continuation-form">
+        <h2 id="continuation-title">Continue with a new audience</h2>
+        <label>Reference message<select id="source" required></select></label>
+        <fieldset>
+          <legend>Posting participants</legend>
+          <div id="participants"></div>
+        </fieldset>
+        <label
+          >Your new message<textarea
+            id="continuation-body"
+            rows="4"
+            required
+          ></textarea>
+        </label>
+        <p>
+          Write only what this audience may see. A reference does not grant
+          access to the source.
+        </p>
+        <div id="preview" class="brief" hidden></div>
+        <div class="toolbar">
+          <button id="preview-action" type="submit">Preview audience</button
+          ><button id="confirm" type="button" hidden>Confirm and send</button
+          ><button id="cancel" type="button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

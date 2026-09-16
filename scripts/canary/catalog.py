@@ -65,6 +65,16 @@ def validate_scenario(scenario: object, path: Path) -> None:
         raise CatalogError(f"{path} is missing {sorted(missing)}")
     if scenario["schema_version"] != 1:
         raise CatalogError(f"{path} has unsupported schema_version")
+    if "daemon" in scenario and (scenario["daemon"] != {
+        "conversations": True,
+        "human_gateway": {"human": "human:canary", "scope": "observe+admin"},
+    } or scenario["daemon"].get("conversations") is not True):
+        raise CatalogError(f"{path} has unsupported daemon fixture configuration")
+    if "daemon" in scenario and scenario.get("test_environment") != {
+        "human": "synthetic-http", "write_policy": "generated-default",
+        "terminal_oracle": "stopped-daemon-fixed-projection-and-public-api",
+    }:
+        raise CatalogError(f"{path} must declare the managed fixture evidence boundary")
     if not isinstance(scenario["id"], str) or not SCENARIO_ID_PATTERN.fullmatch(scenario["id"]):
         raise CatalogError(f"{path} has an invalid id")
     for key in ("required_clients", "checks"):

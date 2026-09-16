@@ -23,8 +23,8 @@ func (s *Store) ClaimNotification(ctx context.Context) (bus.NotificationJob, err
 		SET state = 'done', available_at_ns = ?, last_error = 'message expired before notification'
 		WHERE state IN ('pending', 'processing', 'accepted')
 		  AND EXISTS (
-			SELECT 1 FROM messages
-			WHERE messages.message_id = notification_outbox.message_id
+			SELECT 1 FROM legacy_messages
+			WHERE legacy_messages.message_id = notification_outbox.message_id
 			  AND expires_at_ns IS NOT NULL AND expires_at_ns <= ?
 		  )`, now.UnixNano(), now.UnixNano()); err != nil {
 		return bus.NotificationJob{}, err
@@ -32,7 +32,7 @@ func (s *Store) ClaimNotification(ctx context.Context) (bus.NotificationJob, err
 	var messageID, recipient string
 	if err := tx.QueryRowContext(ctx, `
 		SELECT o.message_id, o.recipient_actor
-		FROM notification_outbox o JOIN messages m ON m.message_id = o.message_id
+		FROM notification_outbox o JOIN legacy_messages m ON m.message_id = o.message_id
 		WHERE (o.state = 'pending' OR o.state = 'processing') AND o.available_at_ns <= ?
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)
 		ORDER BY o.created_at_ns, o.message_id, o.recipient_actor LIMIT 1`,

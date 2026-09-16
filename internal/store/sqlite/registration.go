@@ -423,8 +423,8 @@ func (s *Store) RearmAcceptedNotifications(ctx context.Context, actor string) er
 		SET state = 'done', available_at_ns = ?, last_error = 'message expired before recipient claim'
 		WHERE recipient_actor = ? AND state = 'accepted'
 		  AND EXISTS (
-			SELECT 1 FROM messages
-			WHERE messages.message_id = notification_outbox.message_id
+			SELECT 1 FROM legacy_messages
+			WHERE legacy_messages.message_id = notification_outbox.message_id
 			  AND expires_at_ns IS NOT NULL AND expires_at_ns <= ?
 		  )`, now.UnixNano(), actor, now.UnixNano()); err != nil {
 		return fmt.Errorf("close expired accepted notifications: %w", err)
@@ -441,8 +441,8 @@ func (s *Store) RearmAcceptedNotifications(ctx context.Context, actor string) er
 		SET state = 'pending', available_at_ns = ?, last_error = NULL
 		WHERE recipient_actor = ? AND state = 'accepted' AND attempt < 5
 		  AND EXISTS (
-			SELECT 1 FROM messages
-			WHERE messages.message_id = notification_outbox.message_id
+			SELECT 1 FROM legacy_messages
+			WHERE legacy_messages.message_id = notification_outbox.message_id
 			  AND (expires_at_ns IS NULL OR expires_at_ns > ?)
 		  )`, now.UnixNano(), actor, now.UnixNano()); err != nil {
 		return fmt.Errorf("rearm accepted notifications: %w", err)
@@ -542,6 +542,9 @@ func (s *Store) ExpireRegistration(ctx context.Context, actor, runID, sessionID,
 	}
 	if err := s.appendEventTx(ctx, tx, projectID, "operational", "session.stale", "", actor,
 		map[string]interface{}{"run_id": runID, "session_id": sessionID, "reason": reason}, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_attention_clients WHERE actor=? AND run_id=?`, actor, runID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

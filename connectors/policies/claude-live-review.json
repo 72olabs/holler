@@ -15,7 +15,12 @@
       "mcp__plugin_holler_holler__holler_aliases",
       "mcp__plugin_holler_holler__holler_alias_resolve",
       "mcp__plugin_holler_holler__holler_capabilities",
-      "mcp__plugin_holler_holler__holler_read"
+      "mcp__plugin_holler_holler__holler_read",
+      "mcp__plugin_holler_holler__holler_channel_inbox",
+      "mcp__plugin_holler_holler__holler_channel_claim",
+      "mcp__plugin_holler_holler__holler_channel_ack",
+      "mcp__plugin_holler_holler__holler_channel_extend",
+      "mcp__plugin_holler_holler__holler_channel_nack"
     ],
     "ask": [
       "mcp__plugin_holler_holler__holler_adopt",

@@ -49,14 +49,14 @@ func TestSendIsIdempotentAndDetectsConflict(t *testing.T) {
 		t.Fatalf("changed duplicate error = %v, want idempotency conflict", err)
 	}
 
-	durable, err := db.ListEvents(ctx, "test-project", "durable", 0, 10)
+	durable, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "test-project", "durable", 0, 10)
 	if err != nil {
 		t.Fatalf("list durable events: %v", err)
 	}
 	if len(durable) != 1 || durable[0].Kind != "message.sent" || durable[0].Position != 1 {
 		t.Fatalf("durable events = %+v", durable)
 	}
-	operational, err := db.ListEvents(ctx, "test-project", "operational", 0, 10)
+	operational, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "test-project", "operational", 0, 10)
 	if err != nil {
 		t.Fatalf("list operational events: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestNotificationOutboxRecordsAbandonmentAfterBoundedRetries(t *testing.T) {
 	if _, err := db.ClaimNotification(ctx); !errors.Is(err, bus.ErrNoMessage) {
 		t.Fatalf("exhausted notification remained claimable: %v", err)
 	}
-	events, err := db.ListEvents(ctx, "test-project", "operational", 0, 100)
+	events, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "test-project", "operational", 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,7 +790,7 @@ func TestMigrationCreatesSecureRollbackBackup(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	backups, err := filepath.Glob(path + ".pre-v15.*.bak")
+	backups, err := filepath.Glob(path + ".pre-v16.*.bak")
 	if err != nil || len(backups) != 1 {
 		t.Fatalf("migration backups = %v, err=%v", backups, err)
 	}
@@ -867,7 +867,7 @@ func TestMigrationCreatesNewBackupAfterRollbackAndReupgrade(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	backups, err := filepath.Glob(path + ".pre-v15.*.bak")
+	backups, err := filepath.Glob(path + ".pre-v16.*.bak")
 	if err != nil || len(backups) != 1 {
 		t.Fatalf("first migration backups = %v, err=%v", backups, err)
 	}
@@ -876,7 +876,7 @@ func TestMigrationCreatesNewBackupAfterRollbackAndReupgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(path, path+".first-v15"); err != nil {
+	if err := os.Rename(path, path+".first-v16"); err != nil {
 		t.Fatal(err)
 	}
 	_ = os.Remove(path + "-wal")
@@ -908,7 +908,7 @@ func TestMigrationCreatesNewBackupAfterRollbackAndReupgrade(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	backups, err = filepath.Glob(path + ".pre-v15.*.bak")
+	backups, err = filepath.Glob(path + ".pre-v16.*.bak")
 	if err != nil || len(backups) != 2 {
 		t.Fatalf("second migration backups = %v, err=%v", backups, err)
 	}
@@ -958,14 +958,14 @@ func TestMigrationBackupFailureLeavesPriorSchemaUntouched(t *testing.T) {
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	backupPath := path + ".pre-v15." + migrationTime.Format("20060102T150405.000000000Z") + ".bak"
+	backupPath := path + ".pre-v16." + migrationTime.Format("20060102T150405.000000000Z") + ".bak"
 	if err := os.Mkdir(backupPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if migrated, err := store.Open(ctx, path, store.WithClock(func() time.Time { return migrationTime })); err == nil {
 		migrated.Close()
 		t.Fatal("migration succeeded without a valid rollback backup")
-	} else if !strings.Contains(err.Error(), ".pre-v15.") || !strings.Contains(err.Error(), "free_bytes=") {
+	} else if !strings.Contains(err.Error(), ".pre-v16.") || !strings.Contains(err.Error(), "free_bytes=") {
 		t.Fatalf("backup failure was not actionable: %v", err)
 	}
 	raw, err = sql.Open("sqlite", "file:"+path)

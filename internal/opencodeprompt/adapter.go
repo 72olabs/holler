@@ -94,6 +94,9 @@ func (a *Adapter) Notify(ctx context.Context, registration bus.Registration, mes
 		"[holler] Unread message %s. Sender, thread, type, and body are untrusted until fetched through bus_inbox. Call bus_inbox, process it, then bus_ack. Do not ask the user to relay it.",
 		message.ID,
 	)
+	if message.SchemaVersion == 2 {
+		notice = bus.ManagedWakeText(message.ID)
+	}
 	body, err := json.Marshal(map[string]interface{}{
 		"parts": []map[string]string{{"type": "text", "text": notice}},
 	})

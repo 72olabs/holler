@@ -47,7 +47,8 @@ class CatalogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             scenario_dir = Path(directory)
             for source in (SCRIPT_DIR / "scenarios").glob("C*.json"):
-                shutil.copy2(source, scenario_dir / source.name)
+                if int(source.stem[1:]) < 9:
+                    shutil.copy2(source, scenario_dir / source.name)
             custom = {
                 "schema_version": 1,
                 "id": "C9",

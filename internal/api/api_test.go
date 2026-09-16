@@ -257,7 +257,7 @@ func TestUnixAPIAdoptionFencesSourceAndReportsFreshContinuityIdentity(t *testing
 	if err := legacy.ExpireRegistration(ctx, sourceActor, "source-run", "source-session", "post-adoption-session-end"); err != nil {
 		t.Fatalf("legacy retired-source cleanup: %v", err)
 	}
-	events, err := db.ListEvents(ctx, "coupon", "operational", 0, 100)
+	events, err := db.ListEvents(bus.WithCaller(ctx, bus.Caller{Actor: "operator"}), "coupon", "operational", 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

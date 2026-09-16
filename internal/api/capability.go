@@ -77,6 +77,9 @@ func (s *Server) invokeCapability(ctx context.Context, identity Identity, expect
 	}
 	registration, exists := s.capabilities[invocation.Name]
 	if !exists {
+		if strings.HasPrefix(invocation.Name, "channel.") {
+			return nil, fmt.Errorf("enable --conversations on hollerd to use managed conversation operations: %w", bus.ErrChannelCapability)
+		}
 		return nil, &bus.ValidationError{Field: "capability", Problem: "is not supported: " + invocation.Name}
 	}
 	if registration.descriptor.Mode != expected {
@@ -157,13 +160,13 @@ func defaultCapabilities() []registeredCapability {
 		{
 			descriptor: bus.CapabilityDescriptor{
 				Name: "actor.archive_preflight", Mode: bus.CapabilityRead, Since: "0.7.0",
-				Description: "Show aliases, live presence, claims, continuity, and untrusted unread previews before actor archival.",
+				Description: "Show aliases, live presence, claims, continuity, and untrusted unread previews before actor archival. Restricted to the actor itself or the operator.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"actor": stringProperty("canonical actor to inspect"),
 					"limit": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100},
 				}, "actor"),
 			},
-			handler: func(ctx context.Context, store Store, _ Identity, raw json.RawMessage) (interface{}, error) {
+			handler: func(ctx context.Context, store Store, identity Identity, raw json.RawMessage) (interface{}, error) {
 				var args struct {
 					Actor string `json:"actor"`
 					Limit int    `json:"limit"`
@@ -171,7 +174,7 @@ func defaultCapabilities() []registeredCapability {
 				if err := decodeStrict(raw, &args); err != nil {
 					return nil, err
 				}
-				return store.ArchivePreflight(ctx, args.Actor, args.Limit)
+				return archivePreflightForIdentity(ctx, store, identity, args.Actor, args.Limit)
 			},
 		},
 		{

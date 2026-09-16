@@ -84,7 +84,7 @@ func (s *Store) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.A
 	var activeClaims int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*)
-		FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+		FROM deliveries d JOIN legacy_messages m ON m.message_id = d.message_id
 		WHERE d.recipient_actor = ? AND d.state = ? AND d.lease_expires_at_ns > ?
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)`, req.SourceActor,
 		bus.DeliveryClaimed, now.UnixNano(), now.UnixNano()).Scan(&activeClaims); err != nil {
@@ -99,7 +99,7 @@ func (s *Store) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.A
 			SELECT 1 FROM deliveries target
 			WHERE target.message_id = d.message_id AND target.recipient_actor = ?
 		) THEN 1 ELSE 0 END), 0)
-		FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+		FROM deliveries d JOIN legacy_messages m ON m.message_id = d.message_id
 		WHERE d.recipient_actor = ? AND d.state IN (?, ?)
 		  AND (d.state = ? OR d.lease_expires_at_ns <= ?)
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)`, req.AdoptingActor, req.SourceActor,
@@ -125,7 +125,7 @@ func (s *Store) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.A
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE notification_outbox AS source
 		SET state = 'done', available_at_ns = ?, last_error = 'deduplicated during actor adoption'
-		WHERE source.recipient_actor = ? AND EXISTS (
+		WHERE source.source = 'legacy' AND source.recipient_actor = ? AND EXISTS (
 			SELECT 1 FROM notification_outbox target
 			WHERE target.message_id = source.message_id AND target.recipient_actor = ?
 		)`, now.UnixNano(), req.SourceActor, req.AdoptingActor); err != nil {
@@ -135,7 +135,7 @@ func (s *Store) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.A
 		UPDATE notification_outbox
 		SET recipient_actor = ?, state = CASE WHEN state = 'done' THEN 'done' ELSE 'pending' END,
 		    available_at_ns = ?, last_error = NULL
-		WHERE recipient_actor = ? AND state != 'done'`, req.AdoptingActor, now.UnixNano(), req.SourceActor); err != nil {
+		WHERE source = 'legacy' AND recipient_actor = ? AND state != 'done'`, req.AdoptingActor, now.UnixNano(), req.SourceActor); err != nil {
 		return bus.AdoptResult{}, fmt.Errorf("retarget adopted notifications: %w", err)
 	}
 	// A source wake may already be terminal because the old actor was offline or
@@ -147,7 +147,7 @@ func (s *Store) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.A
 			message_id, recipient_actor, state, available_at_ns, created_at_ns
 		)
 		SELECT d.message_id, ?, 'pending', ?, ?
-		FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+		FROM deliveries d JOIN legacy_messages m ON m.message_id = d.message_id
 		WHERE d.recipient_actor = ? AND d.state IN (?, ?)
 		  AND (d.state = ? OR d.lease_expires_at_ns <= ?)
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)
@@ -174,6 +174,9 @@ func (s *Store) AdoptActor(ctx context.Context, request bus.AdoptRequest) (bus.A
 }
 
 func normalizeAdoptRequest(request bus.AdoptRequest) (bus.AdoptRequest, error) {
+	if bus.IsHumanActor(request.SourceActor) || bus.IsHumanActor(request.AdoptingActor) {
+		return bus.AdoptRequest{}, bus.ErrChannelCapability
+	}
 	request.SourceActor = strings.TrimSpace(request.SourceActor)
 	request.AdoptingActor = strings.TrimSpace(request.AdoptingActor)
 	request.AdoptingRun = strings.TrimSpace(request.AdoptingRun)

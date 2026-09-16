@@ -24,7 +24,13 @@ import (
 //go:embed schema.sql
 var schema string
 
-const migrationVersion = 15
+//go:embed conversation_schema.sql
+var conversationSchema string
+
+//go:embed channel_table.sql
+var channelTable string
+
+const migrationVersion = 16
 
 const (
 	migrationRetryWindow = 5 * time.Second
@@ -38,6 +44,7 @@ type Store struct {
 	migrationBackupPath string
 	now                 func() time.Time
 	newID               func(string) (string, error)
+	conversationSecret  [32]byte
 }
 
 type Option func(*Store)
@@ -87,6 +94,10 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	db.SetMaxIdleConns(0)
 
 	store := &Store{db: db, path: abs, now: time.Now, newID: randomID}
+	if _, err := rand.Read(store.conversationSecret[:]); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize conversation token key: %w", err)
+	}
 	for _, option := range options {
 		option(store)
 	}
@@ -389,6 +400,9 @@ func (s *Store) applyMigrations(ctx context.Context, conn *sql.Conn) error {
 	if _, err := conn.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	if _, err := conn.ExecContext(ctx, channelTable); err != nil {
+		return fmt.Errorf("create canonical channels: %w", err)
+	}
 	for _, addition := range []struct {
 		table, column, definition string
 	}{
@@ -400,6 +414,9 @@ func (s *Store) applyMigrations(ctx context.Context, conn *sql.Conn) error {
 		{"registrations", "working_directory", "working_directory TEXT NOT NULL DEFAULT ''"},
 		{"actor_allocations", "provisional", "provisional INTEGER NOT NULL DEFAULT 0"},
 		{"messages", "requested_recipients_json", "requested_recipients_json BLOB"},
+		{"messages", "conversation_id", "conversation_id TEXT REFERENCES channels(channel_id)"},
+		{"messages", "channel_seq", "channel_seq INTEGER"},
+		{"notification_outbox", "source", "source TEXT NOT NULL DEFAULT 'legacy'"},
 		{"host_attention_bindings", "admitted_at_ns", "admitted_at_ns INTEGER"},
 	} {
 		hasColumn, err := columnExists(ctx, conn, addition.table, addition.column)
@@ -412,6 +429,9 @@ func (s *Store) applyMigrations(ctx context.Context, conn *sql.Conn) error {
 				return fmt.Errorf("add %s.%s: %w", addition.table, addition.column, err)
 			}
 		}
+	}
+	if _, err := conn.ExecContext(ctx, conversationSchema); err != nil {
+		return fmt.Errorf("apply conversation schema: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `UPDATE registrations SET registered_at_ns = updated_at_ns WHERE registered_at_ns IS NULL`); err != nil {
 		return fmt.Errorf("backfill registration timestamps: %w", err)
@@ -484,6 +504,9 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 	req, err := bus.NormalizeSendRequest(request)
 	if err != nil {
 		return bus.SendResult{}, err
+	}
+	if bus.IsHumanActor(req.FromActor) {
+		return bus.SendResult{}, bus.ErrChannelCapability
 	}
 	now := s.now().UTC()
 	if req.ExpiresAt != nil && !req.ExpiresAt.After(now) {
@@ -565,6 +588,11 @@ func (s *Store) Send(ctx context.Context, request bus.SendRequest) (bus.SendResu
 		}
 	}
 	req.ToActors = resolved
+	for _, actor := range resolved {
+		if bus.IsHumanActor(actor) {
+			return bus.SendResult{}, bus.ErrChannelCapability
+		}
+	}
 	for _, actor := range append([]string{req.FromActor}, req.ToActors...) {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO actor_names(actor, first_seen_at_ns) VALUES (?, ?)`, actor, now.UnixNano()); err != nil {
@@ -706,7 +734,7 @@ func (s *Store) CheckInbox(ctx context.Context, actor string, limit int) ([]bus.
 		       c.state, c.attempt, m.created_at_ns, m.expires_at_ns, c.lease_expires_at_ns,
 		       c.original_recipient_actor
 		FROM candidates c
-		JOIN messages m ON m.message_id = c.message_id
+		JOIN legacy_messages m ON m.message_id = c.message_id
 		WHERE c.preference = 1 AND c.state IN (?, ?)
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)
 		ORDER BY m.created_at_ns, m.message_id
@@ -774,7 +802,7 @@ func (s *Store) Claim(ctx context.Context, actor, messageID string, lease time.D
 			WHERE (d.recipient_actor = ? AND a.source_actor IS NULL) OR a.adopting_actor = ?
 		)
 		SELECT m.message_id, c.original_recipient_actor
-		FROM candidates c JOIN messages m ON m.message_id = c.message_id
+		FROM candidates c JOIN legacy_messages m ON m.message_id = c.message_id
 		WHERE c.preference = 1
 		  AND (c.state = ? OR (c.state = ? AND c.lease_expires_at_ns <= ?))
 		  AND (m.expires_at_ns IS NULL OR m.expires_at_ns > ?)`
@@ -952,20 +980,8 @@ func (s *Store) finish(ctx context.Context, actor, messageID, leaseToken string,
 		}
 		return fmt.Errorf("read delivery: %w", err)
 	}
-	if state == bus.DeliveryAcked && ack && terminalToken.Valid && terminalToken.String == leaseToken {
-		return nil
-	}
-	if state == bus.DeliveryDeadLettered && final && !ack && terminalToken.Valid && terminalToken.String == leaseToken {
-		return nil
-	}
-	if terminalToken.Valid && terminalToken.String == leaseToken && state == bus.DeliveryQueued {
-		return bus.ErrDeliveryTerminal
-	}
-	if state == bus.DeliveryAcked || state == bus.DeliveryDeadLettered {
-		return bus.ErrDeliveryTerminal
-	}
-	if state != bus.DeliveryClaimed || !storedToken.Valid || storedToken.String != leaseToken {
-		return bus.ErrLeaseTokenMismatch
+	if done, err := finishDeliveryState(state, storedToken, terminalToken, leaseToken, ack, final); done || err != nil {
+		return err
 	}
 	message, err := getMessageByIDTx(ctx, tx, messageID)
 	if err != nil {
@@ -1053,12 +1069,21 @@ func (s *Store) ListEvents(ctx context.Context, partition, stream string, after 
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
+	actor := bus.CallerFromContext(ctx).Actor
+	if actor == "" {
+		return nil, bus.ErrChannelDenied
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT event_id, partition_id, stream, position, kind,
 		       COALESCE(message_id, ''), COALESCE(actor_id, ''), payload, created_at_ns
 		FROM events
 		WHERE partition_id = ? AND stream = ? AND position > ?
-		ORDER BY position LIMIT ?`, partition, stream, after, limit)
+		  AND (? = 'operator'
+		    OR (message_id IS NOT NULL AND EXISTS (
+		      SELECT 1 FROM legacy_messages m WHERE m.message_id=events.message_id
+		      AND (m.from_actor=? OR EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id=m.message_id AND d.recipient_actor=?))))
+		    OR (message_id IS NULL AND actor_id=?))
+		ORDER BY position LIMIT ?`, partition, stream, after, actor, actor, actor, actor, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query events: %w", err)
 	}
@@ -1123,13 +1148,17 @@ func (s *Store) appendEventTx(ctx context.Context, tx *sql.Tx, partition, stream
 
 func getMessageByIdempotencyTx(ctx context.Context, tx *sql.Tx, actor, key string) (bus.Message, error) {
 	var messageID string
+	var conversationID sql.NullString
 	if err := tx.QueryRowContext(ctx,
-		`SELECT message_id FROM messages WHERE from_actor = ? AND idempotency_key = ?`,
-		actor, key).Scan(&messageID); err != nil {
+		`SELECT message_id, conversation_id FROM messages WHERE from_actor = ? AND idempotency_key = ?`,
+		actor, key).Scan(&messageID, &conversationID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return bus.Message{}, bus.ErrNotFound
 		}
 		return bus.Message{}, fmt.Errorf("find idempotent message: %w", err)
+	}
+	if conversationID.Valid {
+		return bus.Message{}, bus.ErrIdempotencyConflict
 	}
 	return getMessageByIDTx(ctx, tx, messageID)
 }
@@ -1146,7 +1175,7 @@ func getMessageByIDTx(ctx context.Context, tx *sql.Tx, messageID string) (bus.Me
 		       thread_id, from_actor, from_run, from_role, message_type,
 		       delivery_request, COALESCE(in_reply_to, ''), body, created_at_ns, expires_at_ns,
 		       requested_recipients_json
-		FROM messages WHERE message_id = ?`, messageID).Scan(
+		FROM legacy_messages WHERE message_id = ?`, messageID).Scan(
 		&message.ID, &message.SchemaVersion, &message.IdempotencyKey, &message.ProjectID,
 		&message.ChannelID, &threadID, &message.FromActor, &message.FromRun, &fromRole,
 		&message.Type, &message.DeliveryRequest, &message.InReplyTo, &body, &createdNS, &expiresNS,

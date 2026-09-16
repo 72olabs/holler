@@ -42,6 +42,20 @@ func TestAdapterReturnsBoundedFailureDetail(t *testing.T) {
 	}
 }
 
+func TestManagedAdapterNamesTheNegotiatedCapabilityPath(t *testing.T) {
+	var notice string
+	adapter := codexqueue.New("test", time.Second, func(_ context.Context, _ string, args ...string) (string, string, int, error) {
+		notice = strings.Join(args, " ")
+		return "", "", 0, nil
+	})
+	if _, ok := adapter.Notify(context.Background(), bus.Registration{DeliveryHandle: "session"}, bus.Message{ID: "managed-1", SchemaVersion: 2, FromActor: "private-sender", Body: []byte(`"private-body"`)}); !ok {
+		t.Fatal("not accepted")
+	}
+	if !strings.Contains(notice, "holler_write") || !strings.Contains(notice, "channel.claim") || strings.Contains(notice, "private-") {
+		t.Fatalf("notice: %s", notice)
+	}
+}
+
 func TestAdapterResolvesBinaryForEveryNotification(t *testing.T) {
 	binary := "/first/codex"
 	var commands []string

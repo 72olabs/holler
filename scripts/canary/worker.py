@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import errno
 import fcntl
 import json
@@ -39,6 +40,7 @@ from clients import (  # noqa: E402
     codex_live_command,
 )
 from handler_contract import HandlerContractError, handler_path, load_handler  # noqa: E402
+from managed import ManagedFixture  # noqa: E402
 from manifest import ManifestError, canonical_json, load_request, sha256_bytes, sha256_file  # noqa: E402
 
 
@@ -720,8 +722,12 @@ class BudgetedInteractiveSession:
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> bool:
         if self.process is not None:
-            self.process.close()
-            self.process = None
+            try:
+                if self.client == "claude" and _type is None:
+                    self.process.graceful_claude_exit()
+            finally:
+                self.process.close()
+                self.process = None
         return False
 
     def turn(self, prompt: str, expect_marker: str, timeout: float = 180) -> None:
@@ -738,6 +744,18 @@ class BudgetedInteractiveSession:
             wall_seconds=time.monotonic() - started,
         )
 
+    def wake(self, trigger: Any, expect_marker: str, timeout: float = 180) -> Any:
+        """Reserve one unsolicited turn before triggering; never submit user input."""
+        if self.process is None or not expect_marker.endswith(f"_{self.marker_suffix}"):
+            raise CanaryFailure("wake requires a live session and scenario marker")
+        self.ledger.ensure_capacity(client=self.client, turns=1)
+        after = self.process.checkpoint()
+        started = time.monotonic()
+        result = trigger()
+        self.process.wait_for(expect_marker, timeout, after=after)
+        self.ledger.charge(client=self.client, turns=1, wall_seconds=time.monotonic() - started)
+        return result
+
 
 class HandlerContext:
     """Narrow, budget-aware API for committed contributor handlers."""
@@ -751,6 +769,8 @@ class HandlerContext:
         "_wait_for_registration",
         "_query",
         "_set_check",
+        "_managed",
+        "_wait_for_ended",
     )
 
     def __init__(self, worker: "Worker"):
@@ -761,6 +781,8 @@ class HandlerContext:
         self._wait_for_registration = worker.wait_for_live_registration
         self._set_check = lambda name: setattr(worker, "active_check", name)
         self._query = worker.handler_query
+        self._managed = worker.managed_fixture
+        self._wait_for_ended = worker.wait_for_no_live_registration
         self._interactive = lambda client, actor, run_id, extra_args: BudgetedInteractiveSession(
             client=client,
             actor=actor,
@@ -818,6 +840,12 @@ class HandlerContext:
     def query(self, kind: str, *, partition: str = "canary") -> Any:
         return self._query(kind, partition=partition)
 
+    def managed(self) -> ManagedFixture:
+        return self._managed()
+
+    def wait_for_session_end(self, actor: str, run_id: str, client: str) -> None:
+        self._wait_for_ended(actor, run_id, harness=client)
+
     def check(self, name: str) -> None:
         if not name or len(name) > 128:
             raise CanaryFailure("handler check names must contain 1-128 characters")
@@ -873,6 +901,12 @@ class Worker:
         self.results: list[dict[str, Any]] = []
         self.active_scenario = "initialization"
         self.active_check = "initialization"
+        configurations = [s["daemon"] for s in request["scenarios"] if "daemon" in s]
+        self.managed_config = configurations[0] if configurations else None
+        if any(item != self.managed_config for item in configurations):
+            raise CanaryFailure("selected scenarios have conflicting daemon configurations")
+        self.human_url = ""
+        self.human_credentials = self.runtime / "human" / "credentials.json"
 
     def prepare(self) -> None:
         for directory in (self.home, self.runtime, self.package.parent):
@@ -891,8 +925,17 @@ class Worker:
     def start_daemon(self) -> None:
         self.socket.parent.mkdir(parents=True, exist_ok=True)
         log = (self.socket.parent / "hollerd.log").open("a", encoding="utf-8")
+        log_offset = log.tell()
+        args = [str(self.hollerd), "--db", str(self.database), "--socket", str(self.socket)]
+        if getattr(self, "managed_config", None):
+            self.human_credentials.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            args.extend([
+                "--conversations", "--human-listen", "127.0.0.1:0",
+                "--human-actor", "human:canary", "--human-scope", "observe+admin",
+                "--human-credentials", str(self.human_credentials.resolve()),
+            ])
         self.daemon = subprocess.Popen(
-            [str(self.hollerd), "--db", str(self.database), "--socket", str(self.socket)],
+            args,
             cwd=self.fixture,
             env=self.env,
             stdout=log,
@@ -900,6 +943,7 @@ class Worker:
             text=True,
             start_new_session=True,
         )
+        log.close()
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if self.daemon.poll() is not None:
@@ -911,6 +955,19 @@ class Worker:
                     env=self.env,
                     timeout=2,
                 )
+                if getattr(self, "managed_config", None):
+                    with (self.socket.parent / "hollerd.log").open() as ready:
+                        ready.seek(log_offset)
+                        for line in ready:
+                            try:
+                                record = json.loads(line)
+                            except ValueError:
+                                continue
+                            if record.get("human_gateway", "").startswith("http://127.0.0.1:"):
+                                self.human_url = record["human_gateway"]
+                                return
+                    time.sleep(0.2)
+                    continue
                 return
             except CanaryFailure:
                 time.sleep(0.2)
@@ -925,6 +982,57 @@ class Worker:
         except subprocess.TimeoutExpired:
             os.killpg(self.daemon.pid, signal.SIGKILL)
             self.daemon.wait(timeout=5)
+
+    def managed_fixture(self) -> ManagedFixture:
+        if not self.managed_config:
+            raise CanaryFailure("managed fixture requires hash-bound daemon configuration")
+        def fail(reason: str) -> None:
+            raise CanaryFailure(reason)
+        return ManagedFixture(
+            socket_path=self.socket, credentials=self.human_credentials,
+            endpoint=lambda: self.human_url, restart=self.managed_restart,
+            snapshot=self.managed_snapshot, fail=fail,
+        )
+
+    def managed_restart(self) -> None:
+        self.stop_daemon()
+        self.start_daemon()
+
+    def managed_snapshot(self, message_ids: list[str]) -> list[dict]:
+        if not self.managed_config or not 1 <= len(message_ids) <= 16 or any(
+            not re.fullmatch(r"msg_[a-zA-Z0-9]+", item) for item in message_ids
+        ):
+            raise CanaryFailure("invalid managed terminal projection request")
+        for entry in self.actor_directory().get("actors", []):
+            if any(session.get("state") == "live" for session in entry.get("sessions", [])):
+                raise CanaryFailure("managed terminal projection requires all client sessions ended")
+        self.stop_daemon()
+        if (self.daemon is not None and self.daemon.poll() is None) or self.socket.exists():
+            raise CanaryFailure("managed terminal projection requires stopped daemon")
+        try:
+            with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as connection:
+                connection.row_factory = sqlite3.Row
+                if connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] != 16:
+                    raise CanaryFailure("managed terminal projection requires schema 16")
+                result = []
+                for message_id in message_ids:
+                    for actor in ("canary-claude", "canary-codex"):
+                        row = connection.execute(
+                            "SELECT state,attempt FROM managed_deliveries WHERE message_id=? AND recipient_actor=?",
+                            (message_id, actor),
+                        ).fetchone()
+                        item = {"message_id": message_id, "recipient_actor": actor,
+                                "state": row["state"] if row else "absent", "attempt": row["attempt"] if row else 0}
+                        for label, kind in (("claims", "delivery.claimed"), ("acks", "delivery.ack"),
+                                            ("attention_attempts", "attention.attempted"), ("attention_adapters", "attention.adapter")):
+                            item[label] = connection.execute(
+                                "SELECT count(*) FROM channel_events WHERE message_id=? AND actor=? AND kind=?",
+                                (message_id, actor, kind),
+                            ).fetchone()[0]
+                        result.append(item)
+        finally:
+            self.start_daemon()
+        return result
 
     def setup_connectors(
         self,
@@ -2022,6 +2130,14 @@ class Worker:
                 "observed_model_turns": observed_turns,
                 "assertions": [{"name": check, "status": "PASS"} for check in checks],
             }
+            if "test_environment" in scenario:
+                result["test_environment"] = scenario["test_environment"]
+                for assertion in result["assertions"]:
+                    assertion["oracle"] = (
+                        "offline-projection-and-public-api" if assertion["name"] in
+                        {"recipient-independence", "terminal-ack-exactly-once", "terminal-no-duplicates", "non-attended-member"}
+                        else "protocol-api" if scenario["id"] == "C9" else "real-client-and-public-api"
+                    )
             if observed_turns != estimated_turns:
                 result["status"] = "FAIL"
                 self.results.append(result)

@@ -2,7 +2,9 @@
 
 This document describes the API implemented by the current Go build.
 Operations not listed here are not part of the public alpha contract. This is
-a universal local protocol over a Unix socket, not an HTTP or network API.
+a universal local protocol over a Unix socket. The opt-in managed conversation
+capabilities and separate loopback human gateway are documented in
+[Managed conversations](CONVERSATIONS.md); they do not replace this legacy API.
 
 ## Boundary
 
@@ -242,6 +244,8 @@ resolves the unavailable condition.
 - `set_actor_profile {project_id, role_text, accepts}`
 - `who {limit, include_archived}`
 - `archive_preflight {actor, limit}`
+  is restricted to the actor itself or the operator; other callers receive `not_found`.
+  The same restriction applies to the `actor.archive_preflight` capability.
 - `archive_actor {actor, allow_unread}`
 - `restore_actor {actor}`
 - `revoke_delivery_lease {actor, message_id, crash_grace_ns}`

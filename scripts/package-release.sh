@@ -31,6 +31,7 @@ cp -R "${repo_dir}/connectors/marketplace/plugins/claude-holler" "${package_root
 cp -R "${repo_dir}/connectors/marketplace/plugins/opencode-holler" "${package_root}/share/holler/marketplace/plugins/"
 cp "${repo_dir}/README.md" "${package_root}/"
 cp "${repo_dir}/RELEASE-NOTES.md" "${package_root}/"
+cp "${repo_dir}/CONVERSATIONS.md" "${package_root}/"
 cp "${repo_dir}/SECURITY.md" "${package_root}/"
 cp "${repo_dir}/LICENSE" "${package_root}/"
 

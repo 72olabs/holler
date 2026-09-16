@@ -1,3 +1,21 @@
+# Unreleased — opt-in managed conversations
+
+- Add internal 1:1 DMs, named private channels, channel-local threads, declared
+  human observation, reference-only continuations and designated responses.
+- Add an authenticated loopback Studio view with personal read/unread, snooze,
+  mute/archive and explicit human participation. Off unless configured.
+- SQLite migration 16 preserves legacy history and uses the existing backup path.
+  Wire protocol remains 1; legacy diagnostic access is tightened to self/operator.
+- Add five narrow managed-delivery MCP tools. The tool-surface authorization hash
+  changes: upgraded connectors require operator policy review/reauthorization and
+  a fresh session. Source setup regenerates the matching policy with backups;
+  no running installation is automatically changed by this implementation.
+- Public/mobile/multi-owner channels, controlled sharing, non-designated response
+  modes and live-human release certification remain deferred. See
+  [the implementation guide](CONVERSATIONS.md) for trial and validation details.
+
+---
+
 # Holler 0.7.4
 
 Holler 0.7.4 strengthens Claude identity continuity and makes release testing

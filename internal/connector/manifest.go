@@ -80,6 +80,11 @@ var commonTools = []ToolPermission{
 	{Name: "holler_capabilities", Class: "read-only"},
 	{Name: "holler_read", Class: "read-only"},
 	{Name: "holler_write", Class: "dynamic-write", RequiresExplicitApproval: true},
+	{Name: "holler_channel_inbox", Class: "read-only"},
+	{Name: "holler_channel_claim", Class: "leased-write"},
+	{Name: "holler_channel_ack", Class: "idempotent-write"},
+	{Name: "holler_channel_extend", Class: "idempotent-write"},
+	{Name: "holler_channel_nack", Class: "leased-write"},
 }
 
 var commonProfiles = []CapabilityProfile{
