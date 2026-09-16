@@ -28,6 +28,81 @@ from budget import BudgetExceeded, BudgetLedger
 
 
 class FrameTests(unittest.TestCase):
+    def interactive_session(self, client, events, registration=None):
+        ledger = BudgetLedger({"claude_usd": 1, "codex_reported_tokens": 100,
+                               "model_turns": 4, "wall_seconds": 60})
+        def register(*args):
+            events.append(("registration", ledger.model_turns))
+            if registration:
+                registration()
+        return BudgetedInteractiveSession(
+            client=client, actor="canary-" + client, run_id="run", extra_args=(),
+            config=client_policy()[client], launcher=lambda *args: [],
+            wait_for_registration=register, fixture=Path("/tmp"), env={}, ledger=ledger,
+            marker_suffix="SUFFIX", phase=lambda name: events.append(("phase", name)))
+
+    def fake_process(self, events):
+        return SimpleNamespace(
+            wait_until_ready=lambda *args, **kwargs: events.append(("ready",)),
+            wait_until_quiet=lambda *args, **kwargs: None,
+            normalized_output=lambda: "", submit=lambda *args, **kwargs: events.append(("submit",)),
+            close=lambda: events.append(("close",)), graceful_claude_exit=lambda: None)
+
+    def test_interactive_client_registration_order_and_first_turn_only(self):
+        for client in ("claude", "codex"):
+            with self.subTest(client=client):
+                events = []
+                session = self.interactive_session(client, events)
+                with patch("worker.PtyProcess", return_value=self.fake_process(events)):
+                    with session:
+                        self.assertEqual(session.registered, client == "claude")
+                        session.turn("instruction", "ARMED_SUFFIX")
+                        session.turn("instruction", "SECOND_SUFFIX")
+                ordered = [e for e in events if e[0] in {"registration", "submit"}]
+                self.assertEqual(ordered, [("registration", 0), ("submit",), ("submit",)] if client == "claude"
+                                 else [("submit",), ("registration", 1), ("submit",)])
+                self.assertEqual(session.ledger.model_turns, 2)
+
+    def test_registration_timeout_keeps_completed_turn_charge_and_failure_phase(self):
+        events = []
+        def fail():
+            raise CanaryFailure("private detail", code="registration-timeout")
+        session = self.interactive_session("codex", events, fail)
+        with patch("worker.PtyProcess", return_value=self.fake_process(events)):
+            with self.assertRaises(CanaryFailure) as caught:
+                with session:
+                    session.turn("instruction", "ARMED_SUFFIX")
+        self.assertEqual(caught.exception.code, "registration-timeout")
+        self.assertEqual(session.ledger.model_turns, 1)
+        self.assertEqual([e for e in events if e[0] == "phase"][-1], ("phase", "registration"))
+        self.assertIsNone(session.process)
+
+    def test_failed_first_submit_does_not_wait_for_registration(self):
+        events = []
+        session = self.interactive_session("codex", events)
+        process = self.fake_process(events)
+        def fail(*args, **kwargs):
+            raise CanaryFailure("missing marker")
+        process.submit = fail
+        with patch("worker.PtyProcess", return_value=process):
+            with self.assertRaises(CanaryFailure):
+                with session:
+                    session.turn("instruction", "ARMED_SUFFIX")
+        self.assertFalse(any(e[0] == "registration" for e in events))
+        self.assertEqual(session.ledger.model_turns, 0)
+
+    def test_wake_records_sent_id_before_marker_failure(self):
+        events = []
+        session = self.interactive_session("codex", events)
+        session.record_wake = lambda result: events.append(("sent", result["message"]["message_id"]))
+        def fail(*args, **kwargs):
+            raise CanaryFailure("private marker error")
+        session.process = SimpleNamespace(checkpoint=lambda: 0, wait_for=fail)
+        with self.assertRaises(CanaryFailure):
+            session.wake(lambda: {"message": {"message_id": "msg_test"}}, "WOKE_SUFFIX")
+        self.assertEqual(events, [("phase", "wake-trigger"), ("sent", "msg_test"), ("phase", "wake")])
+        self.assertEqual(session.ledger.model_turns, 0)
+
     def test_baseline_rejects_stale_approval_and_symlinks_without_writing(self):
         original = (SCRIPT_DIR.parents[1] / "connectors/policies/codex-live-review.toml").read_bytes()
         with tempfile.TemporaryDirectory() as directory:
@@ -163,6 +238,8 @@ class FrameTests(unittest.TestCase):
     def test_wake_reserves_budget_before_trigger_and_sends_no_input(self):
         session = object.__new__(BudgetedInteractiveSession)
         session.client = "claude"
+        session.phase = lambda name: None
+        session.record_wake = lambda result: None
         session.marker_suffix = "SUFFIX"
         session.ledger = BudgetLedger({"claude_usd": 1, "codex_reported_tokens": 100,
                                        "model_turns": 1, "wall_seconds": 60})
@@ -308,6 +385,21 @@ class ManagedDaemonTests(unittest.TestCase):
             with self.assertRaisesRegex(CanaryFailure, "sessions ended"):
                 self.worker.managed_snapshot(["msg_test"])
         self.assertIsNone(self.worker.daemon.poll())
+
+    def test_failure_diagnostic_preserves_projection_guards_and_primary_check(self):
+        w = self.worker
+        w.active_scenario, w.active_check, w.managed_wake_ids = "C11", "c11-codex-wake", ["msg_test"]
+        with patch.object(w, "actor_directory", return_value={"actors": [{"sessions": [{"state": "live"}]}]}):
+            self.assertEqual(w.managed_wake_failure_diagnostic(),
+                             {"status": "omitted", "reason": "projection-clients-live"})
+        self.assertIsNone(w.daemon.poll())
+        with patch.object(w, "stop_daemon", return_value=None):
+            self.assertEqual(w.managed_wake_failure_diagnostic(),
+                             {"status": "omitted", "reason": "projection-daemon-live"})
+        self.assertEqual(w.active_check, "c11-codex-wake")
+        self.assertEqual(w.managed_wake_failure_diagnostic()["status"], "captured")
+        w.active_check = "c11-codex-registration"
+        self.assertIsNone(w.managed_wake_failure_diagnostic())
 
     def test_non_attended_member_is_delivered_but_never_notified(self):
         f = self.fixture

@@ -66,6 +66,14 @@ python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
   controller-post failure checkpoints. Closed harness reason codes and known
   Codex tool terminal-status counts are exported without arguments, results,
   errors or transcript text. Missing telemetry never proves a denied call.
+- C11 separates entry, readiness, hook trust, arm, registration, wake trigger,
+  wake, exit and session-ended failure phases. Claude registers on entry; Codex
+  registers after its first completed (and charged) submitted turn, because that
+  turn triggers SessionStart. Registration timeout has a closed reason code.
+  On wake-marker failure only, sent IDs are retained for the same fixed terminal
+  projection described below. If lifecycle/daemon guards fail, the diagnostic is
+  omitted with a safe reason; it never bypasses a guard or replaces the original
+  failure. Failed interactive attempts may incur usage not charged by the ledger.
 - Marker strings are turn-accounting checkpoints, never the success oracle.
   API-visible messages, actor/run/thread correlation, response state, per-actor
   inboxes, negative claims, observer rights and view state are asserted separately.

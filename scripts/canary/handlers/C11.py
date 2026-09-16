@@ -24,6 +24,7 @@ def run(context):
                 + context.marker_instruction(ready), ready)
             sent = live.wake(lambda: f.post(controller, cid, "c11-" + client, attention=[actor]), woke)
             ids.append(sent["message"]["message_id"])
+        context.check("c11-" + client + "-session-ended")
         context.wait_for_session_end(actor, run_id, client)
         other = b if actor == a else a
         context.check("c11-non-attended-member-" + client)

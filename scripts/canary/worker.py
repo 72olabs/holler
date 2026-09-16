@@ -76,7 +76,8 @@ def terminal_query_responses(data: bytes, *, previous_tail_length: int = 0) -> b
 class CanaryFailure(RuntimeError):
     def __init__(self, message: str, *, code: str = "check-failed"):
         if code not in {"check-failed", "marker-missing", "write-policy-mismatch",
-                        "policy-invalid", "policy-restore-failed"}:
+                        "policy-invalid", "policy-restore-failed", "registration-timeout",
+                        "projection-clients-live", "projection-daemon-live"}:
             raise ValueError("unsupported canary failure code")
         super().__init__(message)
         self.code = code
@@ -260,6 +261,7 @@ def make_failure_evidence(
     error: BaseException,
     tool_counts: list[dict[str, Any]] | None = None,
     policy_audits: list[dict[str, Any]] | None = None,
+    wake_diagnostic: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "schema_version": 1,
@@ -285,6 +287,8 @@ def make_failure_evidence(
         evidence["tool_counts"] = tool_counts
     if policy_audits is not None:
         evidence["policy_audits"] = policy_audits
+    if wake_diagnostic is not None:
+        evidence["wake_diagnostic"] = wake_diagnostic
     evidence["evidence_hash"] = sha256_bytes(canonical_json(evidence))
     return evidence
 
@@ -812,6 +816,8 @@ class BudgetedInteractiveSession:
         env: dict[str, str],
         ledger: BudgetLedger,
         marker_suffix: str,
+        phase: Any = lambda name: None,
+        record_wake: Any = lambda result: None,
     ):
         if client not in {"claude", "codex"}:
             raise CanaryFailure(f"unsupported interactive client {client!r}")
@@ -826,9 +832,13 @@ class BudgetedInteractiveSession:
         self.env = env
         self.ledger = ledger
         self.marker_suffix = marker_suffix
+        self.phase = phase
+        self.record_wake = record_wake
+        self.registered = False
         self.process: PtyProcess | None = None
 
     def __enter__(self) -> "BudgetedInteractiveSession":
+        self.phase("entry")
         command = (
             claude_live_command(self.config)[1:]
             if self.client == "claude"
@@ -840,14 +850,16 @@ class BudgetedInteractiveSession:
             env=self.env,
         )
         try:
+            self.phase("readiness")
             if self.client == "claude":
                 self.process.wait_until_ready("$", 60, suffix=True)
+                self._register()
             else:
                 self.process.wait_until_ready("Ask Codex to do anything", 60)
                 self.process.wait_until_quiet(30, quiet_seconds=2)
+                self.phase("hooks")
                 if "Hooks need review" in self.process.normalized_output()[-5000:]:
                     raise CanaryFailure("Codex hook trust was not ready before interactive handler")
-            self.wait_for_registration(self.actor, self.run_id)
             return self
         except BaseException:
             self.process.close()
@@ -857,6 +869,8 @@ class BudgetedInteractiveSession:
     def __exit__(self, _type: object, _value: object, _traceback: object) -> bool:
         if self.process is not None:
             try:
+                if _type is None:
+                    self.phase("exit")
                 if self.client == "claude" and _type is None:
                     self.process.graceful_claude_exit()
             finally:
@@ -864,12 +878,18 @@ class BudgetedInteractiveSession:
                 self.process = None
         return False
 
+    def _register(self) -> None:
+        self.phase("registration")
+        self.wait_for_registration(self.actor, self.run_id)
+        self.registered = True
+
     def turn(self, prompt: str, expect_marker: str, timeout: float = 180) -> None:
         if self.process is None:
             raise CanaryFailure("interactive turn requires an open context manager")
         if not expect_marker.endswith(f"_{self.marker_suffix}") or expect_marker in prompt:
             raise CanaryFailure("interactive expected marker is invalid or appears in its prompt")
         self.ledger.ensure_capacity(client=self.client, turns=1)
+        self.phase("arm")
         started = time.monotonic()
         self.process.submit(prompt, marker=expect_marker, timeout=timeout)
         self.ledger.charge(
@@ -877,15 +897,22 @@ class BudgetedInteractiveSession:
             turns=1,
             wall_seconds=time.monotonic() - started,
         )
+        # Codex SessionStart is triggered by the first submitted turn, not TUI launch.
+        # Charge that completed turn even if registration subsequently times out.
+        if self.client == "codex" and not self.registered:
+            self._register()
 
     def wake(self, trigger: Any, expect_marker: str, timeout: float = 180) -> Any:
         """Reserve one unsolicited turn before triggering; never submit user input."""
         if self.process is None or not expect_marker.endswith(f"_{self.marker_suffix}"):
             raise CanaryFailure("wake requires a live session and scenario marker")
         self.ledger.ensure_capacity(client=self.client, turns=1)
+        self.phase("wake-trigger")
         after = self.process.checkpoint()
         started = time.monotonic()
         result = trigger()
+        self.record_wake(result)
+        self.phase("wake")
         self.process.wait_for(expect_marker, timeout, after=after)
         self.ledger.charge(client=self.client, turns=1, wall_seconds=time.monotonic() - started)
         return result
@@ -929,6 +956,8 @@ class HandlerContext:
             env=worker.env,
             ledger=worker.ledger,
             marker_suffix=self._marker_suffix,
+            phase=lambda name: self._set_check(f"{worker.active_scenario.lower()}-{client}-{name}"),
+            record_wake=worker.record_managed_wake,
         )
 
     @property
@@ -1044,6 +1073,7 @@ class Worker:
         self.active_check = "initialization"
         self.tool_counts: list[dict[str, Any]] = []
         self.policy_audits: list[dict[str, Any]] = []
+        self.managed_wake_ids: list[str] = []
         configurations = [s["daemon"] for s in request["scenarios"] if "daemon" in s]
         self.managed_config = configurations[0] if configurations else None
         if any(item != self.managed_config for item in configurations):
@@ -1151,10 +1181,11 @@ class Worker:
             raise CanaryFailure("invalid managed terminal projection request")
         for entry in self.actor_directory().get("actors", []):
             if any(session.get("state") == "live" for session in entry.get("sessions", [])):
-                raise CanaryFailure("managed terminal projection requires all client sessions ended")
+                raise CanaryFailure("managed terminal projection requires all client sessions ended",
+                                    code="projection-clients-live")
         self.stop_daemon()
         if (self.daemon is not None and self.daemon.poll() is None) or self.socket.exists():
-            raise CanaryFailure("managed terminal projection requires stopped daemon")
+            raise CanaryFailure("managed terminal projection requires stopped daemon", code="projection-daemon-live")
         try:
             with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as connection:
                 connection.row_factory = sqlite3.Row
@@ -1179,6 +1210,24 @@ class Worker:
         finally:
             self.start_daemon()
         return result
+
+    def record_managed_wake(self, result: Any) -> None:
+        if self.active_scenario == "C11":
+            mid = result.get("message", {}).get("message_id") if isinstance(result, dict) else None
+            if not isinstance(mid, str) or not re.fullmatch(r"msg_[a-zA-Z0-9]+", mid):
+                raise CanaryFailure("invalid managed wake message correlation")
+            self.managed_wake_ids.append(mid)
+
+    def managed_wake_failure_diagnostic(self) -> dict[str, Any] | None:
+        if self.active_scenario != "C11" or not self.active_check.endswith("-wake"):
+            return None
+        try:
+            return {"status": "captured", "deliveries": self.managed_snapshot(self.managed_wake_ids)}
+        except Exception as error:
+            # Never weaken lifecycle/daemon guards or replace the primary failure.
+            reason = error.code if isinstance(error, CanaryFailure) and error.code in {
+                "projection-clients-live", "projection-daemon-live"} else "projection-unavailable"
+            return {"status": "omitted", "reason": reason}
 
     def setup_connectors(
         self,
@@ -1310,7 +1359,7 @@ class Worker:
                 ):
                     return
             time.sleep(0.25)
-        raise CanaryFailure(f"{actor} did not create a live registration")
+        raise CanaryFailure(f"{actor} did not create a live registration", code="registration-timeout")
 
     def wait_for_no_live_registration(
         self,
@@ -2271,6 +2320,7 @@ class Worker:
             self.active_check = "scenario-start"
             self.tool_counts = []
             self.policy_audits = []
+            self.managed_wake_ids = []
             if "daemon" in scenario:
                 self.active_check = "managed-policy-baseline"
                 assert_fixture_policy_baseline(Path(self.env["CODEX_HOME"]) / "holler.config.toml")
@@ -2367,6 +2417,7 @@ def main() -> None:
                 error=error,
                 tool_counts=worker.tool_counts,
                 policy_audits=worker.policy_audits,
+                wake_diagnostic=worker.managed_wake_failure_diagnostic(),
             )
         finally:
             worker.stop_daemon()
