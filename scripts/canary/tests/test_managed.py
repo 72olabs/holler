@@ -21,7 +21,8 @@ from handler_contract import HandlerContractError, load_handler, validate_write_
 from managed import exchange, receive_exact
 from worker import (BudgetedInteractiveSession, CanaryFailure, PtyProcess, Worker,
                     approved_fixture_policy, assert_fixture_policy_baseline, fixture_write_policy,
-                    codex_tool_counts, make_failure_evidence, terminal_wait_diagnostic)
+                    codex_tool_counts, make_failure_evidence, terminal_wait_diagnostic,
+                    terminal_marker_seen, marker_instruction)
 from clients import client_policy
 from types import SimpleNamespace
 from budget import BudgetExceeded, BudgetLedger
@@ -44,9 +45,9 @@ class FrameTests(unittest.TestCase):
         self.assertNotIn("SECRET", json.dumps(evidence))
         self.assertNotIn("Please run", json.dumps(evidence))
 
-    def test_terminal_wait_distinguishes_exit_from_timeout_without_changing_matching(self):
+    def test_terminal_wait_distinguishes_exit_from_timeout(self):
         process = object.__new__(PtyProcess)
-        process.buffer = bytearray(b"SECRET DONE_\x1b[0mSUFFIX")
+        process.buffer = bytearray(b"SECRET no expected marker")
         process._read_available = lambda *args: None
         for exited in (True, False):
             with self.subTest(exited=exited):
@@ -55,9 +56,23 @@ class FrameTests(unittest.TestCase):
                     process.wait_for("DONE_SUFFIX", 0.001)
                 self.assertEqual(caught.exception.code, "terminal-client-exited" if exited else "terminal-marker-timeout")
                 self.assertEqual(caught.exception.terminal_diagnostic["client_running"], not exited)
-                self.assertTrue(caught.exception.terminal_diagnostic["normalized_marker_seen"])
+                self.assertFalse(caught.exception.terminal_diagnostic["normalized_marker_seen"])
+                self.assertGreaterEqual(caught.exception.terminal_diagnostic["elapsed_seconds"], 0)
         process.buffer = bytearray(b"DONE_SUFFIX")
         process.wait_for("DONE_SUFFIX", 0.001)
+
+    def test_terminal_marker_handles_styling_wrapping_and_excludes_prompt_echo(self):
+        marker = "C11_CLAUDE_ARMED_123456ABCDEF"
+        wrapped = b"C11_CLAUDE_\x1b[0mAR\r\nMED_123456ABCDEF"
+        self.assertNotIn(marker.encode(), wrapped)
+        self.assertTrue(terminal_marker_seen(wrapped, marker))
+        self.assertFalse(terminal_marker_seen(marker_instruction(marker).encode(), marker))
+        self.assertFalse(terminal_marker_seen(b"C11_CLAUDE_ARMED_DIFFERENT", marker))
+        process = object.__new__(PtyProcess)
+        process.buffer = bytearray(marker.encode() + wrapped)
+        process.wait_for(marker, 0.001, after=len(marker))
+        with self.assertRaisesRegex(CanaryFailure, "contains its expected"):
+            process.submit(wrapped.decode(), marker=marker, timeout=1)
 
     def interactive_session(self, client, events, registration=None):
         ledger = BudgetLedger({"claude_usd": 1, "codex_reported_tokens": 100,

@@ -78,7 +78,10 @@ python3 scripts/canary/harness.py checkpoint --tier core --scenario C9 --execute
   byte counts, process/marker booleans and fixed permission/auth/rate/API/tool
   error signal labels. These labels are diagnostic hints, not proof of cause;
   no transcript, marker value, error text or credential is exported. Marker
-  matching and pass criteria are unchanged by diagnostic collection.
+  matching accepts ANSI styling and whitespace wrapping; the same normalized
+  check rejects prompts containing their expected marker, preventing echo-based
+  completion. Marker instructions request a standalone line. These are only turn
+  checkpoints: the independent API and terminal success oracles remain unchanged.
 - Marker strings are turn-accounting checkpoints, never the success oracle.
   API-visible messages, actor/run/thread correlation, response state, per-actor
   inboxes, negative claims, observer rights and view state are asserted separately.

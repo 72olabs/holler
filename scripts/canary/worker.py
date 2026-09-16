@@ -94,6 +94,8 @@ def terminal_wait_diagnostic(output: bytes, marker: str, *, client_running: bool
         "rate-limit": ("You've hit your limit", "rate_limit_error", "Rate limit"),
         "api-error": ("API Error:", "overloaded_error"),
         "tool-error": ("Error executing tool", "MCP error"),
+        "hook-review": ("Hooks need review",),
+        "reconnecting": ("Reconnecting", "Re-connecting"),
     }
     return {
         "output_bytes": len(output), "client_running": client_running,
@@ -104,6 +106,13 @@ def terminal_wait_diagnostic(output: bytes, marker: str, *, client_running: bool
         "signals": sorted(label for label, values in signatures.items()
                           if any(value.casefold() in normalized.casefold() for value in values)),
     }
+
+
+def terminal_marker_seen(output: bytes, marker: str) -> bool:
+    if marker.encode("utf-8") in output:
+        return True
+    normalized = ANSI_ESCAPE.sub("", output.decode("utf-8", errors="replace"))
+    return marker in re.sub(r"\s+", "", normalized)
 
 
 def approved_fixture_policy(original: bytes) -> bytes:
@@ -434,7 +443,7 @@ def marker_instruction(marker: str) -> str:
     if len(parts) < 2 or any(not part for part in parts):
         raise ValueError("markers must contain at least two non-empty underscore-separated tokens")
     quoted = ", ".join(repr(part) for part in parts)
-    return f"the marker formed by joining these tokens with underscores: {quoted}"
+    return f"the marker on its own line formed by joining these tokens with underscores: {quoted}"
 
 
 def lifecycle_evidence_complete(events: object, *, actor: str, run_id: str) -> bool:
@@ -733,7 +742,7 @@ class PtyProcess:
         raise CanaryFailure("interactive client input prompt did not become ready")
 
     def submit(self, prompt: str, *, marker: str, timeout: float) -> None:
-        if marker in prompt:
+        if terminal_marker_seen(prompt.encode("utf-8"), marker):
             raise CanaryFailure("interactive prompt contains its expected output marker")
         after = self.checkpoint()
         self.send(prompt)
@@ -742,21 +751,22 @@ class PtyProcess:
         self.wait_for(marker, timeout, after=after)
 
     def wait_for(self, marker: str, timeout: float, *, after: int = 0) -> None:
-        deadline = time.monotonic() + timeout
-        marker_bytes = marker.encode("utf-8")
+        started = time.monotonic()
+        deadline = started + timeout
         while time.monotonic() < deadline:
-            if marker_bytes in self.buffer[after:]:
+            if terminal_marker_seen(bytes(self.buffer[after:]), marker):
                 return
             if self.process.poll() is not None:
-                raise self._marker_failure(marker, after, exited=True)
+                raise self._marker_failure(marker, after, exited=True, started=started)
             self._read_available(min(0.25, deadline - time.monotonic()))
-        raise self._marker_failure(marker, after, exited=self.process.poll() is not None)
+        raise self._marker_failure(marker, after, exited=self.process.poll() is not None, started=started)
 
-    def _marker_failure(self, marker: str, after: int, *, exited: bool) -> CanaryFailure:
+    def _marker_failure(self, marker: str, after: int, *, exited: bool, started: float) -> CanaryFailure:
         error = CanaryFailure("interactive client marker not observed",
                               code="terminal-client-exited" if exited else "terminal-marker-timeout")
         error.terminal_diagnostic = terminal_wait_diagnostic(
             bytes(self.buffer[after:]), marker, client_running=not exited)
+        error.terminal_diagnostic["elapsed_seconds"] = round(time.monotonic() - started, 3)
         return error
 
     def _read_available(self, timeout: float) -> None:
