@@ -1,6 +1,6 @@
 # Holler 0.8.0
 
-Agent-focused release candidate — not yet published. Managed conversations
+Agent-focused release. Managed conversations
 remain off unless explicitly enabled with `--conversations`. The human-facing
 Studio release is separate and does not gate this agent release on UI acceptance.
 
@@ -25,7 +25,7 @@ Studio release is separate and does not gate this agent release on UI acceptance
 
 The binary still contains the experimental local Studio, disabled unless
 `--human-listen` is explicitly configured. Enabling agent conversations does not
-start Studio or open a browser listener. This candidate does not claim Studio
+start Studio or open a browser listener. This release does not claim Studio
 usability certification or include the redesigned UI. Phone and desktop clients,
 remote access and a Pro paywall are not included.
 
@@ -37,9 +37,9 @@ remote access and a Pro paywall are not included.
   operator policy review/reauthorization and a fresh session. Source setup
   regenerates the matching policy with backups; no running installation is
   automatically changed by this implementation.
-- Feature-checkpoint canaries and deterministic CI have passed. Publishing still
-  requires a fresh release-tier live pass against the release candidate, version
-  and package verification, and distribution verification. Studio human
+- Release gates require a fresh release-tier live pass and managed-conversation
+  canaries against the release candidate, deterministic CI, matching versions,
+  package verification and distribution verification. Studio human
   acceptance belongs to the separate human release; prototype review is not
   product acceptance. Security and regression checks for the bundled gateway
   remain required even while its UI is experimental.
