@@ -1,6 +1,8 @@
 # Managed conversation canary plan
 
-These are opt-in feature-checkpoint tests, not v0.7.4 release certification.
+These are opt-in feature tests. For the agent-focused 0.8.0 release, rerun them
+against the final candidate in addition to the standard release tier; historical
+checkpoint passes alone are not release certification.
 Use the same committed harness and pinned subscription models as the built-in
 canaries. The source must be committed on a local topic branch; no push is
 required. Scenario definitions bind the managed daemon, loopback gateway,

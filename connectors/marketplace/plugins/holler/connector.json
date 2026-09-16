@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "connector": "holler",
-  "connector_version": "0.7.4",
+  "connector_version": "0.8.0",
   "protocol_version": 1,
   "harness": "codex",
   "plugin_name": "holler",
@@ -21,7 +21,7 @@
     "skills/holler/SKILL.md",
     "skills/holler-setup/SKILL.md"
   ],
-  "package_hash": "sha256:1cd216838b8ea4b6dfab1f66b0953ad3c4baa4579eb56b565032df81bd82ba56",
+  "package_hash": "sha256:f209cea8525ec36fea1a499cb0b98ae52e55c1f576735b8e598a1c4b4389d638",
   "tool_surface_hash": "sha256:8e0c32f1f8418d63efd0c1c9e772eb27d0c7ab1d9b929931f4d4a213418ead2f",
   "mcp_server_name": "holler",
   "tools": [

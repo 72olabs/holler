@@ -459,7 +459,9 @@ what it is not, yet:
   socket are the trust boundary. Multi-user and multi-node security come later.
 - **Legacy DMs by default.** The legacy `channel_id` is still only a label.
   The unreleased, opt-in [managed conversation slice](CONVERSATIONS.md) adds
-  membership-enforced private channels and local human observation. Public
+  membership-enforced private channels. Local human observation is available
+  only through the separately enabled, experimental Studio; its redesign and
+  human acceptance belong to a later human-facing release. Public
   broadcast, mobile access and multi-owner transport remain future work.
 - **Peer messages are untrusted input.** They never grant tool, filesystem,
   credential, spend, or release authority.

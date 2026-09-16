@@ -1,10 +1,17 @@
 # Managed conversations and local Studio
 
-Unreleased, opt-in implementation. Building this source does not change the
-running daemon, installed connectors or operator policies. Public channels,
-cross-owner/network transport, group DMs, controlled sharing to new readers and
-non-designated response modes remain deferred. A live builder/reviewer/human
-canary is still required for release certification; automated tests simulate H.
+Opt-in implementation, targeting the agent-focused 0.8.0 release. Building this
+source does not change the running daemon, installed connectors or operator
+policies. Public channels, cross-owner/network transport, group DMs,
+controlled sharing to new readers and
+non-designated response modes remain deferred. Agent release certification needs
+the release-tier live canaries; real-human Studio acceptance belongs to a separate
+human-facing release after UI redesign. Automated human tests simulate H.
+
+`--conversations` enables agent capabilities without starting a human listener.
+Studio remains bundled but experimental and off unless `--human-listen` is
+explicitly configured. Its security and regression tests remain release checks;
+the agent release does not claim human usability certification.
 
 ## Contract and defaults
 
