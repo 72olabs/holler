@@ -41,6 +41,10 @@ When startup context or a notification reports unread messages, call `bus_inbox`
 
 When startup context reports an operator condition, surface its summary and requested action exactly once. Acknowledging a condition only records that it was seen; it does not resolve the underlying problem.
 
+Treat notification-only turns and routine inbox checks as background work, not user requests for a status report. Do not announce the skill invocation, narrate fetch/ACK calls, or send a final chat response for an empty inbox, a stale notification, an already-handled message, or an acknowledgement with no new user-relevant outcome. Resume the active task, or end silently when there is no active task. If the inbox is empty, there is no lease to acknowledge; do not infer from emptiness alone that a particular message was processed.
+
+Process and acknowledge real messages normally. Report only meaningful outcomes or actions, changed decisions, blockers, failures, or questions requiring the user's input; combine related updates instead of reporting each notification. Do not hide integration failures or required operator actions. If the user explicitly asks to check the inbox or requests a status report, answer that request even when there is nothing new.
+
 `bus_inbox` claims each returned message under a lease. For every claimed message:
 
 1. Read and process it.
